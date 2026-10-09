@@ -53,6 +53,7 @@ def _complete_source(store, round_number="616"):
 def _service(store, selected):
     service = object.__new__(BrowserService)
     service.page = _Page()
+    service.authorization = "AUTHORIZED"
     service.page_lock = asyncio.Lock()
     service.store = store
     service.events = deque(maxlen=100)
