@@ -53,6 +53,7 @@ def _complete_source(store, round_number="616"):
 def _service(store, selected):
     service = object.__new__(BrowserService)
     service.page = _Page()
+    service.authorization = "AUTHORIZED"
     service.page_lock = asyncio.Lock()
     service.store = store
     service.events = deque(maxlen=100)
@@ -108,7 +109,7 @@ def test_observer_links_forecast_to_the_next_row_it_selects_not_round_adjacency(
     asyncio.run(run())
 
 
-def test_observer_skips_finished_game_and_breaks_forecast_chain_before_later_round(tmp_path, monkeypatch):
+def test_observer_does_not_jump_over_finished_expected_round(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
@@ -127,14 +128,17 @@ def test_observer_skips_finished_game_and_breaks_forecast_chain_before_later_rou
 
         await service._observe_iteration({"source"}, {})
 
-        assert [game.game_id for game in selected] == ["target"]
+        assert selected == []
         assert not store.pending_prediction_targets()
-        assert store.get("source")["outgoing_prediction_result"] == "UNKNOWN"
+        source = store.get("source")
+        assert "outgoing_prediction_result" not in source
+        assert service._active_chain_source_id == "source"
+        assert "Ожидаем раздачу № 617" in service.observation_diagnostic
 
     asyncio.run(run())
 
 
-def test_observer_breaks_chain_when_round_gap_cannot_be_restored(tmp_path, monkeypatch):
+def test_observer_waits_when_round_gap_cannot_be_restored(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
@@ -151,16 +155,17 @@ def test_observer_breaks_chain_when_round_gap_cannot_be_restored(tmp_path, monke
 
         await service._observe_iteration({"source"}, {})
 
-        assert [game.game_id for game in selected] == ["round-707"]
+        assert selected == []
         source = store.get("source")
-        assert source["outgoing_prediction_result"] == "UNKNOWN"
-        assert source["outgoing_target_game_id"] is None
+        assert "outgoing_prediction_result" not in source
         assert not store.pending_prediction_targets()
+        assert service._active_chain_source_id == "source"
+        assert "Ожидаем раздачу № 706" in service.observation_diagnostic
 
     asyncio.run(run())
 
 
-def test_candidate_that_starts_before_opening_is_replaced_by_next_upcoming(tmp_path, monkeypatch):
+def test_candidate_that_starts_during_handoff_is_still_observed(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
@@ -183,9 +188,112 @@ def test_candidate_that_starts_before_opening_is_replaced_by_next_upcoming(tmp_p
 
         await service._observe_iteration(set(), {})
 
-        assert [game.game_id for game in selected] == ["second"]
+        assert [game.game_id for game in selected] == ["first"]
         assert service.page.url == LIST_URL
-        assert any("изменилась перед открытием" in event["message"] for event in service.events)
+        assert [game.game_id for game in service._queued_games] == ["second"]
+        assert not any("изменилась перед открытием" in event["message"] for event in service.events)
+
+    asyncio.run(run())
+
+
+def test_reserved_next_game_is_opened_without_reloading_list(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
+        ))
+        store = ObservationStore(tmp_path / "reserved-next.sqlite3")
+        _complete_source(store, "901")
+        selected = []
+        service = _service(store, selected)
+        service.page.url = f"{TABLE}/current-player-banker"
+        next_game = Game(
+            "next", f"{TABLE}/next-player-banker", "00:00", "902", "UPCOMING", 1,
+            player_score="0", banker_score="0", is_countdown_to_start=True,
+        )
+        service._queued_games = [next_game]
+
+        async def must_not_read_list():
+            raise AssertionError("reserved transition must not reload/read the game list")
+
+        service._read_game_list_snapshot = must_not_read_list
+
+        await service._observe_iteration({"source"}, {})
+
+        assert [game.game_id for game in selected] == ["next"]
+        assert store.pending_prediction_targets() == {"next"}
+        assert store.get("source")["outgoing_target_game_id"] == "next"
+        assert service.page.url == f"{TABLE}/current-player-banker"
+        assert any(
+            "повторная загрузка списка не требуется" in event["message"]
+            for event in service.events
+        )
+
+    asyncio.run(run())
+
+
+def test_expected_round_that_is_already_started_is_selected_before_later_upcoming(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
+        ))
+        store = ObservationStore(tmp_path / "expected-started.sqlite3")
+        _complete_source(store, "616")
+        selected = []
+        service = _service(store, selected)
+        expected = Game(
+            "expected-617", f"{TABLE}/expected-617-player-banker", "00:00", "617", "STARTED", 0,
+            player_score="0", banker_score="0", started=True,
+        )
+        later = Game(
+            "later-618", f"{TABLE}/later-618-player-banker", "00:15", "618", "UPCOMING", 1,
+            player_score="0", banker_score="0", is_countdown_to_start=True,
+        )
+
+        async def read_snapshot():
+            return [expected, later]
+
+        service._read_game_list_snapshot = read_snapshot
+
+        await service._observe_iteration({"source"}, {})
+
+        assert [game.game_id for game in selected] == ["expected-617"]
+        assert store.pending_prediction_targets() == {"expected-617"}
+        assert store.get("source")["outgoing_target_round_number"] == "617"
+        assert all(game.game_id != "later-618" for game in selected)
+
+    asyncio.run(run())
+
+
+def test_deferred_reserved_round_blocks_all_later_reserved_rounds(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
+        ))
+        store = ObservationStore(tmp_path / "deferred-reserved.sqlite3")
+        selected = []
+        service = _service(store, selected)
+        service._active_chain_source_id = None
+        first = Game(
+            "round-902", f"{TABLE}/round-902-player-banker", "00:00", "902", "UPCOMING", 1,
+            player_score="0", banker_score="0", is_countdown_to_start=True,
+        )
+        later = Game(
+            "round-903", f"{TABLE}/round-903-player-banker", "00:15", "903", "UPCOMING", 2,
+            player_score="0", banker_score="0", is_countdown_to_start=True,
+        )
+        service._queued_games = [first, later]
+
+        async def must_not_read_list():
+            raise AssertionError("deferred reserved game must block later games and list reload")
+
+        service._read_game_list_snapshot = must_not_read_list
+        due = asyncio.get_running_loop().time() + 60
+
+        await service._observe_iteration(set(), {"round-902": due})
+
+        assert selected == []
+        assert [game.game_id for game in service._queued_games] == ["round-902", "round-903"]
+        assert "более поздние раздачи не открываем" in service.observation_diagnostic
 
     asyncio.run(run())
 

@@ -61,9 +61,14 @@ and later real cards can be merged without erasing previously recorded cards.
 The UI's DOM details show the game URL, frame count, selector counts, cause,
 and a short relevant DOM fragment for diagnosis.
 
-The planner queues every visible game in captured DOM order and reuses that
-queue across direct game URLs. Finished rows without a saved final hand are
-opened for recovery rather than silently skipped. Card DOM snapshots are polled
+The planner selects the first explicitly UPCOMING 0:0 game in captured DOM
+order and reserves the following UPCOMING rows before leaving the list. After a
+Player hand is finalized it opens the exact next reserved game directly, without
+reloading the list; a reserved game remains the target if its countdown reaches
+STARTED during the handoff. A numeric round gap blocks opening the later row and
+returns the observer to the list to wait for the missing round, so the chain
+cannot jump from round 1 to round 3. Finished rows without a saved final hand are
+never used as a substitute target. Card DOM snapshots are polled
 every 100–250 ms (`CARD_POLL_SECONDS`); the old fixed `GAME_PAGE_WAIT_SECONDS`
 is no longer applied. Three complete cards in one atomic Player snapshot are
 final immediately, without waiting for the rest of the game. Two cards are final
@@ -85,10 +90,9 @@ Completed, finally reverified two- or three-card hands are transformed by the
 ordered 16-entry map in `backend/app/suit_calculator.py`. The rank is stored for
 display but does not participate in the calculation. After a hand is completed,
 the observer keeps an in-memory chain source and links its forecast to the exact
-next scheduled game. A numeric round gap first triggers a lookup in the visible
-queue and stored incomplete games; if the missing round cannot be recovered,
-the old chain is marked UNKNOWN before a later round is opened. The next
-completed hand then starts a fresh chain. `WIN`/`LOSE` is checked against the
+next scheduled game. A numeric round gap is a hard sequencing guard: a later
+round is not opened until the expected round is found, so a forecast is never
+silently transferred across a missing game. `WIN`/`LOSE` is checked against the
 confirmed final Player hand, not a timer or an arbitrary later row. A target
 with a persisted pending forecast is reopened after a process restart so the
 exact target can be confirmed.

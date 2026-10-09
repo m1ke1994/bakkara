@@ -964,13 +964,130 @@ class BrowserService:
             self.event("WARNING", f"Round number was not found for game {game.game_id}; saving it as empty.")
         await self._scan_selected_game(game, previous_cards, processed_ids, retry_after)
 
+    async def _open_planned_game(
+        self,
+        game: Game,
+        processed_ids: set[str],
+        retry_after: dict[str, float],
+    ) -> None:
+        """Open exactly the planned next game; never jump over a numbered round."""
+        assert self.page is not None
+        source_id = getattr(self, "_active_chain_source_id", None)
+        origin_source_id = source_id
+        if source_id:
+            source_record = await asyncio.to_thread(self.store.get, source_id)
+            source_text = str((source_record or {}).get("round_number") or "")
+            target_text = game.round_number.strip()
+            source_round = int(source_text) if source_text.isdigit() else None
+            target_round = int(target_text) if target_text.isdigit() else None
+            if source_round is not None and target_round is not None and target_round > source_round + 1:
+                expected = str(source_round + 1)
+                self._queued_games.clear()
+                self.observation_status = "WAITING_FOR_GAME"
+                self.observation_diagnostic = (
+                    f"Ожидаем раздачу № {expected}; раздачу № {target_text} не открываем, "
+                    "чтобы не пропустить игру в цепочке."
+                )
+                self.event(
+                    "WARNING",
+                    f"Защита последовательности: после № {source_round} ожидается № {expected}; "
+                    f"№ {target_text} не открываем и возвращаемся к списку.",
+                )
+                await self._recover_to_game_list()
+                await asyncio.sleep(max(settings.observation_poll_seconds, 0.1))
+                return
+            transition = await asyncio.to_thread(self.store.link_active_transition, source_id, game)
+            if transition:
+                self.event(
+                    "INFO" if transition["prediction_result"] == "PENDING" else "WARNING",
+                    f"Прогноз связан с раздачей № {game.round_number or game.game_id}: "
+                    f"{transition['prediction_result']}.",
+                )
+            else:
+                await asyncio.to_thread(
+                    self.store.record_unresolved_transition,
+                    source_id,
+                    "Не удалось связать прогноз с подтверждённой следующей игрой.",
+                )
+                self.event("WARNING", "Цепочка прогноза прервана: следующая игра не связана однозначно.")
+            self._active_chain_source_id = None
+
+        if origin_source_id and origin_source_id != game.game_id:
+            self._set_lifecycle_state(origin_source_id, "NEXT_GAME", f"target_game_id={game.game_id}")
+        self._set_lifecycle_state(game.game_id, "SELECTED", f"dom_position={game.position + 1}")
+        existing = await asyncio.to_thread(self.store.get, game.game_id)
+        previous_cards = [
+            {**card, "position": card.get("position", index + 1)}
+            for index, card in enumerate((existing or {}).get("cards", []))
+        ]
+        self.current_observation = {
+            "game_id": game.game_id, "url": game.url, "position": game.position + 1,
+            "round_number": game.round_number, "round_number_diagnostic": game.round_number_diagnostic,
+            "time": game.time, "site_status": game.status, "status_text": game.status_text,
+            "player_score": game.player_score, "banker_score": game.banker_score,
+            "cards": previous_cards, "cards_count": len(previous_cards), "pending_card_slots": 0,
+            "lifecycle_state": "SELECTED",
+            "scan_result": "SCANNING", "finished_confirmed": False, "player_hand_final": False,
+            "final_snapshot_reverified": None, "reason": "Игра выбрана планировщиком; переходим по URL.",
+            "diagnostics": None,
+        }
+        incoming = await asyncio.to_thread(self.store.incoming_prediction_for, game.game_id)
+        if incoming:
+            self.current_observation.update({
+                "predicted_suit": incoming.get("predicted_suit"),
+                "incoming_prediction": incoming.get("incoming_prediction"),
+                "prediction_result": incoming.get("prediction_result"),
+                "prediction_reason": incoming.get("prediction_reason"),
+            })
+        self.state_version = getattr(self, "state_version", 0) + 1
+        self.observation_status = "WAITING_FOR_GAME"
+        self.observation_diagnostic = (
+            f"Выбрана раздача № {game.round_number or 'не указана'} (ID {game.game_id})."
+        )
+        self.event(
+            "INFO",
+            f"Раздача № {game.round_number or '—'} выбрана для последовательного наблюдения.",
+        )
+        if not game.round_number:
+            self.event(
+                "WARNING",
+                f"Номер раздачи не найден для game_id={game.game_id}; ID не используется вместо номера.",
+            )
+        await self._scan_selected_game(game, previous_cards, processed_ids, retry_after)
+
     async def _observe_iteration(self, processed_ids: set[str], retry_after: dict[str, float]) -> None:
         """Select only a fresh, explicitly upcoming row and verify it just before navigation."""
         assert self.page is not None
         loop = asyncio.get_running_loop()
-        # A queue can become stale while the chosen row starts or finishes.
-        # Always rebuild from the live list on every selection pass.
-        self._queued_games = []
+        now = loop.time()
+        deferred = {game_id for game_id, due in retry_after.items() if due > now}
+
+        # Games captured as UPCOMING are reserved in DOM order before we leave
+        # the list. After the current Player hand is final we can open the exact
+        # next reserved game directly, without reloading the list and risking a
+        # 1 -> 3 jump while round 2 changes to STARTED.
+        while self._queued_games:
+            reserved = self._queued_games.pop(0)
+            if reserved.game_id in processed_ids:
+                continue
+            if reserved.game_id in deferred:
+                self._queued_games.insert(0, reserved)
+                self.observation_status = "WAITING_FOR_GAME"
+                self.observation_diagnostic = (
+                    f"Повтор раздачи № {reserved.round_number or reserved.game_id} временно отложен; "
+                    "более поздние раздачи не открываем."
+                )
+                await asyncio.sleep(max(settings.observation_poll_seconds, 0.25))
+                return
+            self.observation_phase = "переход к зарезервированной следующей игре"
+            self.event(
+                "INFO",
+                f"Используем зарезервированную следующую раздачу № "
+                f"{reserved.round_number or reserved.game_id}; повторная загрузка списка не требуется.",
+            )
+            await self._open_planned_game(reserved, processed_ids, retry_after)
+            return
+
         all_games: list[Game] = []
         pending_targets = await asyncio.to_thread(self.store.pending_prediction_targets)
         for target_id in pending_targets & processed_ids:
@@ -982,7 +1099,10 @@ class BrowserService:
         async with self.page_lock:
             if not await self._probe_observation_auth_locked():
                 return
-            await self.page.goto(settings.game_list_url, wait_until="domcontentloaded", timeout=30_000)
+            list_path = urlparse(settings.game_list_url).path.rstrip("/")
+            current_path = urlparse(self.page.url).path.rstrip("/")
+            if current_path != list_path:
+                await self.page.goto(settings.game_list_url, wait_until="domcontentloaded", timeout=30_000)
             await self.page.locator("li.dashboard-champ-body").first.wait_for(timeout=6_000)
             try:
                 await self.page.wait_for_function(
@@ -1060,7 +1180,7 @@ class BrowserService:
                 "is_countdown_to_start": item.is_countdown_to_start,
                 "score": f"{item.player_score or '—'} : {item.banker_score or '—'}", "reason": reason,
             })
-            if item.game_id in pending_targets and state != "UPCOMING":
+            if item.game_id in pending_targets and state not in {"UPCOMING", "STARTED"}:
                 await asyncio.to_thread(
                     self.store.break_incoming_transition, item.game_id,
                     f"Следующая игра пропущена: состояние {state}; прогноз через неё не переносится.",
@@ -1088,8 +1208,34 @@ class BrowserService:
         excluded_ids = set(processed_ids) | deferred
         invalidated_ids: set[str] = set()
         game: Game | None = None
+
+        expected_round: str | None = None
+        active_source_id = getattr(self, "_active_chain_source_id", None)
+        if active_source_id:
+            source_record = await asyncio.to_thread(self.store.get, active_source_id)
+            source_round_text = str((source_record or {}).get("round_number") or "")
+            if source_round_text.isdigit():
+                expected_round = str(int(source_round_text) + 1)
+
         while True:
-            candidate = choose_next_game(all_games, excluded_ids | invalidated_ids)
+            expected_candidate = next((
+                item for item in sorted(all_games, key=lambda value: value.position)
+                if expected_round
+                and item.round_number.strip() == expected_round
+                and item.game_id not in excluded_ids
+                and item.game_id not in invalidated_ids
+                and classify_game(item) in {"UPCOMING", "STARTED"}
+            ), None)
+            pending_candidate = next((
+                item for item in sorted(all_games, key=lambda value: value.position)
+                if item.game_id in pending_targets
+                and item.game_id not in excluded_ids
+                and item.game_id not in invalidated_ids
+                and classify_game(item) in {"UPCOMING", "STARTED"}
+            ), None)
+            candidate = expected_candidate or pending_candidate or choose_next_game(
+                all_games, excluded_ids | invalidated_ids
+            )
             if candidate is None:
                 break
             async with self.page_lock:
@@ -1100,18 +1246,21 @@ class BrowserService:
                 game = observed
                 all_games = fresh_games
                 break
+
+            # The row was already selected while it was explicitly UPCOMING 0:0.
+            # Do not replace it with a later row just because the countdown
+            # crossed zero, the round label rendered late, or the list changed
+            # during this short handoff. Its captured URL is the authoritative
+            # target and scanning that exact game is safer than a 1 -> 3 jump.
+            game = observed if observed is not None else candidate
+            all_games = fresh_games or all_games
             self.event(
                 "WARNING",
                 f"Раздача № {candidate.round_number or 'не указана'} изменилась перед открытием "
-                f"(состояние {classify_game(observed) if observed else 'строка отсутствует'}); пропускаем и перечитываем список.",
+                f"(состояние {classify_game(observed) if observed else 'строка отсутствует'}); "
+                "сохраняем выбранную раздачу и не переключаемся на следующую.",
             )
-            invalidated_ids.add(candidate.game_id)
-            all_games = fresh_games
-            for target_id in pending_targets & invalidated_ids:
-                await asyncio.to_thread(
-                    self.store.break_incoming_transition, target_id,
-                    "Целевая игра изменила состояние до открытия; прогнозная цепочка прервана.",
-                )
+            break
         self.event("INFO", f"Проверка кандидата завершена за {(loop.time()-choose_started)*1000:.1f} мс.")
         if game is None:
             self._queued_games = []
@@ -1123,56 +1272,27 @@ class BrowserService:
                 self._last_no_game_wait_signature = signature
             await asyncio.sleep(max(settings.observation_poll_seconds, 0.25))
             return
-        source_id = getattr(self, "_active_chain_source_id", None)
-        origin_source_id = source_id
-        if source_id:
-            source_record = await asyncio.to_thread(self.store.get, source_id)
-            source_text = str((source_record or {}).get("round_number") or "")
-            target_text = game.round_number.strip()
-            source_round = int(source_text) if source_text.isdigit() else None
-            target_round = int(target_text) if target_text.isdigit() else None
-            if source_round is not None and target_round is not None and target_round > source_round + 1:
-                expected = str(source_round + 1)
-                await asyncio.to_thread(self.store.record_unresolved_transition, source_id,
-                    f"Раздача № {expected} отсутствует среди UPCOMING-игр; цепочка прогноза закрыта.")
-                self.event("WARNING", f"Пропуск № {expected}: нет доступной игры до начала; прогноз через неё не переносится.")
-                self._active_chain_source_id = None
-                source_id = None
-            if source_id:
-                transition = await asyncio.to_thread(self.store.link_active_transition, source_id, game)
-                if transition:
-                    self.event("INFO" if transition["prediction_result"] == "PENDING" else "WARNING",
-                               f"Прогноз связан с раздачей № {game.round_number or game.game_id}: {transition['prediction_result']}.")
-                else:
-                    await asyncio.to_thread(self.store.record_unresolved_transition, source_id,
-                        "Не удалось связать прогноз с подтверждённой следующей игрой.")
-                    self.event("WARNING", "Цепочка прогноза прервана: следующая игра не связана однозначно.")
-                self._active_chain_source_id = None
-
-        if origin_source_id and origin_source_id != game.game_id:
-            self._set_lifecycle_state(origin_source_id, "NEXT_GAME", f"target_game_id={game.game_id}")
-        self._set_lifecycle_state(game.game_id, "SELECTED", f"dom_position={game.position + 1}")
-        existing = await asyncio.to_thread(self.store.get, game.game_id)
-        previous_cards = [{**card, "position": card.get("position", index + 1)}
-                          for index, card in enumerate((existing or {}).get("cards", []))]
-        self.current_observation = {
-            "game_id": game.game_id, "url": game.url, "position": game.position + 1,
-            "round_number": game.round_number, "round_number_diagnostic": game.round_number_diagnostic,
-            "time": game.time, "site_status": game.status, "status_text": game.status_text,
-            "player_score": game.player_score, "banker_score": game.banker_score,
-            "cards": previous_cards, "cards_count": len(previous_cards), "pending_card_slots": 0,
-            "lifecycle_state": "SELECTED",
-            "scan_result": "SCANNING", "finished_confirmed": False, "player_hand_final": False,
-            "final_snapshot_reverified": None, "reason": "Игра выбрана планировщиком; переходим по URL.",
-            "diagnostics": None,
-        }
-        self.state_version = getattr(self, "state_version", 0) + 1
-        self.observation_status = "WAITING_FOR_GAME"
-        self.observation_diagnostic = f"Выбрана раздача № {game.round_number or 'не указана'} (ID {game.game_id})."
-        self.event("INFO", f"Раздача № {game.round_number or '—'} выбрана после повторной проверки непосредственно перед открытием.")
-        if not game.round_number:
-            self.event("WARNING", f"Номер раздачи не найден для game_id={game.game_id}; ID не используется вместо номера.")
-        await self._scan_selected_game(game, previous_cards, processed_ids, retry_after)
+        # Reserve only later rows that are still explicitly UPCOMING. Stop
+        # at the first unhandled non-upcoming row so the queue can never jump
+        # over a game that belongs between two reserved entries.
+        planned: list[Game] = []
+        for item in sorted(all_games, key=lambda value: value.position):
+            if item.position <= game.position or item.game_id in excluded_ids:
+                continue
+            state = classify_game(item)
+            if state == "UPCOMING":
+                planned.append(item)
+                continue
+            if item.game_id not in processed_ids:
+                break
+        self._queued_games = planned
+        if planned:
+            self.event(
+                "INFO",
+                "Зарезервированы следующие раздачи без перезагрузки списка: "
+                + ", ".join(item.round_number or item.game_id for item in planned),
+            )
+        await self._open_planned_game(game, processed_ids, retry_after)
 
     async def _scan_selected_game_legacy(
         self,
@@ -1432,6 +1552,8 @@ class BrowserService:
             finally:
                 self._active_chain_source_id = None
                 retry_after[game.game_id] = loop.time() + max(settings.incomplete_retry_seconds, 5)
+                if not any(item.game_id == game.game_id for item in self._queued_games):
+                    self._queued_games.insert(0, game)
                 self.observation_status = "ERROR"
                 self.observation_diagnostic = reason
                 self.event("ERROR", reason)
@@ -1484,6 +1606,8 @@ class BrowserService:
             while True:
                 if getattr(self, "authorization", "AUTHORIZED") == "AUTH_LOST":
                     self._active_chain_source_id = None
+                    if not any(item.game_id == game.game_id for item in self._queued_games):
+                        self._queued_games.insert(0, game)
                     return
                 async with self.page_lock:
                     diagnostics = await self._inspect_game_dom(settings.player_name_text, settings.banker_name_text)
