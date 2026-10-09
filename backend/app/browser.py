@@ -1208,7 +1208,24 @@ class BrowserService:
         excluded_ids = set(processed_ids) | deferred
         invalidated_ids: set[str] = set()
         game: Game | None = None
+
+        expected_round: str | None = None
+        active_source_id = getattr(self, "_active_chain_source_id", None)
+        if active_source_id:
+            source_record = await asyncio.to_thread(self.store.get, active_source_id)
+            source_round_text = str((source_record or {}).get("round_number") or "")
+            if source_round_text.isdigit():
+                expected_round = str(int(source_round_text) + 1)
+
         while True:
+            expected_candidate = next((
+                item for item in sorted(all_games, key=lambda value: value.position)
+                if expected_round
+                and item.round_number.strip() == expected_round
+                and item.game_id not in excluded_ids
+                and item.game_id not in invalidated_ids
+                and classify_game(item) in {"UPCOMING", "STARTED"}
+            ), None)
             pending_candidate = next((
                 item for item in sorted(all_games, key=lambda value: value.position)
                 if item.game_id in pending_targets
@@ -1216,7 +1233,7 @@ class BrowserService:
                 and item.game_id not in invalidated_ids
                 and classify_game(item) in {"UPCOMING", "STARTED"}
             ), None)
-            candidate = pending_candidate or choose_next_game(
+            candidate = expected_candidate or pending_candidate or choose_next_game(
                 all_games, excluded_ids | invalidated_ids
             )
             if candidate is None:
