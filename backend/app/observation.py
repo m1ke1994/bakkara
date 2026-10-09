@@ -134,11 +134,18 @@ def _explicit_timer_state(evidence: str, marker: str) -> bool:
 
 
 def is_same_upcoming_game(selected: Game, observed: Game) -> bool:
-    """Require the same ID, URL, round and a still-upcoming DOM state before goto."""
-    return (selected.game_id == observed.game_id
-            and selected.url == observed.url
-            and selected.round_number == observed.round_number
-            and classify_game(observed) == "UPCOMING")
+    """Keep the exact selected future game even if it starts during the handoff."""
+    same_round = (
+        not selected.round_number
+        or not observed.round_number
+        or selected.round_number == observed.round_number
+    )
+    return (
+        selected.game_id == observed.game_id
+        and selected.url == observed.url
+        and same_round
+        and classify_game(observed) in {"UPCOMING", "STARTED"}
+    )
 
 
 class _Node:
