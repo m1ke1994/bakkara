@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 
 import uvicorn
@@ -30,31 +31,41 @@ async def health():
 
 @app.get("/api/state")
 async def state():
-    return browser_service.snapshot()
+    return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.post("/api/browser/start")
 async def start_browser():
     await browser_service.start()
-    return browser_service.snapshot()
+    return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.post("/api/browser/stop")
 async def stop_browser():
     await browser_service.stop()
-    return browser_service.snapshot()
+    return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.post("/api/observation/start")
 async def start_observation():
     await browser_service.start_observation()
-    return browser_service.snapshot()
+    return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.post("/api/observation/stop")
 async def stop_observation():
     await browser_service.stop_observation()
-    return browser_service.snapshot()
+    return await asyncio.to_thread(browser_service.snapshot)
+
+
+@app.delete("/api/observations")
+async def clear_observations():
+    return await browser_service.clear_history()
+
+
+@app.delete("/api/logs")
+async def clear_logs():
+    return browser_service.clear_logs()
 
 
 if __name__ == "__main__":
