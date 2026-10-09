@@ -1068,8 +1068,17 @@ class BrowserService:
         # 1 -> 3 jump while round 2 changes to STARTED.
         while self._queued_games:
             reserved = self._queued_games.pop(0)
-            if reserved.game_id in processed_ids or reserved.game_id in deferred:
+            if reserved.game_id in processed_ids:
                 continue
+            if reserved.game_id in deferred:
+                self._queued_games.insert(0, reserved)
+                self.observation_status = "WAITING_FOR_GAME"
+                self.observation_diagnostic = (
+                    f"Повтор раздачи № {reserved.round_number or reserved.game_id} временно отложен; "
+                    "более поздние раздачи не открываем."
+                )
+                await asyncio.sleep(max(settings.observation_poll_seconds, 0.25))
+                return
             self.observation_phase = "переход к зарезервированной следующей игре"
             self.event(
                 "INFO",
@@ -1220,18 +1229,21 @@ class BrowserService:
                 game = observed
                 all_games = fresh_games
                 break
+
+            # The row was already selected while it was explicitly UPCOMING 0:0.
+            # Do not replace it with a later row just because the countdown
+            # crossed zero, the round label rendered late, or the list changed
+            # during this short handoff. Its captured URL is the authoritative
+            # target and scanning that exact game is safer than a 1 -> 3 jump.
+            game = observed if observed is not None else candidate
+            all_games = fresh_games or all_games
             self.event(
                 "WARNING",
                 f"Раздача № {candidate.round_number or 'не указана'} изменилась перед открытием "
-                f"(состояние {classify_game(observed) if observed else 'строка отсутствует'}); пропускаем и перечитываем список.",
+                f"(состояние {classify_game(observed) if observed else 'строка отсутствует'}); "
+                "сохраняем выбранную раздачу и не переключаемся на следующую.",
             )
-            invalidated_ids.add(candidate.game_id)
-            all_games = fresh_games
-            for target_id in pending_targets & invalidated_ids:
-                await asyncio.to_thread(
-                    self.store.break_incoming_transition, target_id,
-                    "Целевая игра изменила состояние до открытия; прогнозная цепочка прервана.",
-                )
+            break
         self.event("INFO", f"Проверка кандидата завершена за {(loop.time()-choose_started)*1000:.1f} мс.")
         if game is None:
             self._queued_games = []
@@ -1523,6 +1535,8 @@ class BrowserService:
             finally:
                 self._active_chain_source_id = None
                 retry_after[game.game_id] = loop.time() + max(settings.incomplete_retry_seconds, 5)
+                if not any(item.game_id == game.game_id for item in self._queued_games):
+                    self._queued_games.insert(0, game)
                 self.observation_status = "ERROR"
                 self.observation_diagnostic = reason
                 self.event("ERROR", reason)
@@ -1575,6 +1589,8 @@ class BrowserService:
             while True:
                 if getattr(self, "authorization", "AUTHORIZED") == "AUTH_LOST":
                     self._active_chain_source_id = None
+                    if not any(item.game_id == game.game_id for item in self._queued_games):
+                        self._queued_games.insert(0, game)
                     return
                 async with self.page_lock:
                     diagnostics = await self._inspect_game_dom(settings.player_name_text, settings.banker_name_text)
