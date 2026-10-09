@@ -25,6 +25,33 @@ jobs:
         run: python -m pytest -q
       - name: Compile backend Python
         run: python -m compileall -q backend/app
+      - name: Smoke test running FastAPI API
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 > /tmp/bakkara-api.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --silent --fail http://127.0.0.1:8010/api/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          python - <<'PY'
+          import json
+          from urllib.request import urlopen
+          def get(path):
+              with urlopen("http://127.0.0.1:8010" + path, timeout=5) as response:
+                  assert response.status == 200, (path, response.status)
+                  return json.load(response)
+          health = get("/api/health")
+          assert health == {"ok": True}, health
+          state = get("/api/state")
+          assert "observation" in state and "browser" in state, state.keys()
+          print("FastAPI smoke passed: /api/health + /api/state")
+          PY
   frontend:
     runs-on: ubuntu-latest
     steps:
