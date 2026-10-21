@@ -212,6 +212,10 @@ class Cycle18Engine:
                 # be the true N-18 hand, not the eighteenth preceding CSV row.
                 if source_number != ((hand_number - CYCLE) % ROUND_MAX) + 1:
                     continue
+                # A duplicated source round is ambiguous, even if both
+                # copies happened to contain valid Player cards.
+                if physical_counts.get(source_number) != 1:
+                    continue
                 predicted = verified_suit(source)
                 if not predicted:
                     continue
@@ -224,7 +228,9 @@ class Cycle18Engine:
                      now.isoformat()))
             # Once the first 20 final hands are validated, progress stays
             # complete. Later partial hands remain visible as recoverable slots.
-            warmup_count = min(WARMUP, confirmed_max_run)
+            # Show the CURRENT confirmed streak, not all cards ever read
+            # and not the largest historical streak after a new gap.
+            warmup_count = WARMUP if warmup_complete else min(WARMUP, len(confirmed_chain))
             confirmed_warmup_count = warmup_count
 
             # Link each prediction to the exact numbered next hand. Never infer
@@ -263,8 +269,8 @@ class Cycle18Engine:
                     gap = (target_time - anchor_time).total_seconds()
                     if 0 <= gap <= MAX_GAP_SECONDS:
                         matching.append((target_time, target))
-                if matching:
-                    target = min(matching, key=lambda pair: pair[0])[1]
+                if len(matching) == 1:
+                    target = matching[0][1]
                     # If target cards are already finalized when discovered,
                     # this is historical reconstruction, not a live prediction.
                     live = not (target.get("finished_at") or target.get("player_hand_final"))
