@@ -1448,7 +1448,7 @@ class BrowserService:
             finally:
                 self._active_chain_source_id = None
                 retry_after[game.game_id] = loop.time() + max(settings.incomplete_retry_seconds, 5)
-                self.observation_status = "ERROR"
+                self.observation_status = "RECOVERING"
                 self.observation_diagnostic = reason
                 self.event("ERROR", reason)
                 log.exception("Ошибка наблюдения игры %s (%s).", game.game_id, type(exc).__name__)
@@ -1667,6 +1667,33 @@ class BrowserService:
                         self.observation_status = "ERROR"
                         self.observation_diagnostic = "Снимок не сохранён; игра не отмечена обработанной."
                         self.event("ERROR", self.observation_diagnostic)
+                    return
+
+                # A broken/missing card DOM must never freeze the entire
+                # observer. Record the incomplete attempt and continue to the
+                # next readable round; this game remains recoverable on a later
+                # list pass and does not contribute WIN/LOSE or warm-up progress.
+                max_wait = (max(3.0, settings.finished_recovery_timeout_seconds)
+                            if list_finished else
+                            max(5.0, settings.scan_incomplete_timeout_seconds))
+                if loop.time() - started_at >= max_wait:
+                    detail = (
+                        f"Раздача № {game.round_number or game.game_id}: карты Игрока "
+                        f"не подтверждены за {max_wait:g} с. Отмечаем попытку как "
+                        "неполную (не LOSE), продолжаем к следующей игре. "
+                        "Повторное чтение будет доступно позже."
+                    )
+                    self._active_chain_source_id = None
+                    retry_after[game.game_id] = loop.time() + max(
+                        settings.incomplete_retry_seconds, 5)
+                    self.observation_status = "INCOMPLETE"
+                    self.observation_diagnostic = detail
+                    self.current_observation = {
+                        **(self.current_observation or {}),
+                        "scan_result": "SCAN_TIMEOUT", "reason": detail,
+                    }
+                    self.state_version = getattr(self, "state_version", 0) + 1
+                    self.event("WARNING", detail)
                     return
 
                 await asyncio.sleep(poll_seconds)
