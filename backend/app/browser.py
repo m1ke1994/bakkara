@@ -1536,6 +1536,7 @@ class BrowserService:
         countdown_zero_since: float | None = None
         countdown_zero_announced = False
         result_end_announced = False
+        outcome_first_seen_at: float | None = None
         list_finished = game.status == "Завершена" or is_finished_status(game.status_text)
         self.observation_phase = "переход к выбранной игре"
 
@@ -1578,6 +1579,8 @@ class BrowserService:
                 finish_seen = in_page_finished or list_finished
                 # A confirmed Baccarat result is an explicit end-of-round
                 # signal. It must not wait for the timer to reach zero.
+                if diagnostics.get("baccarat_result_visible") and outcome_first_seen_at is None:
+                    outcome_first_seen_at = loop.time()
                 if diagnostics.get("baccarat_result_visible") and not result_end_announced:
                     result_end_announced = True
                     self.event("INFO", f"Раздача № {game.round_number or game.game_id}: "
@@ -1638,21 +1641,48 @@ class BrowserService:
                                and [item.get("position") for item in observed_cards] == [1, 2, 3])
                 confirmed_three = exact_three
                 confirmed_two = False
-                # After witnessing a countdown decrease and reach zero, allow
-                # the third card to render before accepting two stable cards.
+                # Baccarat always has two Player cards, with an optional third.
+                # Some skins keep an EMPTY third card-box as a visible
+                # placeholder even after the result is announced.
+                # "Победа"/"Ничья" is terminal, but wait a short rendering
+                # grace period before choosing a true two-card final hand.
+                result_two = bool(
+                    diagnostics.get("baccarat_result_visible")
+                    and outcome_first_seen_at is not None
+                    and loop.time() - outcome_first_seen_at >= 0.35
+                    and len(observed_cards) == 2
+                    and [item.get("position") for item in observed_cards] == [1, 2]
+                    and 2 <= box_count <= 3
+                    and pending == box_count - 2
+                )
                 timer_end_two = bool(
                     exact_two and countdown_zero_since is not None
                     and loop.time() - countdown_zero_since >= 1.5
                 )
-                if (finish_seen or timer_end_two) and exact_two:
-                    # The visible end flag or explicit finished list status is the signal;
-                    # a repeated read verifies the same two positions without an arbitrary delay.
+                if (exact_two and (finish_seen or timer_end_two)) or result_two:
+                    # Independent second DOM read: never finalize the two-card
+                    # hand if a real third card appeared in the meantime.
                     async with self.page_lock:
                         final_read = await self._inspect_game_dom(settings.player_name_text, settings.banker_name_text)
-                    confirmed_two = (final_read.get("cards", []) == observed_cards
-                                     and final_read.get("pending_card_slots", 0) == 0
-                                     and final_read.get("counts", {}).get("player_card_boxes", 0) == 2)
+                    final_boxes = int(final_read.get("counts", {}).get("player_card_boxes", 0))
+                    final_pending = int(final_read.get("pending_card_slots", 0))
+                    final_exact_two = (
+                        final_boxes == 2 and final_pending == 0
+                    )
+                    final_result_two = bool(
+                        result_two and final_read.get("baccarat_result_visible")
+                        and 2 <= final_boxes <= 3
+                        and final_pending == final_boxes - 2
+                    )
+                    confirmed_two = (
+                        final_read.get("cards", []) == observed_cards
+                        and (final_exact_two or final_result_two)
+                    )
                 hand_final = bool(confirmed_three or confirmed_two)
+                # A terminal blank slot is not an unconfirmed *card*. Once
+                # two real positions were reverified, ignore only the empty
+                # third placeholder in calculating the final Player hand.
+                settled_pending = 0 if confirmed_two and result_two else pending
                 if confirmed_three:
                     # This one atomic frame snapshot contains all three positions;
                     # don't carry any older per-position values into the final record.
@@ -1663,7 +1693,7 @@ class BrowserService:
                     cards_container_present=container_present,
                     card_boxes_count=box_count,
                     cards_count=len(observed_cards),
-                    pending_card_slots=pending,
+                    pending_card_slots=settled_pending,
                     finished=hand_final,
                 )
                 cause = diagnostics.get("cause", "DOM-диагностика недоступна")
@@ -1694,7 +1724,9 @@ class BrowserService:
                     "round_number": game.round_number, "round_number_diagnostic": game.round_number_diagnostic,
                     "time": game.time, "site_status": game.status, "status_text": game.status_text,
                     "player_score": game.player_score, "banker_score": game.banker_score,
-                    "cards": cards, "cards_count": len(cards), "pending_card_slots": pending,
+                    "cards": cards, "cards_count": len(cards),
+                    "pending_card_slots": settled_pending,
+                    "raw_pending_card_slots": pending,
                     "round_timer_text": timer_text,
                     "round_timer_seconds": timer_seconds,
                     "scan_result": scan_result, "finished_confirmed": finish_seen,
@@ -1717,12 +1749,12 @@ class BrowserService:
                 self.observation_diagnostic = reason
 
                 card_signature = tuple((item.get("position"), item.get("rank"), item.get("suit")) for item in cards)
-                save_signature = (card_signature, pending, scan_result, finish_seen, hand_final, reason)
+                save_signature = (card_signature, settled_pending, scan_result, finish_seen, hand_final, reason)
                 saved = True
                 if save_signature != last_saved_signature:
                     persist_started = loop.time()
                     saved = await self._remember_game_scan(
-                        game, cards, completeness, reason, scan_result, pending,
+                        game, cards, completeness, reason, scan_result, settled_pending,
                         finished_confirmed=finish_seen,
                         player_hand_final=hand_final,
                         diagnostics=diagnostics,
