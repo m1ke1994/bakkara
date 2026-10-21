@@ -536,3 +536,171 @@ def test_delayed_third_card_after_zero_prevents_early_two_card_finish(tmp_path, 
         assert saved["cards"] == two + [third]
         assert saved["calculation_status"] == "complete"
     asyncio.run(run())
+
+
+def test_visible_baccarat_victory_caption_is_terminal_only_for_player_widget():
+    """The live skin uses a result caption instead of 'Игра завершена'."""
+    async def run():
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            service.page = page
+            try:
+                await page.set_content("""
+                  <span class="ui-caption ui-game-timer__label">00:17</span>
+                  <div class="baccarat-player baccarat__player">
+                    <span class="baccarat-player__name">Игрок</span>
+                    <ul class="baccarat-player__cards">
+                      <li class="baccarat-player__card-box suit-clubs">
+                        <span class="baccarat-card__rank">Q</span></li>
+                      <li class="baccarat-player__card-box suit-hearts">
+                        <span class="baccarat-card__rank">10</span></li>
+                    </ul>
+                  </div>
+                  <span id="outcome" class="ui-caption ui-caption--weight-700
+                    ui-caption--uppercase baccarat-panel__caption">Победа</span>
+                """)
+                result = await service._inspect_game_dom("Игрок", "Банкир")
+                assert result["finished"] is True
+                assert result["baccarat_result_visible"] is True
+                assert result["finish_flag_text"] == "Победа"
+                assert result["round_timer_text"] == "00:17"
+                assert len(result["cards"]) == 2
+                await page.locator("#outcome").evaluate("el => el.textContent = 'Ничья'")
+                tie = await service._inspect_game_dom("Игрок", "Банкир")
+                assert tie["finished"] is True
+                assert tie["finish_flag_text"] == "Ничья"
+                await page.locator("#outcome").evaluate("el => el.textContent = 'Ход: Игрок'")
+                assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
+                await page.locator("#outcome").evaluate("el => { el.textContent='Победа'; el.style.display='none'; }")
+                assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
+                await page.locator("#outcome").evaluate("el => { el.style.display=''; el.className='random-market-caption'; }")
+                assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
+                await page.locator("#outcome").evaluate("el => el.className='baccarat-panel__caption'")
+                await page.locator(".baccarat-player").evaluate("el => el.remove()")
+                assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
+            finally:
+                await browser.close()
+    asyncio.run(run())
+
+
+def test_victory_with_two_cards_finalizes_without_waiting_45_seconds(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings,
+            card_poll_seconds=0.1,
+            scan_incomplete_timeout_seconds=45,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "victory-final.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = {"game_id": "victory-two"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        cards = [
+            {"position": 1, "rank": "Q", "suit": "clubs"},
+            {"position": 2, "rank": "10", "suit": "hearts"},
+        ]
+        calls = 0
+        async def inspect(_player, _banker):
+            nonlocal calls
+            calls += 1
+            final = calls >= 2
+            return {
+                "cards": cards,
+                "round_timer_text": "00:17",
+                "counts": {"player_fields": 1, "player_cards_containers": 1,
+                           "player_card_boxes": 2},
+                "pending_card_slots": 0,
+                "finished": final,
+                "baccarat_result_visible": final,
+                "finish_flag_text": "Победа" if final else "",
+                "status_text": "", "cause": "fixture",
+            }
+        service._inspect_game_dom = inspect
+        game = Game("victory-two", "https://example.test/victory-two",
+                    "", "1017", "Идёт", 0)
+        processed = set()
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, {}),
+            timeout=5,
+        )
+        assert processed == {"victory-two"}
+        saved = service.store.get("victory-two")
+        assert saved["cards"] == cards
+        assert saved["player_hand_final"] is True
+        assert saved["final_snapshot_reverified"] is True
+        assert saved["calculation_status"] == "complete"
+        assert saved["finished_confirmed"] is True
+        assert "Победа" in saved["reason"]
+        assert service.observation_status == "SAVED"
+        assert any("обнаружено «Победа»" in e["message"] for e in service.events)
+        assert calls >= 3
+    asyncio.run(run())
+
+
+def test_victory_does_not_finalize_two_cards_when_third_box_is_pending(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings,
+            card_poll_seconds=0.1,
+            scan_incomplete_timeout_seconds=6,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "victory-three.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = {"game_id": "victory-three"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        cards = [
+            {"position": 1, "rank": "Q", "suit": "clubs"},
+            {"position": 2, "rank": "10", "suit": "hearts"},
+        ]
+        third = {"position": 3, "rank": "A", "suit": "diamonds"}
+        reads = 0
+        async def inspect(_player, _banker):
+            nonlocal reads
+            reads += 1
+            complete = reads >= 4
+            return {
+                "cards": cards + [third] if complete else cards,
+                "round_timer_text": "00:00",
+                "counts": {"player_fields": 1, "player_cards_containers": 1,
+                           "player_card_boxes": 3},
+                "pending_card_slots": 0 if complete else 1,
+                "finished": True,
+                "baccarat_result_visible": True,
+                "finish_flag_text": "Победа",
+                "status_text": "", "cause": "fixture",
+            }
+        service._inspect_game_dom = inspect
+        game = Game("victory-three", "https://example.test/victory-three",
+                    "", "1018", "Идёт", 0)
+        processed = set()
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, {}), timeout=5
+        )
+        saved = service.store.get("victory-three")
+        assert processed == {"victory-three"}
+        assert saved["cards"] == cards + [third]
+        assert saved["calculation_status"] == "complete"
+    asyncio.run(run())
