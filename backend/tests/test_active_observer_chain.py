@@ -99,7 +99,8 @@ def test_observer_links_forecast_to_the_next_row_it_selects_not_round_adjacency(
         assert [game.game_id for game in selected] == ["target-b"]
         assert store.pending_prediction_targets() == {"target-b"}
         assert store.get("source")["outgoing_target_game_id"] == "target-b"
-        assert store.get("target-c") is None
+        assert store.get("target-c")["scan_result"] == "DISCOVERED"
+        assert store.get("target-c")["cards"] == []
         lifecycle = [event["message"] for event in service.events]
         assert any("game_id=target-b state=DISCOVERED" in message for message in lifecycle)
         assert any("game_id=target-b state=SELECTED" in message for message in lifecycle)
