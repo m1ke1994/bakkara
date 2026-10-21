@@ -31,6 +31,18 @@ from .observation import (
 log = logging.getLogger(__name__)
 
 
+def scan_timeout_budget(game: Game, base_seconds: float) -> float:
+    """Keep the observation window open through prestart and card settlement.
+
+    Examples from the real log: a 00:28 prestart countdown can yield Player
+    cards 31 seconds after opening. A global 45-second deadline is too short.
+    """
+    if game.finished or is_finished_status(game.status) or is_finished_status(game.status_text):
+        return float(base_seconds)
+    delay = list_timer_seconds(game.time)
+    return max(float(base_seconds), float(min((delay or 0) + 40, 120)))
+
+
 def parse_round_timer(value: str | None) -> int | None:
     """Read a valid, visible MM:SS timer without treating other statuses as time."""
     match = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value or "").strip())
@@ -1549,9 +1561,7 @@ class BrowserService:
         # The outer list timer represents time UNTIL kickoff. The old fixed
         # 45-second deadline started on page opening and expired a few seconds
         # after cards appeared, before their final result was announced.
-        prestart_delay = list_timer_seconds(game.time) if not list_finished else None
-        scan_budget = max(settings.scan_incomplete_timeout_seconds,
-                          min((prestart_delay or 0) + 40, 120))
+        scan_budget = scan_timeout_budget(game, settings.scan_incomplete_timeout_seconds)
         self.observation_phase = "переход к выбранной игре"
 
         try:
