@@ -122,6 +122,10 @@ onBeforeUnmount(() => clearInterval(timer))
       <template v-if="state.observation?.current">
         <p>Позиция в списке: {{ state.observation.current.position }} · Время: {{ state.observation.current.time || '—' }} · Статус на сайте: {{ state.observation.current.site_status || 'Не удалось определить' }}</p>
         <p>Счёт Игрок : Банкир — {{ state.observation.current.player_score || '—' }} : {{ state.observation.current.banker_score || '—' }} · Результат: {{ scanResultName(state.observation.current.scan_result) }}</p>
+        <p v-if="state.observation.current.round_timer_text !== undefined">
+          Таймер раздачи: <strong>{{ state.observation.current.round_timer_text || 'не определён' }}</strong>
+          · Отслеживаем завершение и возможную третью карту Игрока.
+        </p>
         <details><summary>Адрес страницы игры</summary><p>{{ state.observation.current.url }}</p></details>
         <p>Игра: {{ state.observation.current.game_id }} · Раздача: {{ state.observation.current.round_number || '—' }}</p>
         <p v-if="state.observation.current.outgoing_prediction || state.observation.current.incoming_prediction">Входящий прогноз: {{ suits[state.observation.current.incoming_prediction]?.[0] || '—' }} · Исходящий прогноз: {{ suits[state.observation.current.outgoing_prediction]?.[0] || '—' }}</p>
