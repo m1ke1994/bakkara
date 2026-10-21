@@ -283,7 +283,7 @@ def test_finished_game_without_cards_yields_and_preserves_retry(tmp_path, monkey
         processed = set()
         retry = {}
         await asyncio.wait_for(
-            service._scan_selected_game(game, [], processed, retry),
+            BrowserService._scan_selected_game(service, game, [], processed, retry),
             timeout=8,
         )
         assert calls
