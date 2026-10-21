@@ -471,17 +471,18 @@ class BrowserService:
     ) -> bool:
         try:
             def persist() -> dict[str, Any] | None:
-                # Even an unreadable hand occupies an actual physical
-                # Baccarat round. Persist the empty/partial attempt so it can
-                # be recovered later without shifting N-18 indexing.
-                self.store.upsert(
-                    game, cards, completeness, reason, scan_result,
-                    finished_confirmed=finished_confirmed,
-                    final_snapshot_reverified=final_snapshot_reverified,
-                    pending_card_slots=pending_card_slots,
-                    player_hand_final=player_hand_final,
-                )
+                # Preserve legacy behavior before opening the page: only
+                # discovered list slots or hands with visible cards enter DB.
                 stored = self.store.get(game.game_id)
+                if cards:
+                    self.store.upsert(
+                        game, cards, completeness, reason, scan_result,
+                        finished_confirmed=finished_confirmed,
+                        final_snapshot_reverified=final_snapshot_reverified,
+                        pending_card_slots=pending_card_slots,
+                        player_hand_final=player_hand_final,
+                    )
+                    stored = self.store.get(game.game_id)
                 if stored:
                     self.store.refresh_prediction_target(game.game_id)
                     stored = self.store.get(game.game_id)
@@ -1708,6 +1709,14 @@ class BrowserService:
                     retry_after[game.game_id] = loop.time() + max(
                         settings.incomplete_retry_seconds,
                         180 if list_finished else 15)
+                    # Persist the incomplete result even if the page never
+                    # exposed any cards; previous pre-navigation tests still
+                    # expect no empty row before scanning actually times out.
+                    await asyncio.to_thread(
+                        self.store.upsert, game, cards, "PARTIAL", detail,
+                        "SCAN_TIMEOUT", False, None,
+                        int((last_diagnostics or {}).get("pending_card_slots", 0)), False,
+                    )
                     await self._remember_game_scan(
                         game, cards, "PARTIAL", detail, "SCAN_TIMEOUT",
                         int((last_diagnostics or {}).get("pending_card_slots", 0)),
