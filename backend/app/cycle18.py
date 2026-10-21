@@ -162,7 +162,6 @@ class Cycle18Engine:
             confirmed_chain: list[dict[str, Any]] = []
             captured_chain: list[dict[str, Any]] = []
             confirmed_max_run = 0
-            captured_max_run = 0
             warmup_complete = False
             missing_hands: list[dict[str, Any]] = []
             verified_total = 0
@@ -190,16 +189,11 @@ class Cycle18Engine:
                     captured_chain = (captured_chain + [hand]
                         if captured_chain and is_next(captured_chain[-1], hand)
                         else [hand])
-                    captured_max_run = max(captured_max_run, len(captured_chain))
-                else:
-                    captured_chain = []
                 if confirmed:
                     confirmed_chain = (confirmed_chain + [hand]
                         if confirmed_chain and is_next(confirmed_chain[-1], hand)
                         else [hand])
                     confirmed_max_run = max(confirmed_max_run, len(confirmed_chain))
-                else:
-                    confirmed_chain = []
                 if confirmed_max_run >= WARMUP:
                     warmup_complete = True
                 if stopped_at or not warmup_complete or len(chain) < CYCLE:
@@ -211,7 +205,7 @@ class Cycle18Engine:
                     continue
                 # Explicit arithmetic guards against a missing slot: it must
                 # be the true N-18 hand, not the eighteenth preceding CSV row.
-                if (source_number - (following(hand_number) - 1 - CYCLE)) % ROUND_MAX != 0:
+                if source_number != ((hand_number - CYCLE) % ROUND_MAX) + 1:
                     continue
                 predicted = verified_suit(source)
                 if not predicted:
@@ -225,7 +219,7 @@ class Cycle18Engine:
                      now.isoformat()))
             # Once the first 20 final hands are validated, progress stays
             # complete. Later partial hands remain visible as recoverable slots.
-            warmup_count = WARMUP if warmup_complete else min(WARMUP, captured_max_run)
+            warmup_count = WARMUP if warmup_complete else min(WARMUP, len(captured_chain))
             confirmed_warmup_count = min(WARMUP, confirmed_max_run)
 
             # Link each prediction to the exact numbered next hand. Never infer
