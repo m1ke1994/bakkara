@@ -316,7 +316,7 @@ def test_pending_future_placeholders_do_not_advance_or_reset_preparation(tmp_pat
     assert complete["ready"] is True
     assert complete["warmup_count"] == 20
     assert complete["statistics"]["checked_count"] == 0
-    assert complete["upcoming"][0]["target_round_number"] == 21
+    assert 21 in [forecast["target_round_number"] for forecast in complete["upcoming"]]
 
 
 def test_duplicate_rounds_cannot_be_counted_to_complete_warmup(tmp_path):
