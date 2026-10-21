@@ -261,6 +261,7 @@ class Cycle18Engine:
             if previous and (following(previous["target_round_number"]) != row["target_round_number"]
                              or not self._close_in_time(previous, row)):
                 losing = 0
+            row["step"] = losing + 1
             if row["result"] == "LOSE":
                 losing += 1
                 max_losing = max(max_losing, losing)
@@ -299,7 +300,7 @@ class Cycle18Engine:
         return {key: row.get(key) for key in (
             "source_game_id", "anchor_game_id", "source_round_number",
             "target_round_number", "target_game_id", "predicted_suit",
-            "created_at", "linked_at", "checked_at", "result", "mode", "reason",
+            "created_at", "linked_at", "checked_at", "result", "mode", "reason", "step",
         )}
 
     @staticmethod
