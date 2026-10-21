@@ -132,7 +132,7 @@ class Cycle18Engine:
                        final_snapshot_reverified,player_hand_final
                 FROM observations
                 WHERE discovered_at>=?
-                ORDER BY discovered_at,game_id
+                ORDER BY discovered_at,list_position,game_id
             """, (session["started_at"],)).fetchall()]
             by_id = {row["game_id"]: row for row in rows}
             # Preserve the exact sequence of *all* discovered game IDs, even
@@ -140,7 +140,6 @@ class Cycle18Engine:
             # A missing hand is a reserved slot, never a deleted/shifting row.
             chain: list[dict[str, Any]] = []
             completed_chain: list[dict[str, Any]] = []
-            best_warmup = 0
             warmup_complete = False
             missing_hands = []
             for hand in rows:
@@ -158,7 +157,6 @@ class Cycle18Engine:
                                        else [hand])
                 else:
                     completed_chain = []
-                best_warmup = max(best_warmup, min(WARMUP, len(completed_chain)))
                 if len(completed_chain) >= WARMUP:
                     warmup_complete = True
                 if stopped_at or not warmup_complete or len(chain) < CYCLE:
@@ -181,7 +179,7 @@ class Cycle18Engine:
                      round_number(source["round_number"]),
                      following(round_number(hand["round_number"])), predicted,
                      now.isoformat()))
-            warmup_count = WARMUP if warmup_complete else best_warmup
+            warmup_count = WARMUP if warmup_complete else min(WARMUP, len(completed_chain))
 
             # Link each prediction to the exact numbered next hand. Never infer
             # the target ID from round number or list position.
@@ -238,7 +236,7 @@ class Cycle18Engine:
 
             pending = [dict(x) for x in db.execute("""
                 SELECT * FROM cycle18_forecasts
-                WHERE session_id=? AND target_game_id IS NOT NULL AND result='PENDING'
+                WHERE session_id=? AND target_game_id IS NOT NULL AND result IN ('PENDING','UNKNOWN')
             """, (sid,)).fetchall()]
             for prediction in pending:
                 target = by_id.get(prediction["target_game_id"])
@@ -254,11 +252,11 @@ class Cycle18Engine:
                     player_hand_final=bool(target["player_hand_final"]),
                     final_snapshot_reverified=target["final_snapshot_reverified"] == 1,
                 )
-                if result == "PENDING":
+                if result == "PENDING" or (result == "UNKNOWN" and prediction["result"] == "UNKNOWN"):
                     continue
                 db.execute("""UPDATE cycle18_forecasts SET result=?,checked_at=?,
                     actual_cards_json=?,reason=?
-                    WHERE session_id=? AND source_game_id=? AND result='PENDING'""",
+                    WHERE session_id=? AND source_game_id=? AND result IN ('PENDING','UNKNOWN')""",
                     (result, now.isoformat(), json.dumps(cards, ensure_ascii=False),
                      "Проверено по финальным картам Игрока" if result in ("WIN", "LOSE")
                      else "Нет достоверных финальных карт Игрока",
