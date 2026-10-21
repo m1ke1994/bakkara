@@ -250,3 +250,46 @@ def test_unknown_game_does_not_block_new_game_after_a_retry(tmp_path, monkeypatc
         assert [g.game_id for g in selected] == ["u1", "u2"]
         assert service.observation_status != "ERROR"
     asyncio.run(run())
+
+
+def test_finished_game_without_cards_yields_and_preserves_retry(tmp_path, monkeypatch):
+    """A permanently empty Player widget must not pin the observer forever."""
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings,
+            finished_recovery_timeout_seconds=0.1,
+            card_poll_seconds=0.1,
+            incomplete_retry_seconds=30,
+        ))
+        store = ObservationStore(tmp_path / "timeout.sqlite3")
+        service = _service(store, [])
+        game = Game("finished-no-cards", f"{TABLE}/finished-no-cards-player-banker",
+                    "", "850", "Завершена", 0, finished=True)
+        calls = []
+
+        async def save_attempt(*args, **kwargs):
+            calls.append(kwargs)
+            return True
+
+        async def inspect(*_args):
+            return {
+                "cards": [], "pending_card_slots": 0, "counts": {},
+                "cause": "Поле Игрока не загрузилось",
+                "finished": False, "status_text": "",
+            }
+
+        service._remember_game_scan = save_attempt
+        service._inspect_game_dom = inspect
+        processed = set()
+        retry = {}
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, retry),
+            timeout=8,
+        )
+        assert calls
+        assert processed == set()
+        assert "finished-no-cards" in retry
+        assert service.observation_status == "INCOMPLETE"
+        assert service.current_observation["scan_result"] == "SCAN_TIMEOUT"
+        assert "продолжаем" in service.observation_diagnostic
+    asyncio.run(run())
