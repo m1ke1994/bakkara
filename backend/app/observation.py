@@ -363,23 +363,44 @@ def parse_game_list_html(
     return games
 
 
+def list_timer_seconds(value: str | None) -> int | None:
+    """Read the displayed MM:SS delay to a future Baccarat round."""
+    match = re.fullmatch(r"(\\d{1,2}):(\\d{2})", str(value or "").strip())
+    if not match or int(match.group(2)) >= 60:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
 def choose_observation_game(
     games: list[Game], handled_ids: set[str],
 ) -> Game | None:
-    """Choose the earliest readable game, even if its displayed state is UNKNOWN.
+    """Do not lose the next live hand while recovering stale/finished games.
 
-    UPCOMING is *not* a prerequisite for passive card observation. The page
-    must have its own URL/game ID. If its round number is still missing, its
-    cards can be observed but will not count toward the 20-game warm-up until
-    the true number is recovered. No result is counted before final verification.
-    Finished games are also eligible for one recovery read when their final
-    hand is missing.  Retry cooldowns are supplied in handled_ids.
+    Active first; then the nearest future zero-zero hand, including rows whose
+    explicit UPCOMING text was absent; only then recover finished hands.
+    A future game more than one minute away is not worth opening early:
+    prefer refreshing the list until it is closer to its start.
     """
-    return next((
-        game for game in sorted(games, key=lambda item: item.position)
-        if game.game_id not in handled_ids
-        and game.game_id and game.url
-    ), None)
+    readable = [g for g in games if g.game_id and g.url and g.game_id not in handled_ids]
+    active = [g for g in readable if classify_game(g) == "STARTED"]
+    if active:
+        return min(active, key=lambda g: g.position)
+    near_future = [g for g in readable if classify_game(g) in ("UPCOMING", "UNKNOWN")
+                   and g.player_score.strip() == "0" and g.banker_score.strip() == "0"
+                   and (list_timer_seconds(g.time) is None
+                        or list_timer_seconds(g.time) <= 60)]
+    if near_future:
+        return min(near_future, key=lambda g: (
+            list_timer_seconds(g.time) if list_timer_seconds(g.time) is not None else 10000,
+            g.position))
+    # Avoid 12-second backfills when a fresh upcoming game is about to start.
+    countdowns = [list_timer_seconds(g.time) for g in readable
+                  if classify_game(g) in ("UPCOMING", "UNKNOWN")
+                  and g.player_score.strip() == "0" and g.banker_score.strip() == "0"]
+    if any(t is not None and t < 80 for t in countdowns):
+        return None
+    finished = [g for g in readable if classify_game(g) == "FINISHED"]
+    return min(finished, key=lambda g: g.position) if finished else None
 
 
 def choose_next_game(
