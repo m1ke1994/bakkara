@@ -308,7 +308,7 @@ def test_selects_live_and_nearest_hand_before_expired_recovery(tmp_path, monkeyp
                player_score="0", banker_score="0")
     assert choose_observation_game([old, live, soon, far], set()).game_id == "live"
     assert choose_observation_game([old, live, soon, far], {"live"}).game_id == "soon"
-    assert choose_observation_game([old, live, soon, far], {"live", "soon"}) is None
+    assert choose_observation_game([old, live, soon, far], {"live", "soon"}).game_id == "old"
     assert choose_observation_game([old, live, soon, far], {"live", "soon", "old"}) is None
     assert choose_observation_game([old, far], {"old"}) is None
     assert choose_observation_game([old], set()).game_id == "old"
