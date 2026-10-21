@@ -21,6 +21,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         await browser_service.stop()
+        await asyncio.to_thread(cycle18_engine.stop_session)
 
 
 app = FastAPI(title="BAKKARA BOT API", lifespan=lifespan)
@@ -48,18 +49,24 @@ async def start_browser():
 @app.post("/api/browser/stop")
 async def stop_browser():
     await browser_service.stop()
+    await asyncio.to_thread(cycle18_engine.stop_session)
     return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.post("/api/observation/start")
 async def start_observation():
+    was_running = bool(browser_service.observation_task and not browser_service.observation_task.done())
     await browser_service.start_observation()
+    is_running = bool(browser_service.observation_task and not browser_service.observation_task.done())
+    if is_running and not was_running:
+        await asyncio.to_thread(cycle18_engine.start_session)
     return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.post("/api/observation/stop")
 async def stop_observation():
     await browser_service.stop_observation()
+    await asyncio.to_thread(cycle18_engine.stop_session)
     return await asyncio.to_thread(browser_service.snapshot)
 
 
@@ -67,6 +74,7 @@ async def stop_observation():
 async def clear_observations():
     result = await browser_service.clear_history()
     await asyncio.to_thread(cycle18_engine.clear)
+    result['cycle18'] = await asyncio.to_thread(cycle18_engine.refresh)
     return result
 
 
