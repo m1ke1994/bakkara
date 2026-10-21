@@ -86,55 +86,6 @@ def verified_suit(row: dict[str, Any]) -> str | None:
     return SUIT_SYMBOL_TO_NAME.get(symbol) if symbol else None
 
 
-def warmup_comparisons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Virtual N-1 comparisons within the first 20 confirmed hands.
-
-    These are diagnostics for preparation only; they are NOT cycle-18
-    predictions, and must not enter cycle-18 WIN/LOSE/streak statistics.
-    Final card validation and physical adjacent round numbers are mandatory.
-    """
-    run: list[dict[str, Any]] = []
-    checks: list[dict[str, Any]] = []
-    # Old sessions can contain duplicated round numbers caused by mutable
-    # game-list metadata. Never calculate a confident result for an ambiguous
-    # numbered hand with conflicting game IDs.
-    counts: dict[int, int] = {}
-    for hand in rows:
-        n = round_number(hand.get("round_number"))
-        if n is not None and verified_suit(hand):
-            counts[n] = counts.get(n, 0) + 1
-    for hand in rows:
-        n = round_number(hand.get("round_number"))
-        if n is None or counts.get(n) != 1 or not verified_suit(hand):
-            continue
-        if run and not is_next(run[-1], hand):
-            run = []
-            checks = []
-        if run:
-            source = run[-1]
-            predicted = verified_suit(source)
-            cards = captured_cards(hand)
-            result = evaluate_prediction(
-                predicted, cards,
-                finished_confirmed=True, final_snapshot_reverified=True,
-                player_hand_final=True,
-            )
-            if result in ("WIN", "LOSE"):
-                checks.append({
-                    "source_game_id": source["game_id"],
-                    "source_round_number": round_number(source["round_number"]),
-                    "target_game_id": hand["game_id"],
-                    "target_round_number": n,
-                    "predicted_suit": predicted,
-                    "result": result,
-                    "mode": "WARMUP_N_MINUS_1",
-                })
-        run.append(hand)
-        if len(run) == WARMUP:
-            break
-    return checks
-
-
 class Cycle18Engine:
     """A session is reset on every real observer start, not on each HTTP poll."""
 
@@ -205,19 +156,26 @@ class Cycle18Engine:
                 ORDER BY discovered_at,list_position,game_id
             """, (session["started_at"],)).fetchall()]
             by_id = {row["game_id"]: row for row in rows}
-            warmup_results = warmup_comparisons(rows)
-            # Every real round keeps its physical position, even if unreadable.
-            # Discovered future placeholders do not count as observed hands.
+            # A unique, finalized physical round is the ONLY preparation unit.
+            # List placeholders and partial two-card snapshots are never counted.
+            # Duplicate round identities in one session are ambiguous, so
+            # neither copy can advance the warm-up or create a forecast.
+            physical_counts: dict[int, int] = {}
+            for row in rows:
+                number = round_number(row.get("round_number"))
+                if number is not None:
+                    physical_counts[number] = physical_counts.get(number, 0) + 1
             chain: list[dict[str, Any]] = []
             confirmed_chain: list[dict[str, Any]] = []
-            captured_chain: list[dict[str, Any]] = []
             confirmed_max_run = 0
             warmup_complete = False
             missing_hands: list[dict[str, Any]] = []
             verified_total = 0
             captured_total = 0
             for hand in rows:
-                confirmed = verified_suit(hand)
+                physical = round_number(hand.get("round_number"))
+                unique = physical is not None and physical_counts[physical] == 1
+                confirmed = verified_suit(hand) if unique else None
                 has_cards = bool(captured_cards(hand))
                 verified_total += bool(confirmed)
                 captured_total += has_cards
@@ -232,13 +190,10 @@ class Cycle18Engine:
                     })
                 chain = chain + [hand] if chain and is_next(chain[-1], hand) else [hand]
 
-                # The displayed preparation progress counts real saved Player
-                # hands, not merely IDs on the list. Readiness is stricter:
-                # twenty consecutive hands must be truly finalized.
-                if has_cards:
-                    captured_chain = (captured_chain + [hand]
-                        if captured_chain and is_next(captured_chain[-1], hand)
-                        else [hand])
+                # The first 20 confirmed hands receive neither a forecast
+                # nor a WIN/LOSE. A gap resets the continuous run. Empty
+                # future list placeholders are ignored, but a confirmed later
+                # round is never allowed to jump over a missing round.
                 if confirmed:
                     confirmed_chain = (confirmed_chain + [hand]
                         if confirmed_chain and is_next(confirmed_chain[-1], hand)
@@ -269,8 +224,8 @@ class Cycle18Engine:
                      now.isoformat()))
             # Once the first 20 final hands are validated, progress stays
             # complete. Later partial hands remain visible as recoverable slots.
-            warmup_count = WARMUP if warmup_complete else min(WARMUP, len(captured_chain))
-            confirmed_warmup_count = min(WARMUP, confirmed_max_run)
+            warmup_count = min(WARMUP, confirmed_max_run)
+            confirmed_warmup_count = warmup_count
 
             # Link each prediction to the exact numbered next hand. Never infer
             # the target ID from round number or list position.
@@ -395,12 +350,6 @@ class Cycle18Engine:
             "missing_count": len(missing_hands),
             "session_id": sid, "session_started_at": session["started_at"],
             "session_active": stopped_at is None,
-            "warmup_results": warmup_results,
-            "warmup_statistics": {
-                "checked_count": len(warmup_results),
-                "wins": sum(p["result"] == "WIN" for p in warmup_results),
-                "losses": sum(p["result"] == "LOSE" for p in warmup_results),
-            },
             "statistics": {
                 "checked_count": len(checked), "wins": wins, "losses": len(checked) - wins,
                 "win_rate": round(100 * wins / len(checked), 2) if checked else None,
@@ -435,8 +384,6 @@ class Cycle18Engine:
             "captured_count": 0, "verified_count": 0,
             "ready": False, "session_active": False, "session_id": None,
             "discovered_count": 0, "missing_hands": [], "missing_count": 0,
-            "warmup_results": [],
-            "warmup_statistics": {"checked_count": 0, "wins": 0, "losses": 0},
             "statistics": {
                 "checked_count": 0, "wins": 0, "losses": 0, "win_rate": None,
                 "max_lose_streak": 0, "current_lose_streak": 0, "next_step": 1,
