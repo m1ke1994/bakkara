@@ -10,7 +10,7 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -715,6 +715,52 @@ class ObservationStore:
             db.execute("""UPDATE observations SET observed_at=?,calculated_suit=?,
                 calculation_status=?,prediction_for_next_round=? WHERE game_id=?""",
                 (timestamp, calculated, status, calculated, game_id))
+
+    def register_discovered_games(self, games: list[Game]) -> None:
+        """Reserve a permanent slot for every visible game, including UNKNOWN.
+
+        Never replace a previously captured hand. An empty discovery slot is
+        not a confirmed hand and cannot generate a cycle-18 prediction.
+        It can be filled later by an actual in-game DOM capture.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.path) as db:
+            db.executemany("""INSERT OR IGNORE INTO observations (
+                game_id,url,round_number,discovered_at,cards_json,completeness,
+                reason,list_position,site_status,player_score,banker_score,
+                scan_result,last_scanned_at,game_time,observed_at
+            ) VALUES (?, ?, ?, ?, '[]', 'PARTIAL', ?, ?, ?, ?, ?, 'DISCOVERED', ?, ?, ?)""",
+                [(game.game_id, game.url, game.round_number or None, now,
+                  'Раздача обнаружена; ожидаем реальные карты Игрока', game.position,
+                  game.status, game.player_score, game.banker_score, now,
+                  game.time, now)
+                 for game in games if game.game_id and game.url])
+
+    def recoverable_games(self, *, within_minutes: int = 20) -> list[Game]:
+        """Recover real URLs of partial hands after they disappear from the list.
+
+        Only timed-out/failed observations are eligible. The active observer
+        decides when to attempt an old URL so fresh live games have priority.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=within_minutes)).isoformat()
+        discovery_wait = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute("""
+                SELECT game_id,url,game_time,round_number,site_status,list_position,
+                       player_score,banker_score
+                FROM observations
+                WHERE calculation_status!='complete' AND discovered_at>=?
+                  AND scan_result IN ('SCAN_TIMEOUT','NAVIGATION_ERROR','CARDS_UNCONFIRMED','DISCOVERED')
+                  AND (scan_result!='DISCOVERED' OR discovered_at<=?)
+                  AND url!=''
+                ORDER BY discovered_at, list_position LIMIT 40
+            """, (cutoff, discovery_wait)).fetchall()
+        return [Game(row["game_id"], row["url"], row["game_time"] or "",
+                     row["round_number"] or "", row["site_status"],
+                     row["list_position"], player_score=row["player_score"] or "",
+                     banker_score=row["banker_score"] or "")
+                for row in rows]
 
     def update_game_list_metadata(self, games: list[Game]) -> None:
         """Backfill newly visible round numbers without touching observed results."""
