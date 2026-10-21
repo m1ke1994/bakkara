@@ -400,7 +400,15 @@ def choose_observation_game(
     if any(t is not None and t < 80 for t in countdowns):
         return None
     finished = [g for g in readable if classify_game(g) == "FINISHED"]
-    return min(finished, key=lambda g: g.position) if finished else None
+    if finished:
+        return min(finished, key=lambda g: g.position)
+    # If the list does not expose scores/timer at all, inspect the real game
+    # URL rather than leaving the observer idle forever. This is a last
+    # resort; never use it ahead of a fresh zero-zero hand.
+    unknown = [g for g in readable if classify_game(g) == "UNKNOWN"
+               and (list_timer_seconds(g.time) is None
+                    or list_timer_seconds(g.time) <= 60)]
+    return min(unknown, key=lambda g: g.position) if unknown else None
 
 
 def choose_next_game(
