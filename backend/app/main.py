@@ -56,10 +56,20 @@ async def stop_browser():
 @app.post("/api/observation/start")
 async def start_observation():
     was_running = bool(browser_service.observation_task and not browser_service.observation_task.done())
-    await browser_service.start_observation()
-    is_running = bool(browser_service.observation_task and not browser_service.observation_task.done())
-    if is_running and not was_running:
+    # Register the new session BEFORE the observer can discover/save its
+    # first round. Otherwise the first records have discovered_at < started_at
+    # and are silently excluded from the 20-round preparation.
+    if not was_running:
         await asyncio.to_thread(cycle18_engine.start_session)
+    try:
+        await browser_service.start_observation()
+    except Exception:
+        if not was_running:
+            await asyncio.to_thread(cycle18_engine.stop_session)
+        raise
+    is_running = bool(browser_service.observation_task and not browser_service.observation_task.done())
+    if not is_running and not was_running:
+        await asyncio.to_thread(cycle18_engine.stop_session)
     return await asyncio.to_thread(browser_service.snapshot)
 
 
