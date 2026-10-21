@@ -1035,6 +1035,9 @@ class BrowserService:
                     fresh_games = []
             if fresh_games:
                 all_games = fresh_games
+        # Persist *all* numbered/listed games, not only successfully scanned
+        # cards. UNKNOWN remains a real round occupying its N-18 position.
+        await asyncio.to_thread(self.store.register_discovered_games, all_games)
         await asyncio.to_thread(self.store.update_game_list_metadata, all_games)
         still_missing = [item for item in all_games if not item.round_number]
         if still_missing:
