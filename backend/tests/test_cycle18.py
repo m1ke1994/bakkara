@@ -184,3 +184,65 @@ def test_list_registers_unknown_and_preserves_earlier_captured_cards(tmp_path):
     assert store.get("round-1")["calculation_status"] == "complete"
     store.register_discovered_games([first, second])
     assert store.get("round-1")["calculation_status"] == "complete"
+
+
+def test_warmup_shows_captured_two_cards_separately_from_final_hands(tmp_path):
+    """Reproduces 0/20 despite two real saved hands and four list shells."""
+    path = tmp_path / "rounds.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    games = [
+        Game(f"round-{n}", f"https://example.test/baccarat/{n}-player-banker",
+             "", str(n), "", n)
+        for n in range(1000, 1006)
+    ]
+    store.register_discovered_games(games)
+    initial = engine.refresh()
+    assert initial["discovered_count"] == 6
+    assert initial["warmup_count"] == 0
+
+    for game in games[:2]:
+        store.upsert(game, [
+            {"position": 1, "rank": "10", "suit": "diamonds"},
+            {"position": 2, "rank": "9", "suit": "spades"},
+        ], "PARTIAL", "Пока нет финального подтверждения", "CARDS_FOUND")
+
+    waiting = engine.refresh()
+    assert waiting["captured_count"] == 2
+    assert waiting["warmup_count"] == 2
+    assert waiting["confirmed_warmup_count"] == 0
+    assert waiting["ready"] is False
+    assert waiting["missing_count"] == 6
+    assert waiting["missing_hands"][0]["cards_count"] == 2
+
+    for game in games[:2]:
+        store.upsert(game, [
+            {"position": 1, "rank": "10", "suit": "diamonds"},
+            {"position": 2, "rank": "9", "suit": "spades"},
+        ], "CONFIRMED", "Финальный набор проверен", "CARDS_CONFIRMED",
+            player_hand_final=True, final_snapshot_reverified=True)
+    confirmed = engine.refresh()
+    assert confirmed["warmup_count"] == 2
+    assert confirmed["confirmed_warmup_count"] == 2
+    assert confirmed["verified_count"] == 2
+    assert confirmed["ready"] is False
+
+
+def test_warmup_count_does_not_reach_twenty_by_skipping_unreadable_round(tmp_path):
+    path = tmp_path / "rounds.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    for number in range(1, 20):
+        add_round(store, number)
+    store.register_discovered_games([
+        Game("round-20", "https://example.test/baccarat/20-player-banker",
+             "", "20", "Не удалось определить", 20)
+    ])
+    add_round(store, 21)
+    result = engine.refresh()
+    assert result["ready"] is False
+    assert result["warmup_count"] == 1
+    assert result["confirmed_warmup_count"] == 19
+    # The missing real round is retained and no forecast is fabricated.
+    assert result["missing_hands"][0]["round_number"] == "20"
+    assert result["upcoming"] == []
