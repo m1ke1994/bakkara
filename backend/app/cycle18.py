@@ -150,7 +150,7 @@ class Cycle18Engine:
                 SELECT game_id,round_number,discovered_at,finished_at,
                        cards_json,completeness,calculated_suit,calculation_status,
                        final_snapshot_reverified,player_hand_final,
-                       scan_result,reason,last_scanned_at
+                       scan_result,reason,last_scanned_at,observed_at
                 FROM observations
                 WHERE discovered_at>=?
                 ORDER BY discovered_at,list_position,game_id
@@ -271,15 +271,29 @@ class Cycle18Engine:
                         matching.append((target_time, target))
                 if len(matching) == 1:
                     target = matching[0][1]
-                    # If target cards are already finalized when discovered,
-                    # this is historical reconstruction, not a live prediction.
-                    live = not (target.get("finished_at") or target.get("player_hand_final"))
-                    db.execute("""UPDATE cycle18_forecasts
-                        SET target_game_id=?, linked_at=?, mode=?,
-                            reason='Сопоставлено по номеру целевой раздачи'
-                        WHERE session_id=? AND source_game_id=? AND target_game_id IS NULL""",
-                        (target["game_id"], now.isoformat(), "LIVE" if live else "BACKFILL",
-                         sid, prediction["source_game_id"]))
+                    final = bool(target.get("finished_at") or target.get("player_hand_final"))
+                    # Never manufacture a WIN/LOSE for a forecast created
+                    # AFTER this target already reached its final hand.
+                    # This matters when the 20th warmup hand is recovered late.
+                    final_time = moment(target.get("finished_at") or target.get("observed_at"))
+                    forecast_time = moment(prediction["created_at"])
+                    missed = bool(final and final_time and forecast_time
+                                  and final_time <= forecast_time)
+                    if missed:
+                        db.execute("""UPDATE cycle18_forecasts
+                            SET target_game_id=?, linked_at=?, mode='MISSED',
+                                result='SKIPPED', checked_at=?,
+                                reason='Раздача завершилась до появления прогноза'
+                            WHERE session_id=? AND source_game_id=? AND target_game_id IS NULL""",
+                            (target["game_id"], now.isoformat(), now.isoformat(),
+                             sid, prediction["source_game_id"]))
+                    else:
+                        db.execute("""UPDATE cycle18_forecasts
+                            SET target_game_id=?, linked_at=?, mode=?,
+                                reason='Сопоставлено по номеру целевой раздачи'
+                            WHERE session_id=? AND source_game_id=? AND target_game_id IS NULL""",
+                            (target["game_id"], now.isoformat(), "LIVE" if not final else "BACKFILL",
+                             sid, prediction["source_game_id"]))
                 elif (now - anchor_time).total_seconds() > STALE_SECONDS:
                     db.execute("""UPDATE cycle18_forecasts SET result='UNKNOWN', checked_at=?,
                         reason='Целевая раздача не найдена: срок ожидания истёк'
