@@ -765,3 +765,87 @@ def test_victory_two_cards_with_empty_third_placeholder_is_final(tmp_path, monke
         assert service.observation_status == "SAVED"
         assert reads >= 3
     asyncio.run(run())
+
+
+def test_countdown_aware_timeout_covers_prestart_and_final_cards():
+    from app.browser import scan_timeout_budget
+    from app.observation import Game
+    scheduled = Game("1028", "https://example.test/1028", "00:28", "1028",
+                     "", 1, player_score="0", banker_score="0")
+    assert scan_timeout_budget(scheduled, 45) == 68
+    scheduled.time = "00:27"
+    assert scan_timeout_budget(scheduled, 45) == 67
+    scheduled.time = "03:27"
+    assert scan_timeout_budget(scheduled, 45) == 120
+    scheduled.time = "not available"
+    assert scan_timeout_budget(scheduled, 45) == 45
+    scheduled.status = "Завершена"
+    assert scan_timeout_budget(scheduled, 45) == 45
+
+
+def test_expired_event_screen_detected_without_player_cards():
+    async def run():
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            service.page = page
+            try:
+                await page.set_content("""
+                    <div class="market-grid__game-over-panel">
+                      <strong>Событие завершено</strong>
+                      <span>Выбранная игра уже состоялась</span>
+                    </div>
+                """)
+                out = await service._inspect_game_dom("Игрок", "Банкир")
+                assert out["expired_screen"] is True
+                assert out["cards"] == []
+                assert out["finished"] is False
+            finally:
+                await browser.close()
+    asyncio.run(run())
+
+
+def test_expired_screen_does_not_block_observer_45_seconds(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, card_poll_seconds=0.1,
+            scan_incomplete_timeout_seconds=45,
+            finished_recovery_timeout_seconds=12,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **_kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "expired-screen.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = {"game_id": "expired"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        async def inspect(_player, _banker):
+            return {"cards": [], "counts": {"player_fields": 0,
+                    "player_cards_containers": 0, "player_card_boxes": 0},
+                    "pending_card_slots": 0,
+                    "expired_screen": True,
+                    "round_timer_text": "",
+                    "finished": False,
+                    "status_text": "", "cause": "event finished"}
+        service._inspect_game_dom = inspect
+        game = Game("expired", "https://example.test/expired", "", "1027",
+                    "Завершена", 0, finished=True)
+        processed, retry = set(), {}
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, retry), timeout=7,
+        )
+        assert processed == set()
+        assert service.observation_status == "INCOMPLETE"
+        assert "expired" in retry
+        assert "Событие завершено" in service.observation_diagnostic
+        assert service.store.get("expired")["scan_result"] == "SCAN_TIMEOUT"
+    asyncio.run(run())
