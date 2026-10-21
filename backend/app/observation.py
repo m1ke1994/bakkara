@@ -137,17 +137,15 @@ def infer_upcoming_games(games: list[Game]) -> list[Game]:
         if status in ("STARTED", "FINISHED") and number is not None:
             preceding = number
             continue
-        if status == "UPCOMING" and number is not None:
-            preceding = number
-            continue
         if (status == "UNKNOWN" and preceding is not None and number is not None
-                and number == preceding + 1 and game.url
+                and ((number - preceding) % 1440) == 1 and game.url
                 and _score_value(game.player_score) == 0
                 and _score_value(game.banker_score) == 0):
             game.upcoming_by_sequence = True
-            preceding = number
-        else:
-            preceding = None
+        # Do not extrapolate more than one step from a completed/live anchor;
+        # an explicit UPCOMING row and an inferred row are not proof of
+        # what follows, and must not turn all zero-zero rows into candidates.
+        preceding = None
     return games
 
 
