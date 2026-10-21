@@ -20,6 +20,7 @@ from .observation import (
     classify_game_status,
     classify_game,
     infer_upcoming_games,
+    list_timer_seconds,
     is_finished_status,
     is_same_upcoming_game,
     classify_player_scan,
@@ -713,6 +714,11 @@ class BrowserService:
                           && /^(?:победа|ничья)$/i.test(text(node))) || null
                     : null;
                   const finished = Boolean(finishFlag || outcomeFlag);
+                  // An expired match can replace the Baccarat widget with an
+                  // unavailable-event screen. Distinguish that from a game
+                  // whose cards are still loading.
+                  const expiredScreen = !playerSide && /событие\s+завершено/i
+                    .test(document.body?.innerText || '');
                   const finishLabel = finishFlag ? text(finishFlag)
                     : outcomeFlag ? text(outcomeFlag) : '';
                   const relevant = playerSide || finishFlag || outcomeFlag ||
@@ -736,6 +742,7 @@ class BrowserService:
                     round_timer_text: timerLabels[0] || '',
                     finished, finish_flag_text: finishLabel,
                     baccarat_result_visible: Boolean(outcomeFlag),
+                    expired_screen: expiredScreen,
                     fragment: relevant ? (relevant.outerHTML || '').slice(0, 3500) : ''
                   };
                 }""", {"playerName": player_name.strip().casefold(),
@@ -786,6 +793,7 @@ class BrowserService:
                                       if frame.get("round_timer_text")), ""),
             "finished": any(frame.get("finished", False) for frame in frames),
             "baccarat_result_visible": any(frame.get("baccarat_result_visible", False) for frame in frames),
+            "expired_screen": any(frame.get("expired_screen", False) for frame in frames),
             "finish_flag_text": next((frame.get("finish_flag_text", "") for frame in frames if frame.get("finished")), ""),
             "status_text": " ".join(dict.fromkeys(text for frame in frames for text in frame.get("status_texts", []))),
             "dom_fragment": (diagnostic_frame or {}).get("fragment", ""),
@@ -1538,6 +1546,12 @@ class BrowserService:
         result_end_announced = False
         outcome_first_seen_at: float | None = None
         list_finished = game.status == "Завершена" or is_finished_status(game.status_text)
+        # The outer list timer represents time UNTIL kickoff. The old fixed
+        # 45-second deadline started on page opening and expired a few seconds
+        # after cards appeared, before their final result was announced.
+        prestart_delay = list_timer_seconds(game.time) if not list_finished else None
+        scan_budget = max(settings.scan_incomplete_timeout_seconds,
+                          min((prestart_delay or 0) + 40, 120))
         self.observation_phase = "переход к выбранной игре"
 
         try:
@@ -1804,14 +1818,21 @@ class BrowserService:
                 # next readable round; this game remains recoverable on a later
                 # list pass and does not contribute WIN/LOSE or warm-up progress.
                 max_wait = (max(3.0, settings.finished_recovery_timeout_seconds)
-                            if list_finished else
-                            max(5.0, settings.scan_incomplete_timeout_seconds))
+                            if list_finished else max(5.0, scan_budget))
+                if first_card_at and not list_finished:
+                    # Once the first cards are exposed, reserve enough time
+                    # for the site's result animation / possible third card.
+                    max_wait = max(max_wait, max(first_card_at.values()) - started_at + 20)
+                if diagnostics.get("expired_screen") and not player_present:
+                    max_wait = min(max_wait, 2.5)
                 if loop.time() - started_at >= max_wait:
                     detail = (
-                        f"Раздача № {game.round_number or game.game_id}: карты Игрока "
-                        f"не подтверждены за {max_wait:g} с. Отмечаем попытку как "
-                        "неполную (не LOSE), продолжаем к следующей игре. "
-                        "Повторное чтение будет доступно позже."
+                        f"Раздача № {game.round_number or game.game_id}: "
+                        + ("сайт показал «Событие завершено» без доступного игрового поля; "
+                           if diagnostics.get("expired_screen") and not player_present else
+                           f"окончательные карты Игрока не подтверждены за {max_wait:g} с; ")
+                        + "сохраняем фактические карты и номер как неполную запись, "
+                          "переходим к следующей игре. Позже попробуем восстановить."
                     )
                     self._active_chain_source_id = None
                     retry_after[game.game_id] = loop.time() + max(
