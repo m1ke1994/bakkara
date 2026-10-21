@@ -716,6 +716,26 @@ class ObservationStore:
                 calculation_status=?,prediction_for_next_round=? WHERE game_id=?""",
                 (timestamp, calculated, status, calculated, game_id))
 
+    def register_discovered_games(self, games: list[Game]) -> None:
+        """Reserve a permanent slot for every visible game, including UNKNOWN.
+
+        Never replace a previously captured hand. An empty discovery slot is
+        not a confirmed hand and cannot generate a cycle-18 prediction.
+        It can be filled later by an actual in-game DOM capture.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.path) as db:
+            db.executemany("""INSERT OR IGNORE INTO observations (
+                game_id,url,round_number,discovered_at,cards_json,completeness,
+                reason,list_position,site_status,player_score,banker_score,
+                scan_result,last_scanned_at,game_time,observed_at
+            ) VALUES (?, ?, ?, ?, '[]', 'PARTIAL', ?, ?, ?, ?, ?, 'DISCOVERED', ?, ?, ?)""",
+                [(game.game_id, game.url, game.round_number or None, now,
+                  'Раздача обнаружена; ожидаем реальные карты Игрока', game.position,
+                  game.status, game.player_score, game.banker_score, now,
+                  game.time, now)
+                 for game in games if game.game_id and game.url])
+
     def update_game_list_metadata(self, games: list[Game]) -> None:
         """Backfill newly visible round numbers without touching observed results."""
         updates = [(game.round_number.strip(), game.game_id)
