@@ -108,7 +108,7 @@ def test_observer_links_forecast_to_the_next_row_it_selects_not_round_adjacency(
     asyncio.run(run())
 
 
-def test_observer_skips_finished_game_and_breaks_forecast_chain_before_later_round(tmp_path, monkeypatch):
+def test_observer_attempts_to_recover_finished_game_before_later_round(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
@@ -127,9 +127,9 @@ def test_observer_skips_finished_game_and_breaks_forecast_chain_before_later_rou
 
         await service._observe_iteration({"source"}, {})
 
-        assert [game.game_id for game in selected] == ["target"]
-        assert not store.pending_prediction_targets()
-        assert store.get("source")["outgoing_prediction_result"] == "UNKNOWN"
+        assert [game.game_id for game in selected] == ["missed"]
+        assert store.pending_prediction_targets() == {"missed"}
+        assert store.get("source")["outgoing_target_game_id"] == "missed"
 
     asyncio.run(run())
 
@@ -183,14 +183,14 @@ def test_candidate_that_starts_before_opening_is_replaced_by_next_upcoming(tmp_p
 
         await service._observe_iteration(set(), {})
 
-        assert [game.game_id for game in selected] == ["second"]
+        assert [game.game_id for game in selected] == ["first"]
         assert service.page.url == LIST_URL
-        assert any("изменилась перед открытием" in event["message"] for event in service.events)
+        assert service.current_observation["round_number"] == "801"
 
     asyncio.run(run())
 
 
-def test_only_finished_started_and_unknown_rows_leave_observer_waiting(tmp_path, monkeypatch):
+def test_finished_started_and_unknown_rows_are_observed_in_order(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
@@ -214,15 +214,82 @@ def test_only_finished_started_and_unknown_rows_leave_observer_waiting(tmp_path,
 
         await service._observe_iteration(set(), {})
 
-        assert selected == []
-        assert service.observation_status == "WAITING_FOR_GAME"
-        assert "Игр до начала со счётом 0:0 пока нет" in service.observation_diagnostic
+        assert [game.game_id for game in selected] == ["finished"]
         assert service.page.url == LIST_URL
         assert store.history() == []
-        assert service.current_observation is None
+        assert service.current_observation["game_id"] == "finished"
         assert service.game_diagnostics[0]["round_number"] == "811"
         assert service.game_diagnostics[2]["state"] == "UNKNOWN"
-        assert service.game_diagnostics[2]["status_text"] == ""
-        assert service.game_diagnostics[2]["is_countdown_to_start"] is False
+        assert "откроем игру" in service.game_diagnostics[2]["reason"]
+        await service._observe_iteration({"finished"}, {})
+        await service._observe_iteration({"finished", "started"}, {})
+        assert [game.game_id for game in selected] == ["finished", "started", "unknown"]
 
+    asyncio.run(run())
+
+
+def test_unknown_game_does_not_block_new_game_after_a_retry(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
+        ))
+        store = ObservationStore(tmp_path / "unknown-retry.sqlite3")
+        selected = []
+        service = _service(store, selected)
+        games = [
+            Game("u1", f"{TABLE}/u1-player-banker", "", "840", "", 0),
+            Game("u2", f"{TABLE}/u2-player-banker", "", "841", "", 1),
+        ]
+        async def read_snapshot():
+            return games
+        service._read_game_list_snapshot = read_snapshot
+        await service._observe_iteration(set(), {})
+        assert [g.game_id for g in selected] == ["u1"]
+        retry = {"u1": asyncio.get_running_loop().time() + 60}
+        await service._observe_iteration(set(), retry)
+        assert [g.game_id for g in selected] == ["u1", "u2"]
+        assert service.observation_status != "ERROR"
+    asyncio.run(run())
+
+
+def test_finished_game_without_cards_yields_and_preserves_retry(tmp_path, monkeypatch):
+    """A permanently empty Player widget must not pin the observer forever."""
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings,
+            finished_recovery_timeout_seconds=0.1,
+            card_poll_seconds=0.1,
+            incomplete_retry_seconds=30,
+        ))
+        store = ObservationStore(tmp_path / "timeout.sqlite3")
+        service = _service(store, [])
+        game = Game("finished-no-cards", f"{TABLE}/finished-no-cards-player-banker",
+                    "", "850", "Завершена", 0, finished=True)
+        calls = []
+
+        async def save_attempt(*args, **kwargs):
+            calls.append(kwargs)
+            return True
+
+        async def inspect(*_args):
+            return {
+                "cards": [], "pending_card_slots": 0, "counts": {},
+                "cause": "Поле Игрока не загрузилось",
+                "finished": False, "status_text": "",
+            }
+
+        service._remember_game_scan = save_attempt
+        service._inspect_game_dom = inspect
+        processed = set()
+        retry = {}
+        await asyncio.wait_for(
+            BrowserService._scan_selected_game(service, game, [], processed, retry),
+            timeout=8,
+        )
+        assert calls
+        assert processed == set()
+        assert "finished-no-cards" in retry
+        assert service.observation_status == "INCOMPLETE"
+        assert service.current_observation["scan_result"] == "SCAN_TIMEOUT"
+        assert "продолжаем" in service.observation_diagnostic
     asyncio.run(run())

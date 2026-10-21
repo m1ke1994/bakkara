@@ -10,6 +10,7 @@ const scanResultNames = {
   CARDS_NOT_FOUND: '\u041a\u0430\u0440\u0442\u044b \u043d\u0435 \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u044b',
   PLAYER_FIELD_NOT_FOUND: '\u041f\u043e\u043b\u0435 \u0418\u0433\u0440\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e',
   PLAYER_CARDS_CONTAINER_NOT_FOUND: '\u041d\u0435\u0442 \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430 \u043a\u0430\u0440\u0442 \u0418\u0433\u0440\u043e\u043a\u0430',
+  SCAN_TIMEOUT: 'Время ожидания карт истекло — сканирование продолжается',
   CARDS_UNCONFIRMED: '\u0427\u0430\u0441\u0442\u044c \u0441\u043b\u043e\u0442\u043e\u0432 \u043d\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0430',
   NAVIGATION_ERROR: '\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0441\u0442\u0440\u0430\u043d\u0438\u0446\u0443',
   HISTORY_ERROR: '\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442',
@@ -41,6 +42,7 @@ Object.assign(names.observation, {
   GAME_FINISHED: 'Раздача завершена',
   SAVED: 'Результат сохранён',
   INCOMPLETE: 'Неполный результат',
+  RECOVERING: 'Восстановление после ошибки',
 })
 names.observation.CARDS_NOT_FOUND = 'Карты не обнаружены'
 const label = (group, value) => names[group]?.[value] || value || '—'

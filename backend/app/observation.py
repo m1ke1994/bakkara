@@ -363,6 +363,25 @@ def parse_game_list_html(
     return games
 
 
+def choose_observation_game(
+    games: list[Game], handled_ids: set[str],
+) -> Game | None:
+    """Choose the earliest readable game, even if its displayed state is UNKNOWN.
+
+    UPCOMING is *not* a prerequisite for passive card observation. The page
+    must have its own URL/game ID. If its round number is still missing, its
+    cards can be observed but will not count toward the 20-game warm-up until
+    the true number is recovered. No result is counted before final verification.
+    Finished games are also eligible for one recovery read when their final
+    hand is missing.  Retry cooldowns are supplied in handled_ids.
+    """
+    return next((
+        game for game in sorted(games, key=lambda item: item.position)
+        if game.game_id not in handled_ids
+        and game.game_id and game.url
+    ), None)
+
+
 def choose_next_game(
     games: list[Game], handled_ids: set[str], inspect_ids: set[str] | None = None,
 ) -> Game | None:

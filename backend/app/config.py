@@ -37,6 +37,9 @@ class Settings:
     game_finish_timeout_seconds: float = float(os.getenv("GAME_FINISH_TIMEOUT_SECONDS", "180"))
     player_hand_timeout_seconds: float = float(os.getenv("PLAYER_HAND_TIMEOUT_SECONDS", "90"))
     incomplete_retry_seconds: float = float(os.getenv("INCOMPLETE_RETRY_SECONDS", "30"))
+    # Incomplete games must not pin the entire observer forever.
+    scan_incomplete_timeout_seconds: float = float(os.getenv("SCAN_INCOMPLETE_TIMEOUT_SECONDS", "45"))
+    finished_recovery_timeout_seconds: float = float(os.getenv("FINISHED_RECOVERY_TIMEOUT_SECONDS", "12"))
 
 
 settings = Settings()

@@ -16,6 +16,7 @@ from .observation import (
     Game,
     ObservationStore,
     choose_next_game,
+    choose_observation_game,
     classify_game_status,
     classify_game,
     infer_upcoming_games,
@@ -447,8 +448,8 @@ class BrowserService:
                 failed_id = (self.current_observation or {}).get("game_id")
                 if failed_id and failed_id not in processed_ids:
                     retry_after[failed_id] = asyncio.get_running_loop().time() + max(settings.incomplete_retry_seconds, 5)
-                self.observation_status = "ERROR"
-                self.observation_diagnostic = f"Ошибка этапа «{self.observation_phase}»: {type(exc).__name__}. Повторим обход списка."
+                self.observation_status = "RECOVERING"
+                self.observation_diagnostic = f"Ошибка этапа «{self.observation_phase}»: {type(exc).__name__}. Продолжаем обход списка."
                 self.event("ERROR", self.observation_diagnostic)
                 log.exception("Ошибка наблюдения на этапе «%s» (%s).", self.observation_phase, type(exc).__name__)
                 await self._recover_to_game_list()
@@ -972,7 +973,7 @@ class BrowserService:
         await self._scan_selected_game(game, previous_cards, processed_ids, retry_after)
 
     async def _observe_iteration(self, processed_ids: set[str], retry_after: dict[str, float]) -> None:
-        """Select only a fresh, explicitly upcoming row and verify it just before navigation."""
+        """Open every readable round for passive observation, including UNKNOWN rows."""
         assert self.page is not None
         loop = asyncio.get_running_loop()
         # A queue can become stale while the chosen row starts or finishes.
@@ -1053,17 +1054,16 @@ class BrowserService:
                 reason = "Окончательный набор уже сохранён; повторно не открываем."
             elif item.game_id in deferred:
                 reason = "Повторная проверка отложена после временной ошибки или тайм-аута."
+            elif not item.round_number:
+                reason = "Номер игры неизвестен: не можем связать раздачу с циклом; повторим DOM."
             elif state == "FINISHED":
-                reason = "Игра завершена — пропуск."
+                reason = "Игра завершена, но карты не сохранены: проверим страницу для восстановления."
             elif state == "STARTED":
-                reason = "Игра уже началась — пропуск при первоначальном выборе."
+                reason = "Игра уже началась: откроем и проверим карты Игрока."
             elif state == "UPCOMING":
-                reason = (f"Следующая после начавшейся раздача, счёт 0:0 (таймер не показан) — подходит для чтения."
-                          if item.upcoming_by_sequence else
-                          f"До начала {item.time}; счёт 0:0 — подходит для выбора.")
+                reason = f"Игра ожидается, обратный отсчёт {item.time or 'не виден'}: откроем и проверим карты."
             else:
-                reason = ("Состояние UNKNOWN: нет подтверждённого обратного отсчёта, "
-                          "счёта 0:0 или связи с предыдущей начавшейся игрой — ожидание.")
+                reason = "Состояние UNKNOWN: URL и номер есть, откроем игру для чтения карт."
             if not item.round_number:
                 reason += f" {item.round_number_diagnostic}"
             self.game_diagnostics.append({
@@ -1077,11 +1077,8 @@ class BrowserService:
                 "upcoming_by_sequence": item.upcoming_by_sequence,
                 "score": f"{item.player_score or '—'} : {item.banker_score or '—'}", "reason": reason,
             })
-            if item.game_id in pending_targets and state != "UPCOMING":
-                await asyncio.to_thread(
-                    self.store.break_incoming_transition, item.game_id,
-                    f"Следующая игра пропущена: состояние {state}; прогноз через неё не переносится.",
-                )
+            # UNKNOWN/STARTED is not evidence of a missing game. Keep its
+            # incoming forecast pending until the actual Player cards are read.
 
         signature = tuple((item.game_id, classify_game(item), item.round_number,
                            item.player_score, item.banker_score, item.url) for item in all_games)
@@ -1091,15 +1088,13 @@ class BrowserService:
             for item in all_games:
                 state = classify_game(item)
                 if state == "FINISHED":
-                    summary = "завершена — пропуск"
+                    summary = "завершена — попытаемся восстановить карты"
                 elif state == "STARTED":
-                    summary = "уже началась — пропуск"
+                    summary = "уже началась — читаем карты"
                 elif state == "UPCOMING":
-                    summary = (f"следующая за начавшейся игрой, счёт 0:0 (таймер скрыт)"
-                               if item.upcoming_by_sequence else
-                               f"до начала {item.time}, счёт {item.player_score}:{item.banker_score}")
+                    summary = f"ожидается, {item.time or 'без таймера'}"
                 else:
-                    summary = "UNKNOWN — таймер до начала не подтверждён, пропуск"
+                    summary = "UNKNOWN — не блокирует наблюдение, попробуем открыть игру"
                 self.event("INFO", f"Раздача № {item.round_number or 'не указана'}: {summary}.")
             self._last_no_game_signature = signature
 
@@ -1108,14 +1103,16 @@ class BrowserService:
         invalidated_ids: set[str] = set()
         game: Game | None = None
         while True:
-            candidate = choose_next_game(all_games, excluded_ids | invalidated_ids)
+            candidate = choose_observation_game(all_games, excluded_ids | invalidated_ids)
             if candidate is None:
                 break
             async with self.page_lock:
                 fresh_games = await self._read_game_list_snapshot()
             await asyncio.to_thread(self.store.update_game_list_metadata, fresh_games)
             observed = next((item for item in fresh_games if item.game_id == candidate.game_id), None)
-            if observed is not None and is_same_upcoming_game(candidate, observed):
+            if (observed is not None and observed.url == candidate.url
+                    and observed.round_number == candidate.round_number
+                    and observed.game_id == candidate.game_id):
                 game = observed
                 all_games = fresh_games
                 break
@@ -1135,10 +1132,10 @@ class BrowserService:
         if game is None:
             self._queued_games = []
             self.observation_status = "WAITING_FOR_GAME"
-            self.observation_diagnostic = ("Игр до начала со счётом 0:0 пока нет. Повторяем сканирование."
-                                           if all_games else "Игровые строки баккары пока не найдены.")
+            self.observation_diagnostic = ("Все доступные раздачи обработаны или ожидают повторной проверки; продолжаем наблюдение."
+                                           if all_games else "Игры ещё загружаются; продолжаем наблюдение.")
             if all_games and signature != getattr(self, "_last_no_game_wait_signature", None):
-                self.event("INFO", "Игр до начала со счётом 0:0 пока нет. Повторяем сканирование.")
+                self.event("INFO", "Нет новых доступных игр; продолжаем проверять список без остановки.")
                 self._last_no_game_wait_signature = signature
             await asyncio.sleep(max(settings.observation_poll_seconds, 0.25))
             return
@@ -1451,7 +1448,7 @@ class BrowserService:
             finally:
                 self._active_chain_source_id = None
                 retry_after[game.game_id] = loop.time() + max(settings.incomplete_retry_seconds, 5)
-                self.observation_status = "ERROR"
+                self.observation_status = "RECOVERING"
                 self.observation_diagnostic = reason
                 self.event("ERROR", reason)
                 log.exception("Ошибка наблюдения игры %s (%s).", game.game_id, type(exc).__name__)
@@ -1670,6 +1667,34 @@ class BrowserService:
                         self.observation_status = "ERROR"
                         self.observation_diagnostic = "Снимок не сохранён; игра не отмечена обработанной."
                         self.event("ERROR", self.observation_diagnostic)
+                    return
+
+                # A broken/missing card DOM must never freeze the entire
+                # observer. Record the incomplete attempt and continue to the
+                # next readable round; this game remains recoverable on a later
+                # list pass and does not contribute WIN/LOSE or warm-up progress.
+                max_wait = (max(3.0, settings.finished_recovery_timeout_seconds)
+                            if list_finished else
+                            max(5.0, settings.scan_incomplete_timeout_seconds))
+                if loop.time() - started_at >= max_wait:
+                    detail = (
+                        f"Раздача № {game.round_number or game.game_id}: карты Игрока "
+                        f"не подтверждены за {max_wait:g} с. Отмечаем попытку как "
+                        "неполную (не LOSE), продолжаем к следующей игре. "
+                        "Повторное чтение будет доступно позже."
+                    )
+                    self._active_chain_source_id = None
+                    retry_after[game.game_id] = loop.time() + max(
+                        settings.incomplete_retry_seconds,
+                        180 if list_finished else 15)
+                    self.observation_status = "INCOMPLETE"
+                    self.observation_diagnostic = detail
+                    self.current_observation = {
+                        **(self.current_observation or {}),
+                        "scan_result": "SCAN_TIMEOUT", "reason": detail,
+                    }
+                    self.state_version = getattr(self, "state_version", 0) + 1
+                    self.event("WARNING", detail)
                     return
 
                 await asyncio.sleep(poll_seconds)
