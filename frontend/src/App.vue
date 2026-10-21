@@ -148,20 +148,26 @@ onBeforeUnmount(() => clearInterval(timer))
         </div>
         <p class="diagnostic">Каждый запуск наблюдения требует 20 новых последовательных раздач с подтверждёнными картами Игрока. Для целевой игры №N берём расчётную масть из №N−18. Реальные ставки бот не делает.</p>
         <div class="warmup">
-          <div class="section-title"><strong>Подготовка {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? 'Прогнозирование включено' : 'Ожидание подтверждённых игр' }}</span></div>
+          <div class="section-title"><strong>Карты прочитаны: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? 'Цикл 18 активен' : 'Идёт подготовка' }}</span></div>
           <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
+          <p class="diagnostic">Подтверждённых последовательных раздач: <strong>{{ cycle18.confirmed_warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong>.
+          Для начала WIN/LOSE нужны 20 окончательных наборов карт, а не только два промежуточных изображения карт Игрока.</p>
         </div>
         <p class="diagnostic">
           Всего обнаружено игр: <strong>{{ cycle18.discovered_count ?? 0 }}</strong>.
-          Ожидают подтверждения карт: <strong>{{ cycle18.missing_count ?? 0 }}</strong>.
+          Игр с прочитанными картами: <strong>{{ cycle18.captured_count ?? 0 }}</strong>.
+          Финальные руки: <strong>{{ cycle18.verified_count ?? 0 }}</strong>.
+          Ожидают подтверждения карт или начала: <strong>{{ cycle18.missing_count ?? 0 }}</strong>.
           Каждая раздача сохраняет свой номер в цикле, в том числе с UNKNOWN.
           Неизвестные карты не подменяются картами соседних игр.
         </p>
         <details v-if="cycle18.missing_hands?.length">
-          <summary>Неподтверждённые игры ({{ cycle18.missing_count }})</summary>
+          <summary>Раздачи без финального подтверждения ({{ cycle18.missing_count }})</summary>
           <p v-for="item in cycle18.missing_hands" :key="item.game_id">
             Раздача №{{ item.round_number || 'номер ещё не получен' }} ·
             ID {{ item.game_id }} · {{ scanResultName(item.scan_result) }}
+            · карт: {{ item.cards_count ?? 0 }}
+            <span v-if="item.reason"> · {{ item.reason }}</span>
           </p>
         </details>
         <div class="prediction-stats">

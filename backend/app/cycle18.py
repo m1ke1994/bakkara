@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .observation import evaluate_prediction
-from .suit_calculator import SUIT_SYMBOL_TO_NAME, calculate_cards_suit
+from .observation import evaluate_prediction, valid_card_rank
+from .suit_calculator import SUIT_SYMBOL_TO_NAME, calculate_cards_suit, normalize_suit
 
 CYCLE = 18
 WARMUP = 20
@@ -51,6 +51,26 @@ def is_next(previous: dict[str, Any], current: dict[str, Any]) -> bool:
     gap = (second - first).total_seconds()
     # One list snapshot can discover consecutive games at the same instant.
     return following(left) == right and 0 <= gap <= MAX_GAP_SECONDS
+
+
+def captured_cards(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Cards actually captured from Player; a list placeholder has no cards.
+
+    This is only a progress measure. Two visible cards aren't necessarily a
+    final hand until the observer confirms the end of the round.
+    """
+    try:
+        cards = json.loads(row.get("cards_json") or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(cards, list) or len(cards) not in (2, 3):
+        return []
+    positions = [card.get("position") for card in cards if isinstance(card, dict)]
+    if (positions != list(range(1, len(cards) + 1))
+            or any(not valid_card_rank(str(card.get("rank", "")))
+                   or normalize_suit(card.get("suit")) is None for card in cards)):
+        return []
+    return cards
 
 
 def verified_suit(row: dict[str, Any]) -> str | None:
@@ -129,60 +149,78 @@ class Cycle18Engine:
             rows = [dict(row) for row in db.execute("""
                 SELECT game_id,round_number,discovered_at,finished_at,
                        cards_json,completeness,calculated_suit,calculation_status,
-                       final_snapshot_reverified,player_hand_final
+                       final_snapshot_reverified,player_hand_final,
+                       scan_result,reason,last_scanned_at
                 FROM observations
                 WHERE discovered_at>=?
                 ORDER BY discovered_at,list_position,game_id
             """, (session["started_at"],)).fetchall()]
             by_id = {row["game_id"]: row for row in rows}
-            # Preserve the exact sequence of *all* discovered game IDs, even
-            # if the cards are still loading or a recovery scan was incomplete.
-            # A missing hand is a reserved slot, never a deleted/shifting row.
+            # Every real round keeps its physical position, even if unreadable.
+            # Discovered future placeholders do not count as observed hands.
             chain: list[dict[str, Any]] = []
-            completed_chain: list[dict[str, Any]] = []
+            confirmed_chain: list[dict[str, Any]] = []
+            captured_chain: list[dict[str, Any]] = []
+            confirmed_max_run = 0
             warmup_complete = False
-            latest_verified_run = 0
-            missing_hands = []
+            missing_hands: list[dict[str, Any]] = []
+            verified_total = 0
+            captured_total = 0
             for hand in rows:
-                if not verified_suit(hand):
+                confirmed = verified_suit(hand)
+                has_cards = bool(captured_cards(hand))
+                verified_total += bool(confirmed)
+                captured_total += has_cards
+                if not confirmed:
                     missing_hands.append({
-                        "game_id": hand["game_id"], "round_number": hand["round_number"],
+                        "game_id": hand["game_id"],
+                        "round_number": hand["round_number"],
+                        "cards_count": len(json.loads(hand["cards_json"] or "[]")),
+                        "calculation_status": hand["calculation_status"],
                         "scan_result": hand.get("scan_result", "DISCOVERED"),
+                        "reason": hand.get("reason", ""),
                     })
                 chain = chain + [hand] if chain and is_next(chain[-1], hand) else [hand]
-                # Only final verified hands advance the 20/20 training count.
-                # Do not bridge over a missing or unconfirmed physical round.
-                if verified_suit(hand):
-                    completed_chain = (completed_chain + [hand]
-                                       if completed_chain and is_next(completed_chain[-1], hand)
-                                       else [hand])
-                else:
-                    completed_chain = []
-                if verified_suit(hand):
-                    latest_verified_run = len(completed_chain)
-                if len(completed_chain) >= WARMUP:
+
+                # The displayed preparation progress counts real saved Player
+                # hands, not merely IDs on the list. Readiness is stricter:
+                # twenty consecutive hands must be truly finalized.
+                if has_cards:
+                    captured_chain = (captured_chain + [hand]
+                        if captured_chain and is_next(captured_chain[-1], hand)
+                        else [hand])
+                if confirmed:
+                    confirmed_chain = (confirmed_chain + [hand]
+                        if confirmed_chain and is_next(confirmed_chain[-1], hand)
+                        else [hand])
+                    confirmed_max_run = max(confirmed_max_run, len(confirmed_chain))
+                if confirmed_max_run >= WARMUP:
                     warmup_complete = True
                 if stopped_at or not warmup_complete or len(chain) < CYCLE:
                     continue
-                # Anchor is real physical game N. For N+1 only use the suit
-                # of the actual game N-17 (18 games behind the target).
-                # All intervening incomplete rounds retain their positions.
                 source = chain[-CYCLE]
-                if (round_number(source["round_number"]) is None
-                        or round_number(hand["round_number"]) is None):
+                source_number = round_number(source["round_number"])
+                hand_number = round_number(hand["round_number"])
+                if source_number is None or hand_number is None:
+                    continue
+                # Explicit arithmetic guards against a missing slot: it must
+                # be the true N-18 hand, not the eighteenth preceding CSV row.
+                if source_number != ((hand_number - CYCLE) % ROUND_MAX) + 1:
                     continue
                 predicted = verified_suit(source)
                 if not predicted:
-                    continue  # Missing N-18 source: NEVER use an adjacent row.
+                    continue
                 db.execute("""INSERT OR IGNORE INTO cycle18_forecasts
                     (session_id,source_game_id,anchor_game_id,source_round_number,
                      target_round_number,predicted_suit,created_at)
                     VALUES(?,?,?,?,?,?,?)""",
                     (sid, source["game_id"], hand["game_id"],
-                     round_number(source["round_number"]),
-                     following(round_number(hand["round_number"])), predicted,
+                     source_number, following(hand_number), predicted,
                      now.isoformat()))
-            warmup_count = WARMUP if warmup_complete else min(WARMUP, latest_verified_run)
+            # Once the first 20 final hands are validated, progress stays
+            # complete. Later partial hands remain visible as recoverable slots.
+            warmup_count = WARMUP if warmup_complete else min(WARMUP, len(captured_chain))
+            confirmed_warmup_count = min(WARMUP, confirmed_max_run)
 
             # Link each prediction to the exact numbered next hand. Never infer
             # the target ID from round number or list position.
@@ -299,7 +337,10 @@ class Cycle18Engine:
         pending_upcoming = [row for row in forecasts if row["result"] == "PENDING" and not row["target_game_id"]]
         return {
             "cycle": CYCLE, "warmup_required": WARMUP,
-            "warmup_count": warmup_count, "ready": warmup_complete and not stopped_at,
+            "warmup_count": warmup_count,
+            "confirmed_warmup_count": confirmed_warmup_count,
+            "captured_count": captured_total, "verified_count": verified_total,
+            "ready": warmup_complete and not stopped_at,
             "discovered_count": len(rows), "missing_hands": missing_hands[-30:],
             "missing_count": len(missing_hands),
             "session_id": sid, "session_started_at": session["started_at"],
@@ -334,6 +375,8 @@ class Cycle18Engine:
     def _empty() -> dict[str, Any]:
         return {
             "cycle": CYCLE, "warmup_required": WARMUP, "warmup_count": 0,
+            "confirmed_warmup_count": 0,
+            "captured_count": 0, "verified_count": 0,
             "ready": False, "session_active": False, "session_id": None,
             "discovered_count": 0, "missing_hands": [], "missing_count": 0,
             "statistics": {
