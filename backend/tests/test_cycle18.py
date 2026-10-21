@@ -246,3 +246,50 @@ def test_warmup_count_does_not_reach_twenty_by_skipping_unreadable_round(tmp_pat
     # The missing real round is retained and no forecast is fabricated.
     assert result["missing_hands"][0]["round_number"] == "20"
     assert result["upcoming"] == []
+
+
+def test_warmup_check_results_win_and_lose_without_old_legacy_links(tmp_path):
+    path = tmp_path / "warmup.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    add_round(store, 1, cards=[
+        {"position": 1, "rank": "9", "suit": "hearts"},
+        {"position": 2, "rank": "3", "suit": "clubs"},
+    ])  # f(hearts,clubs) = spades
+    add_round(store, 2, cards=[
+        {"position": 1, "rank": "10", "suit": "spades"},
+        {"position": 2, "rank": "3", "suit": "hearts"},
+    ])  # WIN against spades, f(spades,hearts) = clubs
+    add_round(store, 3, cards=[
+        {"position": 1, "rank": "7", "suit": "diamonds"},
+        {"position": 2, "rank": "2", "suit": "diamonds"},
+    ])  # LOSE against clubs
+    result = engine.refresh()
+    assert result["warmup_count"] == 3
+    assert result["warmup_statistics"] == {"checked_count": 2, "wins": 1, "losses": 1}
+    assert [item["result"] for item in result["warmup_results"]] == ["WIN", "LOSE"]
+    assert [item["mode"] for item in result["warmup_results"]] == [
+        "WARMUP_N_MINUS_1", "WARMUP_N_MINUS_1"]
+    assert result["statistics"]["checked_count"] == 0
+    assert result["ready"] is False
+
+
+def test_warmup_does_not_fabricate_result_when_round_number_conflicts(tmp_path):
+    path = tmp_path / "dupes.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    add_round(store, 10)
+    add_round(store, 11)
+    duplicate = Game("round-11-alias", "https://example.test/round-11-alias",
+                     "", "11", "Завершена", 11)
+    store.upsert(duplicate, [
+        {"position": 1, "rank": "A", "suit": "diamonds"},
+        {"position": 2, "rank": "2", "suit": "clubs"},
+    ], "CONFIRMED", "duplicate", "CARDS_CONFIRMED",
+       finished_confirmed=True, final_snapshot_reverified=True,
+       player_hand_final=True)
+    add_round(store, 12)
+    result = engine.refresh()
+    assert result["warmup_results"] == []
+    assert result["statistics"]["checked_count"] == 0
+    assert result["ready"] is False

@@ -30,6 +30,11 @@ from .observation import (
 
 log = logging.getLogger(__name__)
 
+# Old N-1 browser-to-browser prediction links are retired in the live bot.
+# All user-visible results now come from Cycle18Engine; historical legacy
+# records remain readable for migrations and old test fixtures.
+LEGACY_NEXT_GAME_MODE = False
+
 
 def scan_timeout_budget(game: Game, base_seconds: float) -> float:
     """Keep the observation window open through prestart and card settlement.
@@ -509,7 +514,7 @@ class BrowserService:
                         player_hand_final=player_hand_final,
                     )
                     stored = self.store.get(game.game_id)
-                if stored:
+                if stored and LEGACY_NEXT_GAME_MODE:
                     self.store.refresh_prediction_target(game.game_id)
                     stored = self.store.get(game.game_id)
                 return stored
@@ -518,7 +523,7 @@ class BrowserService:
             if stored_record and not game.round_number:
                 game.round_number = str(stored_record.get("round_number") or "")
             display_cards = stored_record["cards"] if stored_record else cards
-            if finished_confirmed and not display_cards:
+            if LEGACY_NEXT_GAME_MODE and finished_confirmed and not display_cards:
                 await asyncio.to_thread(
                     self.store.break_incoming_transition,
                     game.game_id,
@@ -1037,7 +1042,12 @@ class BrowserService:
         # Always rebuild from the live list on every selection pass.
         self._queued_games = []
         all_games: list[Game] = []
-        pending_targets = await asyncio.to_thread(self.store.pending_prediction_targets)
+        # Ignore old next-game links: only the numbered N-18 engine
+        # calculates real forecast statuses after the 20-hand warm-up.
+        pending_targets = (await asyncio.to_thread(self.store.pending_prediction_targets)
+                           if LEGACY_NEXT_GAME_MODE else set())
+        if not LEGACY_NEXT_GAME_MODE:
+            self._active_chain_source_id = None
         for target_id in pending_targets & processed_ids:
             await asyncio.to_thread(self.store.refresh_prediction_target, target_id)
         if pending_targets & processed_ids:
@@ -1215,7 +1225,7 @@ class BrowserService:
             return
         # Historical recovery is not the following live round. Do not attach
         # it to the legacy next-game forecast chain.
-        source_id = (None if recovering_old_game else
+        source_id = (None if recovering_old_game or not LEGACY_NEXT_GAME_MODE else
                      getattr(self, "_active_chain_source_id", None))
         if recovering_old_game:
             self._active_chain_source_id = None
@@ -1791,19 +1801,15 @@ class BrowserService:
                     if saved:
                         processed_ids.add(game.game_id)
                         retry_after.pop(game.game_id, None)
-                        completed_record = await asyncio.to_thread(self.store.get, game.game_id) or {}
                         self._set_lifecycle_state(game.game_id, "FINALIZED")
-                        incoming_result = completed_record.get("prediction_result", "NONE")
-                        self._set_lifecycle_state(game.game_id, "PREDICTION_EVALUATED",
-                                                  f"incoming_result={incoming_result}")
-                        incoming_source = completed_record.get("source_game_id")
-                        if incoming_source:
-                            self.event("INFO", f"PREDICTION_RESULT source_game_id={incoming_source} "
-                                       f"target_game_id={game.game_id} result={incoming_result}")
-                        self._active_chain_source_id = (
-                            game.game_id if completed_record.get("calculation_status") == "complete"
-                            and completed_record.get("player_hand_final") else None
-                        )
+                        if LEGACY_NEXT_GAME_MODE:
+                            completed_record = await asyncio.to_thread(self.store.get, game.game_id) or {}
+                            self._active_chain_source_id = (
+                                game.game_id if completed_record.get("calculation_status") == "complete"
+                                and completed_record.get("player_hand_final") else None
+                            )
+                        else:
+                            self._active_chain_source_id = None
                         self.observation_status = "SAVED"
                         self.observation_diagnostic = (
                             f"Окончательные карты раздачи № {game.round_number or game.game_id} сохранены; переходим к следующей игре."

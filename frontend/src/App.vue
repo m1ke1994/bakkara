@@ -19,9 +19,17 @@ const scanResultName = value => scanResultNames[value] || value || '\u2014'
 const state = ref({ state_epoch: '', state_version: 0, backend: 'CHECKING', browser: 'STOPPED', authorization: 'UNKNOWN', diagnostic: '', events: [], observation: { status: 'STOPPED', current: null, history: [], games: [] } })
 const busy = ref(false)
 const error = ref('')
-const statistics = computed(() => state.value.observation?.statistics || {})
-const cycle18 = computed(() => state.value.cycle18 || {})
+ const cycle18 = computed(() => state.value.cycle18 || {})
 const cycleStats = computed(() => cycle18.value.statistics || {})
+const warmupStats = computed(() => cycle18.value.warmup_statistics || {})
+const outcomesById = computed(() => {
+  const outcomes = new Map()
+  for (const result of cycle18.value.warmup_results || []) outcomes.set(result.target_game_id, result)
+  for (const result of cycle18.value.recent || []) outcomes.set(result.target_game_id, result)
+  return outcomes
+})
+const outcomeFor = gameId => outcomesById.value.get(gameId)
+const outcomeLabel = result => result === 'WIN' || result === 'LOSE' ? result : result === 'PENDING' ? 'Ожидаем итог' : '—'
 const badge = value => String(value || 'UNKNOWN').toLowerCase().replaceAll('_', '-')
 const running = computed(() => !['STOPPED', 'ERROR'].includes(state.value.browser))
 const observing = computed(() => !['STOPPED', 'ERROR'].includes(state.value.observation?.status))
@@ -47,7 +55,7 @@ Object.assign(names.observation, {
 names.observation.CARDS_NOT_FOUND = 'Карты не обнаружены'
 const label = (group, value) => names[group]?.[value] || value || '—'
 const suits = { hearts: ['♥', 'черви'], diamonds: ['♦', 'бубны'], clubs: ['♣', 'трефы'], spades: ['♠', 'пики'] }
-const predictionLabels = { WIN: 'WIN', LOSE: 'LOSE', PENDING: 'Ожидается', UNKNOWN: 'Неизвестно', SKIPPED: 'Пропуск' }
+const predictionLabels = { WIN: 'WIN', LOSE: 'LOSE', PENDING: 'Ожидаем итог', UNKNOWN: 'Нет финальных карт', SKIPPED: 'Нет результата' }
 const isRedSuit = suit => ['hearts', 'diamonds'].includes(suit)
 function formatObservedAt(value) {
   if (!value) return '—'
@@ -128,7 +136,7 @@ onBeforeUnmount(() => clearInterval(timer))
         </p>
         <details><summary>Адрес страницы игры</summary><p>{{ state.observation.current.url }}</p></details>
         <p>Игра: {{ state.observation.current.game_id }} · Раздача: {{ state.observation.current.round_number || '—' }}</p>
-        <p v-if="state.observation.current.outgoing_prediction || state.observation.current.incoming_prediction">Входящий прогноз: {{ suits[state.observation.current.incoming_prediction]?.[0] || '—' }} · Исходящий прогноз: {{ suits[state.observation.current.outgoing_prediction]?.[0] || '—' }}</p>
+        <p v-if="outcomeFor(state.observation.current.game_id)">Проверка {{ outcomeFor(state.observation.current.game_id).mode === 'WARMUP_N_MINUS_1' ? 'подготовки N−1' : 'цикла N−18' }}: {{ suits[outcomeFor(state.observation.current.game_id).predicted_suit]?.[0] || '—' }} · {{ outcomeLabel(outcomeFor(state.observation.current.game_id).result) }}</p>
         <details v-if="state.observation.current.round_number_diagnostic"><summary>Проверка номера раздачи</summary><p>{{ state.observation.current.round_number_diagnostic }}</p></details>
         <ol><li v-for="(card, index) in state.observation.current.cards" :key="card.position || index">{{ card.position || index + 1 }}. {{ card.rank }} {{ suits[card.suit]?.[0] }} — {{ suits[card.suit]?.[1] }}</li></ol>
         <p>Раскрытых карт: {{ state.observation.current.cards_count }} · Нераскрытых позиций: {{ state.observation.current.pending_card_slots }}</p>
@@ -151,15 +159,18 @@ onBeforeUnmount(() => clearInterval(timer))
           <div class="section-title"><strong>Карты прочитаны: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? 'Цикл 18 активен' : 'Идёт подготовка' }}</span></div>
           <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
           <p class="diagnostic">Подтверждённых последовательных раздач: <strong>{{ cycle18.confirmed_warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong>.
-          Для начала WIN/LOSE нужны 20 окончательных наборов карт, а не только два промежуточных изображения карт Игрока.</p>
+          После 20 окончательных наборов карт включится цикл N−18. Во время подготовки отдельно проверяем соседние подтверждённые раздачи (N−1).</p>
+          <p class="diagnostic">Проверки подготовки N−1: {{ warmupStats.checked_count ?? 0 }} ·
+          WIN: <strong class="win-text">{{ warmupStats.wins ?? 0 }}</strong> ·
+          LOSE: <strong class="lose-text">{{ warmupStats.losses ?? 0 }}</strong>.
+          Эти результаты не смешиваются со статистикой цикла 18.</p>
         </div>
         <p class="diagnostic">
           Всего обнаружено игр: <strong>{{ cycle18.discovered_count ?? 0 }}</strong>.
           Игр с прочитанными картами: <strong>{{ cycle18.captured_count ?? 0 }}</strong>.
           Финальные руки: <strong>{{ cycle18.verified_count ?? 0 }}</strong>.
           Ожидают подтверждения карт или начала: <strong>{{ cycle18.missing_count ?? 0 }}</strong>.
-          Каждая раздача сохраняет свой номер в цикле, в том числе с UNKNOWN.
-          Неизвестные карты не подменяются картами соседних игр.
+          Раздачи без подтверждения остаются в истории и не сдвигают цикл. Карты соседних игр не подменяют отсутствующие.
         </p>
         <details v-if="cycle18.missing_hands?.length">
           <summary>Раздачи без финального подтверждения ({{ cycle18.missing_count }})</summary>
@@ -204,27 +215,17 @@ onBeforeUnmount(() => clearInterval(timer))
           </div>
         </details>
       </section>
-      <h3>Эффективность прогнозов на следующую игру (старый режим)</h3>
-      <div class="prediction-stats" aria-label="Статистика проверенных прогнозов">
-        <article><span>Проверено</span><strong>{{ statistics.checked_count ?? 0 }}</strong></article>
-        <article><span>WIN</span><strong class="win-text">{{ statistics.wins ?? 0 }}</strong></article>
-        <article><span>LOSE</span><strong class="lose-text">{{ statistics.losses ?? 0 }}</strong></article>
-        <article><span>Процент WIN</span><strong>{{ statistics.win_rate == null ? 'Нет данных' : `${statistics.win_rate}%` }}</strong></article>
-        <article><span>Серия WIN</span><strong>{{ statistics.current_win_streak ?? 0 }}</strong></article>
-        <article><span>Серия LOSE</span><strong>{{ statistics.current_lose_streak ?? 0 }}</strong></article>
-        <article><span>Макс. серия LOSE</span><strong>{{ statistics.max_lose_streak ?? 0 }}</strong></article>
-      </div>
       <div class="section-title history-heading"><h3>История наблюдений</h3><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div><p v-if="!state.observation?.history?.length">Сохранённых наблюдений пока нет.</p>
       <div v-else class="history-table-scroll">
         <table class="history-table" aria-label="История наблюдений">
-          <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th scope="col">Прогноз на следующую</th><th scope="col">WIN / LOSE</th></tr></thead>
+          <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th scope="col">Расчётная масть</th><th scope="col">WIN / LOSE</th></tr></thead>
           <tbody>
             <tr v-for="item in state.observation.history" :key="item.game_id">
               <td class="history-time">{{ formatObservedAt(item.observed_at || item.last_scanned_at || item.discovered_at) }}</td>
               <td class="history-round"><strong><a v-if="item.game_url || item.url" :href="item.game_url || item.url" target="_blank" rel="noopener noreferrer" :title="`Открыть игру ${item.game_id}`">{{ item.round_number || '—' }}</a><span v-else>{{ item.round_number || '—' }}</span></strong></td>
               <td><div v-if="item.player_cards?.length" class="history-card-line"><span v-for="(card, index) in item.player_cards" :key="card.position || index" class="history-card" :class="isRedSuit(card.suit) ? 'red-suit' : 'black-suit'">{{ card.rank }}{{ suits[card.suit]?.[0] || '' }}</span></div><span v-else class="prediction-none">—</span></td>
-              <td><span v-if="item.outgoing_prediction" class="calculated-suit" :class="isRedSuit(item.outgoing_prediction) ? 'red-suit' : 'black-suit'" :title="`Для следующей игры. Входящий прогноз этой строки: ${suits[item.incoming_prediction]?.[1] || 'нет'}; результат WIN/LOSE относится к нему.`">{{ suits[item.outgoing_prediction]?.[0] || '—' }}</span><span v-else class="prediction-none" :title="`Входящий прогноз: ${suits[item.incoming_prediction]?.[1] || 'нет'}`">—</span></td>
-              <td><span v-if="item.prediction_result" class="prediction-result" :class="`prediction-${item.prediction_result.toLowerCase()}`">{{ predictionLabels[item.prediction_result] || item.prediction_result }}</span><span v-else class="prediction-none">—</span></td>
+              <td><span v-if="item.calculated_suit" class="calculated-suit" :class="isRedSuit(item.calculated_suit) ? 'red-suit' : 'black-suit'" title="Масть, рассчитанная из карт этой раздачи">{{ suits[item.calculated_suit]?.[0] || '—' }}</span><span v-else class="prediction-none">—</span></td>
+              <td><span v-if="outcomeFor(item.game_id) && ['WIN', 'LOSE'].includes(outcomeFor(item.game_id).result)" class="prediction-result" :class="`prediction-${outcomeFor(item.game_id).result.toLowerCase()}`" :title="`Проверка ${outcomeFor(item.game_id).mode === 'WARMUP_N_MINUS_1' ? 'подготовки N−1' : 'цикла N−18'}, прогноз ${suits[outcomeFor(item.game_id).predicted_suit]?.[1] || '—'}`">{{ outcomeFor(item.game_id).result }}</span><span v-else class="prediction-none" title="Нет подтверждённой проверяемой пары раздач">—</span></td>
             </tr>
           </tbody>
         </table>

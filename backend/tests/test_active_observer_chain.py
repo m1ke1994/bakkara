@@ -2,9 +2,17 @@ import asyncio
 from collections import deque
 from dataclasses import replace
 
+import pytest
 import app.browser as browser_module
 from app.browser import BrowserService
 from app.observation import Game, ObservationStore
+
+
+@pytest.fixture(autouse=True)
+def enable_retired_linking_for_compatibility_tests(monkeypatch):
+    # This module's earlier tests explicitly exercise the archived N-1
+    # browser-to-browser links. Production defaults to cycle18-only.
+    monkeypatch.setattr(browser_module, "LEGACY_NEXT_GAME_MODE", True)
 
 
 TABLE = "https://example.test/ru/live/baccarat/table"
@@ -322,3 +330,27 @@ def test_unknown_without_timer_can_still_be_opened_as_last_resort():
     no_status = Game("unknown", f"{TABLE}/unknown-player-banker",
                      "", "840", "", 0)
     assert choose_observation_game([no_status], set()).game_id == "unknown"
+
+
+def test_default_cycle18_mode_never_links_legacy_prediction(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "LEGACY_NEXT_GAME_MODE", False)
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
+        ))
+        store = ObservationStore(tmp_path / "cycle18-only.sqlite3")
+        _complete_source(store)
+        selected = []
+        service = _service(store, selected)
+        target = Game("round-617", f"{TABLE}/round-617-player-banker",
+                      "00:15", "617", "UPCOMING", 0,
+                      player_score="0", banker_score="0", is_countdown_to_start=True)
+        async def read_snapshot():
+            return [target]
+        service._read_game_list_snapshot = read_snapshot
+        await service._observe_iteration({"source"}, {})
+        assert [game.game_id for game in selected] == ["round-617"]
+        assert store.pending_prediction_targets() == set()
+        assert store.get("source").get("outgoing_target_game_id") is None
+        assert not any("PREDICTION_RESULT" in e["message"] for e in service.events)
+    asyncio.run(run())
