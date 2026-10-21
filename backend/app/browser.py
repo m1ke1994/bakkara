@@ -30,6 +30,15 @@ from .observation import (
 log = logging.getLogger(__name__)
 
 
+def parse_round_timer(value: str | None) -> int | None:
+    """Read a valid, visible MM:SS timer without treating other statuses as time."""
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value or "").strip())
+    if not match or int(match.group(2)) >= 60:
+        return None
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+
 GAME_LIST_SNAPSHOT_SCRIPT = r"""() => {
   const selector = '.dashboard-game-block__link[href]';
   const links = [...document.querySelectorAll(selector)];
@@ -413,7 +422,11 @@ class BrowserService:
         self.event("INFO", f"Загружено завершённых игр из истории: {len(processed_ids)}.")
         while self.context is not None and self.page is not None:
             if not authorization_allows_observation(self.authorization):
-                if self.authorization == "AUTH_LOST":
+                if self.authorization == "ACCESS_DENIED":
+                    self.observation_status = "ACCESS_DENIED"
+                    self.observation_diagnostic = ("Сайт сообщает «Доступ запрещён». "
+                        "Игровой DOM недоступен, сканер ожидает восстановления разрешённого доступа.")
+                elif self.authorization == "AUTH_LOST":
                     source_id, self._active_chain_source_id = self._active_chain_source_id, None
                     if source_id:
                         self.store.record_unresolved_transition(
@@ -681,7 +694,9 @@ class BrowserService:
                     if (/^(?:A|[2-9]|10|J|Q|K)$/.test(rank) && suit) cards.push({position: boxIndex + 1, rank, suit});
                     else pending += 1;
                   }
-                  const statusTexts = [...document.querySelectorAll('.scoreboard-header__match-info, .ui-game-timer__label, .scoreboard-status')]
+                  const timerLabels = [...document.querySelectorAll('.ui-game-timer__label')]
+                    .filter(visible).map(text).filter(value => /^\d{1,2}:\d{2}$/.test(value));
+                  const statusTexts = [...document.querySelectorAll('.scoreboard-header__match-info, .scoreboard-status')]
                     .filter(visible).map(text).filter(Boolean);
                   let finishFlag = null;
                   try {
@@ -707,6 +722,7 @@ class BrowserService:
                       player_card_suits: suitCount
                     },
                     cards, pending_card_slots: pending, status_texts: statusTexts,
+                    round_timer_text: timerLabels[0] || '',
                     finished, finish_flag_text: finishFlag ? text(finishFlag) : '',
                     fragment: relevant ? (relevant.outerHTML || '').slice(0, 3500) : ''
                   };
@@ -754,6 +770,8 @@ class BrowserService:
             "cards": (data_frame or {}).get("cards", []),
             "pending_card_slots": (data_frame or {}).get("pending_card_slots", 0),
             "snapshot_captured_at_ms": (data_frame or {}).get("captured_at_ms"),
+            "round_timer_text": next((frame["round_timer_text"] for frame in frames
+                                      if frame.get("round_timer_text")), ""),
             "finished": any(frame.get("finished", False) for frame in frames),
             "finish_flag_text": next((frame.get("finish_flag_text", "") for frame in frames if frame.get("finished")), ""),
             "status_text": " ".join(dict.fromkeys(text for frame in frames for text in frame.get("status_texts", []))),
@@ -776,6 +794,12 @@ class BrowserService:
             self.status = "AUTH_TEMPORARY"
             if previous != result:
                 self.event("WARNING", "Маркер входа временно отсутствует; продолжается только чтение доступной страницы.")
+        elif result == "ACCESS_DENIED":
+            self.status = "ACCESS_DENIED"
+            self.observation_status = "ACCESS_DENIED"
+            self.observation_diagnostic = "Доступ запрещён сайтом; игровое поле недоступно."
+            if previous != result:
+                self.event("ERROR", self.observation_diagnostic)
         elif result == "AUTH_LOST":
             self.status = "AUTH_LOST"
             self.observation_status = "AUTH_LOST"
@@ -1494,6 +1518,10 @@ class BrowserService:
         last_saved_signature: tuple[Any, ...] | None = None
         first_card_at: dict[int, float] = {}
         component_logged = False
+        previous_timer_seconds: int | None = None
+        countdown_decreased = False
+        countdown_zero_since: float | None = None
+        countdown_zero_announced = False
         list_finished = game.status == "Завершена" or is_finished_status(game.status_text)
         self.observation_phase = "переход к выбранной игре"
 
@@ -1534,6 +1562,20 @@ class BrowserService:
                         reread["finish_flag_text"] = reread.get("finish_flag_text") or finish_text
                         diagnostics = reread
                 finish_seen = in_page_finished or list_finished
+                timer_text = diagnostics.get("round_timer_text", "")
+                timer_seconds = parse_round_timer(timer_text)
+                if timer_seconds is not None:
+                    if (previous_timer_seconds is not None and
+                            timer_seconds < previous_timer_seconds and previous_timer_seconds > 0):
+                        countdown_decreased = True
+                    previous_timer_seconds = timer_seconds
+                if timer_seconds == 0 and countdown_decreased:
+                    if countdown_zero_since is None:
+                        countdown_zero_since = loop.time()
+                    if not countdown_zero_announced:
+                        countdown_zero_announced = True
+                        self.event("INFO", f"Таймер раздачи № {game.round_number or game.game_id} достиг 00:00; "
+                                   "проверяем, появилась ли третья карта Игрока.")
                 last_diagnostics = diagnostics
                 status_text = diagnostics.get("status_text", "")
                 page_status = classify_game_status(status_text)
@@ -1575,7 +1617,13 @@ class BrowserService:
                                and [item.get("position") for item in observed_cards] == [1, 2, 3])
                 confirmed_three = exact_three
                 confirmed_two = False
-                if finish_seen and exact_two:
+                # After witnessing a countdown decrease and reach zero, allow
+                # the third card to render before accepting two stable cards.
+                timer_end_two = bool(
+                    exact_two and countdown_zero_since is not None
+                    and loop.time() - countdown_zero_since >= 1.5
+                )
+                if (finish_seen or timer_end_two) and exact_two:
                     # The visible end flag or explicit finished list status is the signal;
                     # a repeated read verifies the same two positions without an arbitrary delay.
                     async with self.page_lock:
@@ -1601,7 +1649,9 @@ class BrowserService:
                 if confirmed_three:
                     reason = f"В одном атомарном DOM-снимке прочитаны три полные позиции Игрока; ждать завершения игры не требуется. {cause}"
                 elif confirmed_two:
-                    reason = f"Подтверждены две окончательные карты: получен явный сигнал завершения раздачи и набор перечитан. {cause}"
+                    signal = ("убывающий таймер достиг 00:00, третья карта не появилась"
+                              if timer_end_two and not finish_seen else "явный сигнал завершения раздачи")
+                    reason = f"Подтверждены две окончательные карты: {signal}; набор перечитан. {cause}"
                 elif finish_seen and cards:
                     reason = f"Игра завершена, но окончательный набор карт не подтверждён; сохранён последний достоверный снимок. {cause}"
                 elif finish_seen:
@@ -1621,6 +1671,8 @@ class BrowserService:
                     "time": game.time, "site_status": game.status, "status_text": game.status_text,
                     "player_score": game.player_score, "banker_score": game.banker_score,
                     "cards": cards, "cards_count": len(cards), "pending_card_slots": pending,
+                    "round_timer_text": timer_text,
+                    "round_timer_seconds": timer_seconds,
                     "scan_result": scan_result, "finished_confirmed": finish_seen,
                     "player_hand_final": hand_final,
                     "final_snapshot_reverified": final_reverified if hand_final else None,
@@ -1789,6 +1841,13 @@ class BrowserService:
                     self.status = "AUTH_TEMPORARY"
                     if previous != "TEMPORARILY_UNCONFIRMED":
                         self.event("WARNING", "Признак входа временно недоступен. Повторяем проверку на этой странице.")
+                elif result == "ACCESS_DENIED":
+                    self.status = "ACCESS_DENIED"
+                    self.observation_status = "ACCESS_DENIED"
+                    self.observation_diagnostic = ("Сайт показывает «Доступ запрещён». "
+                        "Сбор карт приостановлен до возвращения разрешённого доступа.")
+                    if previous != result:
+                        self.event("ERROR", self.observation_diagnostic)
                 elif result == "AUTH_LOST":
                     self.status = "AUTH_LOST"
                     if previous != "AUTH_LOST":
@@ -1833,6 +1892,18 @@ class BrowserService:
         }""")
         if classify_auth_probe(balance_marker=False, login_surface=login_surface) == "AUTH_LOST":
             return "AUTH_LOST", "На странице отображается форма входа. Требуется ручная проверка авторизации."
+        # A site-level geographic/legal access rejection is not an ambiguous
+        # login marker and must not trigger retries that reload protected pages.
+        try:
+            denied = await self.page.evaluate("""() => {
+                const body = (document.body?.innerText || '').slice(0, 6000);
+                return /доступ\\s+запрещ[её]н|access\\s+denied/i.test(body);
+            }""")
+        except Exception:
+            denied = False
+        if denied:
+            return "ACCESS_DENIED", ("Букмекер сообщил «Доступ запрещён». "
+                                     "Сканирование недоступно, пока сайт не разрешит доступ.")
         currency_pattern = re.compile(
             rf"(?<![A-Za-zА-Яа-я0-9]){re.escape(settings.currency_text)}(?![A-Za-zА-Яа-я0-9])"
         )

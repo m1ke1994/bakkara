@@ -396,3 +396,143 @@ def test_explicit_end_does_not_advance_until_player_hand_is_complete(tmp_path, m
         return value
 
     asyncio.run(run())
+
+
+def test_baccarat_round_timer_is_read_from_visible_dom_and_not_status():
+    async def run():
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            service.page = page
+            try:
+                await page.set_content("""
+                  <style>.ui-game-timer__label { display:block; }</style>
+                  <span class="ui-caption ui-game-timer__label">00:17</span>
+                  <div class="baccarat-player baccarat__player">
+                    <span class="baccarat-player__name">Игрок</span>
+                    <ul class="baccarat-player__cards">
+                      <li class="baccarat-player__card-box suit-clubs">
+                        <span class="baccarat-card__rank">10</span></li>
+                      <li class="baccarat-player__card-box suit-spades">
+                        <span class="baccarat-card__rank">2</span></li>
+                    </ul>
+                  </div>
+                """)
+                result = await service._inspect_game_dom("Игрок", "Банкир")
+                assert result["round_timer_text"] == "00:17"
+                assert result["finished"] is False
+                await page.locator(".ui-game-timer__label").evaluate(
+                    "node => node.textContent = '00:00'"
+                )
+                assert (await service._inspect_game_dom("Игрок", "Банкир"))["round_timer_text"] == "00:00"
+            finally:
+                await browser.close()
+    asyncio.run(run())
+
+
+def test_two_card_round_countdown_zero_is_verified_and_saved(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, card_poll_seconds=0.1,
+            scan_incomplete_timeout_seconds=8,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **_kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "two-timer.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = {"game_id": "two-timer"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        cards = [
+            {"position": 1, "rank": "10", "suit": "clubs"},
+            {"position": 2, "rank": "2", "suit": "spades"},
+        ]
+        reads = 0
+        async def inspect(_player, _banker):
+            nonlocal reads
+            reads += 1
+            timer = "00:03" if reads == 1 else "00:02" if reads == 2 else "00:00"
+            return {
+                "cards": cards, "round_timer_text": timer,
+                "pending_card_slots": 0,
+                "counts": {"player_fields": 1, "player_cards_containers": 1,
+                           "player_card_boxes": 2},
+                "finished": False, "status_text": "", "cause": "fixture",
+            }
+        service._inspect_game_dom = inspect
+        game = Game("two-timer", "https://example.test/two-timer", "",
+                    "915", "Идёт", 0)
+        processed = set()
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, {}), timeout=6
+        )
+        assert processed == {"two-timer"}
+        saved = service.store.get("two-timer")
+        assert saved["cards"] == cards
+        assert saved["player_hand_final"] is True
+        assert saved["final_snapshot_reverified"] is True
+        assert saved["finished_confirmed"] is False
+        assert saved["calculation_status"] == "complete"
+        assert reads >= 4
+        assert "таймер" in saved["reason"]
+    asyncio.run(run())
+
+
+def test_delayed_third_card_after_zero_prevents_early_two_card_finish(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, card_poll_seconds=0.1,
+            scan_incomplete_timeout_seconds=8,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **_kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "third-timer.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = {"game_id": "third-timer"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        two = [
+            {"position": 1, "rank": "10", "suit": "clubs"},
+            {"position": 2, "rank": "2", "suit": "spades"},
+        ]
+        third = {"position": 3, "rank": "A", "suit": "hearts"}
+        reads = 0
+        async def inspect(_player, _banker):
+            nonlocal reads
+            reads += 1
+            timer = "00:02" if reads == 1 else "00:00"
+            cards = two if reads < 6 else two + [third]
+            return {"cards": cards, "round_timer_text": timer,
+                    "pending_card_slots": 0,
+                    "counts": {"player_fields": 1, "player_cards_containers": 1,
+                               "player_card_boxes": len(cards)},
+                    "finished": False, "status_text": "", "cause": "fixture"}
+        service._inspect_game_dom = inspect
+        game = Game("third-timer", "https://example.test/third-timer", "",
+                    "916", "Идёт", 0)
+        processed = set()
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, {}), timeout=6
+        )
+        assert processed == {"third-timer"}
+        saved = service.store.get("third-timer")
+        assert saved["cards"] == two + [third]
+        assert saved["calculation_status"] == "complete"
+    asyncio.run(run())
