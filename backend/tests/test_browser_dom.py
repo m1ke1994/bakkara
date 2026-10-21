@@ -483,7 +483,7 @@ def test_two_card_round_countdown_zero_is_verified_and_saved(tmp_path, monkeypat
         assert saved["finished_confirmed"] is False
         assert saved["calculation_status"] == "complete"
         assert reads >= 4
-        assert "таймер" in service.observation_diagnostic
+        assert "таймер" in saved["reason"]
     asyncio.run(run())
 
 
