@@ -150,6 +150,8 @@ onBeforeUnmount(() => clearInterval(timer))
           <article><span>WIN</span><strong class="win-text">{{ cycleStats.wins ?? 0 }}</strong></article>
           <article><span>LOSE</span><strong class="lose-text">{{ cycleStats.losses ?? 0 }}</strong></article>
           <article><span>Точность</span><strong>{{ cycleStats.win_rate == null ? '—' : cycleStats.win_rate + '%' }}</strong></article>
+          <article><span>Онлайн-проверки</span><strong>{{ cycleStats.live_checked ?? 0 }}</strong></article>
+          <article><span>Постфактум</span><strong>{{ cycleStats.backfill_checked ?? 0 }}</strong></article>
           <article><span>Максимум LOSE подряд</span><strong>{{ cycleStats.max_lose_streak ?? 0 }}</strong></article>
           <article><span>Виртуальный следующий шаг</span><strong>{{ cycleStats.next_step ?? 1 }}</strong></article>
         </div>
@@ -165,11 +167,12 @@ onBeforeUnmount(() => clearInterval(timer))
           <summary>История прогнозов цикла 18 ({{ cycle18.recent.length }})</summary>
           <div class="history-table-scroll">
             <table class="history-table" aria-label="Прогнозы цикла 18">
-              <thead><tr><th>Источник</th><th>Целевая игра</th><th>Прогноз</th><th>Результат</th><th>Проверка</th></tr></thead>
+              <thead><tr><th>Источник</th><th>Целевая игра</th><th>Прогноз</th><th>Результат</th><th>Шаг</th><th>Проверка</th></tr></thead>
               <tbody><tr v-for="forecast in cycle18.recent" :key="forecast.source_game_id">
                 <td>№{{ forecast.source_round_number }}</td><td>№{{ forecast.target_round_number }}</td>
                 <td :class="isRedSuit(forecast.predicted_suit) ? 'red-suit' : 'black-suit'">{{ suits[forecast.predicted_suit]?.[0] || '—' }}</td>
                 <td><strong :class="forecast.result === 'WIN' ? 'win-text' : forecast.result === 'LOSE' ? 'lose-text' : ''">{{ predictionLabels[forecast.result] || forecast.result }}</strong></td>
+                <td>{{ forecast.step ?? '—' }}</td>
                 <td>{{ forecast.mode === 'BACKFILL' ? 'По истории' : 'Наблюдение' }}</td>
               </tr></tbody>
             </table>
