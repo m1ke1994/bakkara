@@ -18,6 +18,7 @@ from .observation import (
     choose_next_game,
     classify_game_status,
     classify_game,
+    infer_upcoming_games,
     is_finished_status,
     is_same_upcoming_game,
     classify_player_scan,
@@ -178,7 +179,12 @@ GAME_LIST_BLOCK_SNAPSHOT_SCRIPT = r"""() => {
       && !/\bnot[\s_-]+started\b|не\s+(?:начал[ао]сь|в игре)/i.test(combinedStateEvidence);
     const teamNames = owned('.ui-game-scores__item--total ~ .ui-team-score-name, .ui-team-score-name')
       .map(text).map(value => value.toLocaleLowerCase());
-    const scores = owned('.ui-game-scores__item--total .ui-game-scores__num').map(text);
+    const totalScores = owned('.ui-game-scores__item--total .ui-game-scores__num').map(text);
+    // Some Baccarat skins render the two scores without a --total wrapper.
+    // Use this scoped fallback only when there are exactly two score nodes.
+    const visibleScores = owned('.ui-game-scores__num').map(text);
+    const scores = totalScores.length === 2 ? totalScores
+      : visibleScores.length === 2 ? visibleScores : totalScores;
     const playerIndex = teamNames.findIndex(value => /^(?:игрок|player)$/.test(value));
     const bankerIndex = teamNames.findIndex(value => /^(?:банкир|banker)$/.test(value));
     const playerScore = scores.length === teamNames.length && playerIndex >= 0 ? scores[playerIndex] : null;
@@ -601,7 +607,7 @@ class BrowserService:
                 if previous is not None:
                     game.position = previous.position
                 unique[game.game_id] = game
-        return sorted(unique.values(), key=lambda game: game.position)
+        return infer_upcoming_games(sorted(unique.values(), key=lambda game: game.position))
 
     @staticmethod
     def _log_game_list_snapshot(games: list[Game]) -> None:
@@ -619,6 +625,7 @@ class BrowserService:
                 "player_score": game.player_score or None,
                 "banker_score": game.banker_score or None,
                 "is_countdown_to_start": game.is_countdown_to_start,
+                "upcoming_by_sequence": game.upcoming_by_sequence,
                 "timer_evidence": game.timer_evidence or None,
                 "dom_position": game.position + 1,
             }
@@ -982,7 +989,13 @@ class BrowserService:
         async with self.page_lock:
             if not await self._probe_observation_auth_locked():
                 return
-            await self.page.goto(settings.game_list_url, wait_until="domcontentloaded", timeout=30_000)
+            # Stay on the already-open live list: navigating on each poll
+            # restarts the site's loading skeleton and often prevents the
+            # countdown/status widgets from finishing hydration.
+            current_path = urlparse(self.page.url).path.rstrip("/")
+            wanted_path = urlparse(settings.game_list_url).path.rstrip("/")
+            if current_path != wanted_path:
+                await self.page.goto(settings.game_list_url, wait_until="domcontentloaded", timeout=30_000)
             await self.page.locator("li.dashboard-champ-body").first.wait_for(timeout=6_000)
             try:
                 await self.page.wait_for_function(
@@ -1045,9 +1058,12 @@ class BrowserService:
             elif state == "STARTED":
                 reason = "Игра уже началась — пропуск при первоначальном выборе."
             elif state == "UPCOMING":
-                reason = f"До начала {item.time}; счёт 0:0 — подходит для выбора."
+                reason = (f"Следующая после начавшейся раздача, счёт 0:0 (таймер не показан) — подходит для чтения."
+                          if item.upcoming_by_sequence else
+                          f"До начала {item.time}; счёт 0:0 — подходит для выбора.")
             else:
-                reason = "Состояние UNKNOWN: явный предматчевый таймер и счёт 0:0 не подтверждены — пропуск."
+                reason = ("Состояние UNKNOWN: нет подтверждённого обратного отсчёта, "
+                          "счёта 0:0 или связи с предыдущей начавшейся игрой — ожидание.")
             if not item.round_number:
                 reason += f" {item.round_number_diagnostic}"
             self.game_diagnostics.append({
@@ -1058,6 +1074,7 @@ class BrowserService:
                 "state": state, "timer_evidence": item.timer_evidence,
                 "status_evidence": item.state_evidence,
                 "is_countdown_to_start": item.is_countdown_to_start,
+                "upcoming_by_sequence": item.upcoming_by_sequence,
                 "score": f"{item.player_score or '—'} : {item.banker_score or '—'}", "reason": reason,
             })
             if item.game_id in pending_targets and state != "UPCOMING":
@@ -1078,7 +1095,9 @@ class BrowserService:
                 elif state == "STARTED":
                     summary = "уже началась — пропуск"
                 elif state == "UPCOMING":
-                    summary = f"до начала {item.time}, счёт {item.player_score}:{item.banker_score}"
+                    summary = (f"следующая за начавшейся игрой, счёт 0:0 (таймер скрыт)"
+                               if item.upcoming_by_sequence else
+                               f"до начала {item.time}, счёт {item.player_score}:{item.banker_score}")
                 else:
                     summary = "UNKNOWN — таймер до начала не подтверждён, пропуск"
                 self.event("INFO", f"Раздача № {item.round_number or 'не указана'}: {summary}.")

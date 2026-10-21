@@ -43,6 +43,7 @@ class Game:
     is_countdown_to_start: bool = False
     timer_evidence: str = ""
     state_evidence: str = ""
+    upcoming_by_sequence: bool = False
 
 
 def is_finished_status(value: str) -> bool:
@@ -110,9 +111,42 @@ def classify_game(game: Game) -> str:
                  or any(marker in status_text for marker in _COUNTDOWN_MARKERS)
                  or any(_explicit_timer_state(timer_evidence, marker) for marker in _COUNTDOWN_MARKERS)
                  or any(_explicit_timer_state(state_evidence, marker) for marker in _COUNTDOWN_MARKERS))
-    if countdown and bool(game.time.strip()) and player_score == 0 and banker_score == 0:
+    # A genuine countdown is the preferred proof. Some live site layouts
+    # render no countdown text at all, even though a currently playing game
+    # immediately precedes numbered, zero-zero future rows in the same list.
+    # This second independent proof is created only by infer_upcoming_games().
+    if ((countdown and bool(game.time.strip())) or game.upcoming_by_sequence) and player_score == 0 and banker_score == 0:
         return "UPCOMING"
     return "UNKNOWN"
+
+
+def infer_upcoming_games(games: list[Game]) -> list[Game]:
+    """Identify zero-zero future rows *only* behind a confirmed live round.
+
+    This is a read-only navigation fallback for a Baccarat site which omits
+    countdown labels. A timer or a zero-zero score on its own never suffices.
+    Stop extending the chain at missing/non-consecutive round numbers or
+    an explicit started/finished row; never fabricate round numbers or times.
+    """
+    ordered = sorted(games, key=lambda item: item.position)
+    preceding: int | None = None
+    for game in ordered:
+        status = classify_game(game)
+        raw = game.round_number.strip()
+        number = int(raw) if raw.isdecimal() else None
+        if status in ("STARTED", "FINISHED") and number is not None:
+            preceding = number
+            continue
+        if (status == "UNKNOWN" and preceding is not None and number is not None
+                and ((number - preceding) % 1440) == 1 and game.url
+                and _score_value(game.player_score) == 0
+                and _score_value(game.banker_score) == 0):
+            game.upcoming_by_sequence = True
+        # Do not extrapolate more than one step from a completed/live anchor;
+        # an explicit UPCOMING row and an inferred row are not proof of
+        # what follows, and must not turn all zero-zero rows into candidates.
+        preceding = None
+    return games
 
 
 def _score_value(value: Any) -> int | None:

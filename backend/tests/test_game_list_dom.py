@@ -207,3 +207,86 @@ def test_dom_evidence_selects_first_countdown_zero_zero_row_and_not_timer_only()
         ]
 
     asyncio.run(run())
+
+
+
+def test_live_round_837_can_unlock_round_838_without_countdown_label():
+    """The real live list can omit its timer during loading/hydration."""
+    async def run():
+        markup = """
+        <base href="https://example.test/">
+        <div class="dashboard-game-block dashboard-game__block">
+          <a class="dashboard-game-block__link" href="/ru/live/baccarat/table/837-player-banker"></a>
+          <span class="dashboard-game-info__additional-info">837</span>
+          <span class="dashboard-game-info__time">00:08</span>
+          <span class="dashboard-game-info__period">Идёт</span>
+          <div class="dashboard-game-block__teams">
+            <span class="ui-team-score-name">Игрок</span>
+            <span class="ui-team-score-name">Банкир</span>
+            <span class="ui-game-scores__num">3</span><span class="ui-game-scores__num">1</span>
+          </div>
+        </div>
+        <div class="dashboard-game-block dashboard-game__block">
+          <a class="dashboard-game-block__link" href="/ru/live/baccarat/table/838-player-banker"></a>
+          <span class="dashboard-game-info__additional-info">838</span>
+          <div class="dashboard-game-block__teams">
+            <span class="ui-team-score-name">Игрок</span>
+            <span class="ui-team-score-name">Банкир</span>
+            <span class="ui-game-scores__num">0</span><span class="ui-game-scores__num">0</span>
+          </div>
+        </div>
+        <div class="dashboard-game-block dashboard-game__block">
+          <a class="dashboard-game-block__link" href="/ru/live/baccarat/table/839-player-banker"></a>
+          <span class="dashboard-game-info__additional-info">839</span>
+          <div class="dashboard-game-block__teams">
+            <span class="ui-team-score-name">Игрок</span>
+            <span class="ui-team-score-name">Банкир</span>
+            <span class="ui-game-scores__num">0</span><span class="ui-game-scores__num">0</span>
+          </div>
+        </div>
+        <div class="dashboard-game-block dashboard-game__block">
+          <a class="dashboard-game-block__link" href="/ru/live/baccarat/table/840-player-banker"></a>
+          <span class="dashboard-game-info__additional-info">840</span>
+          <div class="dashboard-game-block__teams">
+            <span class="ui-team-score-name">Игрок</span>
+            <span class="ui-team-score-name">Банкир</span>
+            <span class="ui-game-scores__num">0</span><span class="ui-game-scores__num">0</span>
+          </div>
+        </div>
+        """
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content(markup)
+            service.page = page
+            games = await service._read_game_list_snapshot()
+            await browser.close()
+        assert [(g.round_number, g.player_score, g.banker_score) for g in games] == [
+            ("837", "3", "1"), ("838", "0", "0"),
+            ("839", "0", "0"), ("840", "0", "0"),
+        ]
+        assert [classify_game(game) for game in games] == [
+            "STARTED", "UPCOMING", "UNKNOWN", "UNKNOWN",
+        ]
+        assert games[1].upcoming_by_sequence is True
+        assert choose_next_game(games, set()).round_number == "838"
+    asyncio.run(run())
+
+
+def test_future_inference_requires_confirmed_previous_game_and_both_zero_scores():
+    from app.observation import Game, infer_upcoming_games
+    def game(number, player, banker, status="Не удалось определить"):
+        return Game(str(number), f"https://example.test/{number}", "", str(number),
+                    status, number, player_score=player, banker_score=banker)
+
+    no_anchor = infer_upcoming_games([game(837, "0", "0"), game(838, "0", "0")])
+    assert all(classify_game(g) == "UNKNOWN" for g in no_anchor)
+
+    one_missing_score = infer_upcoming_games([game(837, "3", "1"),
+                                               game(838, "0", "")])
+    assert classify_game(one_missing_score[1]) == "UNKNOWN"
+
+    wrong_next_round = infer_upcoming_games([game(837, "3", "1"),
+                                             game(839, "0", "0")])
+    assert classify_game(wrong_next_round[1]) == "UNKNOWN"
