@@ -422,7 +422,11 @@ class BrowserService:
         self.event("INFO", f"Загружено завершённых игр из истории: {len(processed_ids)}.")
         while self.context is not None and self.page is not None:
             if not authorization_allows_observation(self.authorization):
-                if self.authorization == "AUTH_LOST":
+                if self.authorization == "ACCESS_DENIED":
+                    self.observation_status = "ACCESS_DENIED"
+                    self.observation_diagnostic = ("Сайт сообщает «Доступ запрещён». "
+                        "Игровой DOM недоступен, сканер ожидает восстановления разрешённого доступа.")
+                elif self.authorization == "AUTH_LOST":
                     source_id, self._active_chain_source_id = self._active_chain_source_id, None
                     if source_id:
                         self.store.record_unresolved_transition(
@@ -790,6 +794,12 @@ class BrowserService:
             self.status = "AUTH_TEMPORARY"
             if previous != result:
                 self.event("WARNING", "Маркер входа временно отсутствует; продолжается только чтение доступной страницы.")
+        elif result == "ACCESS_DENIED":
+            self.status = "ACCESS_DENIED"
+            self.observation_status = "ACCESS_DENIED"
+            self.observation_diagnostic = "Доступ запрещён сайтом; игровое поле недоступно."
+            if previous != result:
+                self.event("ERROR", self.observation_diagnostic)
         elif result == "AUTH_LOST":
             self.status = "AUTH_LOST"
             self.observation_status = "AUTH_LOST"
@@ -1831,6 +1841,13 @@ class BrowserService:
                     self.status = "AUTH_TEMPORARY"
                     if previous != "TEMPORARILY_UNCONFIRMED":
                         self.event("WARNING", "Признак входа временно недоступен. Повторяем проверку на этой странице.")
+                elif result == "ACCESS_DENIED":
+                    self.status = "ACCESS_DENIED"
+                    self.observation_status = "ACCESS_DENIED"
+                    self.observation_diagnostic = ("Сайт показывает «Доступ запрещён». "
+                        "Сбор карт приостановлен до возвращения разрешённого доступа.")
+                    if previous != result:
+                        self.event("ERROR", self.observation_diagnostic)
                 elif result == "AUTH_LOST":
                     self.status = "AUTH_LOST"
                     if previous != "AUTH_LOST":
@@ -1875,6 +1892,18 @@ class BrowserService:
         }""")
         if classify_auth_probe(balance_marker=False, login_surface=login_surface) == "AUTH_LOST":
             return "AUTH_LOST", "На странице отображается форма входа. Требуется ручная проверка авторизации."
+        # A site-level geographic/legal access rejection is not an ambiguous
+        # login marker and must not trigger retries that reload protected pages.
+        try:
+            denied = await self.page.evaluate("""() => {
+                const body = (document.body?.innerText || '').slice(0, 6000);
+                return /доступ\\s+запрещ[её]н|access\\s+denied/i.test(body);
+            }""")
+        except Exception:
+            denied = False
+        if denied:
+            return "ACCESS_DENIED", ("Букмекер сообщил «Доступ запрещён». "
+                                     "Сканирование недоступно, пока сайт не разрешит доступ.")
         currency_pattern = re.compile(
             rf"(?<![A-Za-zА-Яа-я0-9]){re.escape(settings.currency_text)}(?![A-Za-zА-Яа-я0-9])"
         )
