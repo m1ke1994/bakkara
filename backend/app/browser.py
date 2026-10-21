@@ -703,8 +703,19 @@ class BrowserService:
                     finishFlag = [...new Set([...document.querySelectorAll('.ui-caption--size-xl.ui-caption--weight-700'),
                       ...document.querySelectorAll(finishSelector)])].find(exactFinish) || null;
                   } catch (_) {}
-                  const finished = Boolean(finishFlag);
-                  const relevant = playerSide || finishFlag ||
+                  // The current Baccarat skin announces the *result* with
+                  // <span class="... baccarat-panel__caption">Победа</span>
+                  // (or Ничья), not "Игра завершена". Only trust a visible
+                  // Baccarat result badge in the SAME frame as Player cards.
+                  const outcomeFlag = playerSide
+                    ? [...document.querySelectorAll('.baccarat-panel__caption')]
+                        .find(node => visible(node)
+                          && /^(?:победа|ничья)$/i.test(text(node))) || null
+                    : null;
+                  const finished = Boolean(finishFlag || outcomeFlag);
+                  const finishLabel = finishFlag ? text(finishFlag)
+                    : outcomeFlag ? text(outcomeFlag) : '';
+                  const relevant = playerSide || finishFlag || outcomeFlag ||
                     [...document.querySelectorAll('.scoreboard-header__match-info, .ui-game-timer__label, .scoreboard-status')].find(visible);
                   return {
                     url: location.href,
@@ -723,7 +734,8 @@ class BrowserService:
                     },
                     cards, pending_card_slots: pending, status_texts: statusTexts,
                     round_timer_text: timerLabels[0] || '',
-                    finished, finish_flag_text: finishFlag ? text(finishFlag) : '',
+                    finished, finish_flag_text: finishLabel,
+                    baccarat_result_visible: Boolean(outcomeFlag),
                     fragment: relevant ? (relevant.outerHTML || '').slice(0, 3500) : ''
                   };
                 }""", {"playerName": player_name.strip().casefold(),
@@ -773,6 +785,7 @@ class BrowserService:
             "round_timer_text": next((frame["round_timer_text"] for frame in frames
                                       if frame.get("round_timer_text")), ""),
             "finished": any(frame.get("finished", False) for frame in frames),
+            "baccarat_result_visible": any(frame.get("baccarat_result_visible", False) for frame in frames),
             "finish_flag_text": next((frame.get("finish_flag_text", "") for frame in frames if frame.get("finished")), ""),
             "status_text": " ".join(dict.fromkeys(text for frame in frames for text in frame.get("status_texts", []))),
             "dom_fragment": (diagnostic_frame or {}).get("fragment", ""),
@@ -1522,6 +1535,7 @@ class BrowserService:
         countdown_decreased = False
         countdown_zero_since: float | None = None
         countdown_zero_announced = False
+        result_end_announced = False
         list_finished = game.status == "Завершена" or is_finished_status(game.status_text)
         self.observation_phase = "переход к выбранной игре"
 
@@ -1562,6 +1576,13 @@ class BrowserService:
                         reread["finish_flag_text"] = reread.get("finish_flag_text") or finish_text
                         diagnostics = reread
                 finish_seen = in_page_finished or list_finished
+                # A confirmed Baccarat result is an explicit end-of-round
+                # signal. It must not wait for the timer to reach zero.
+                if diagnostics.get("baccarat_result_visible") and not result_end_announced:
+                    result_end_announced = True
+                    self.event("INFO", f"Раздача № {game.round_number or game.game_id}: "
+                               f"обнаружено «{diagnostics.get('finish_flag_text') or 'Победа'}» — "
+                               "перепроверяем карты Игрока и переходим к следующей игре.")
                 timer_text = diagnostics.get("round_timer_text", "")
                 timer_seconds = parse_round_timer(timer_text)
                 if timer_seconds is not None:
@@ -1649,8 +1670,11 @@ class BrowserService:
                 if confirmed_three:
                     reason = f"В одном атомарном DOM-снимке прочитаны три полные позиции Игрока; ждать завершения игры не требуется. {cause}"
                 elif confirmed_two:
-                    signal = ("убывающий таймер достиг 00:00, третья карта не появилась"
-                              if timer_end_two and not finish_seen else "явный сигнал завершения раздачи")
+                    signal = ("показана итоговая надпись «Победа»/«Ничья»"
+                              if diagnostics.get("baccarat_result_visible") else
+                              "убывающий таймер достиг 00:00, третья карта не появилась"
+                              if timer_end_two and not finish_seen else
+                              "явный сигнал завершения раздачи")
                     reason = f"Подтверждены две окончательные карты: {signal}; набор перечитан. {cause}"
                 elif finish_seen and cards:
                     reason = f"Игра завершена, но окончательный набор карт не подтверждён; сохранён последний достоверный снимок. {cause}"
