@@ -1131,6 +1131,20 @@ class BrowserService:
                     "Целевая игра изменила состояние до открытия; прогнозная цепочка прервана.",
                 )
         self.event("INFO", f"Проверка кандидата завершена за {(loop.time()-choose_started)*1000:.1f} мс.")
+        recovering_old_game = False
+        if game is None:
+            # The live list may already have dropped a game whose URL we
+            # recorded earlier. Recover those real IDs when no new list game
+            # needs the active page. Do not invent a game/round or alter N-18.
+            archived = await asyncio.to_thread(self.store.recoverable_games)
+            visible_ids = {item.game_id for item in all_games}
+            game = next((item for item in archived
+                         if item.game_id not in visible_ids
+                         and item.game_id not in excluded_ids), None)
+            if game:
+                recovering_old_game = True
+                self.event("INFO", f"Восстанавливаем карты раздачи № "
+                           f"{game.round_number or game.game_id} по сохранённому URL.")
         if game is None:
             self._queued_games = []
             self.observation_status = "WAITING_FOR_GAME"
@@ -1141,7 +1155,12 @@ class BrowserService:
                 self._last_no_game_wait_signature = signature
             await asyncio.sleep(max(settings.observation_poll_seconds, 0.25))
             return
-        source_id = getattr(self, "_active_chain_source_id", None)
+        # Historical recovery is not the following live round. Do not attach
+        # it to the legacy next-game forecast chain.
+        source_id = (None if recovering_old_game else
+                     getattr(self, "_active_chain_source_id", None))
+        if recovering_old_game:
+            self._active_chain_source_id = None
         origin_source_id = source_id
         if source_id:
             source_record = await asyncio.to_thread(self.store.get, source_id)
