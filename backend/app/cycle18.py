@@ -77,8 +77,15 @@ def is_next(previous: dict[str, Any], current: dict[str, Any]) -> bool:
     # Confirmed rounds use the moment their actual cards became final. For
     # prelisted future slots use discovery time and allow an earlier discovery
     # than the finalization of the previous game (normal for a live list).
-    first_final = moment(previous.get("finished_at") or previous.get("observed_at"))
-    second_final = moment(current.get("finished_at") or current.get("observed_at"))
+    # The store sets observed_at even on a pre-discovered EMPTY future game.
+    # A timestamp is a final-hand timestamp only if real cards are confirmed.
+    # Otherwise it is merely the time the future row appeared in the list.
+    first_confirmed = bool(previous.get("finished_at") or previous.get("player_hand_final")) and previous.get("final_snapshot_reverified") == 1
+    second_confirmed = bool(current.get("finished_at") or current.get("player_hand_final")) and current.get("final_snapshot_reverified") == 1
+    first_final = (moment(previous.get("finished_at") or previous.get("observed_at"))
+                   if first_confirmed else None)
+    second_final = (moment(current.get("finished_at") or current.get("observed_at"))
+                    if second_confirmed else None)
     first = first_final or moment(previous.get("discovered_at"))
     second = second_final or moment(current.get("discovered_at"))
     if not first or not second:
