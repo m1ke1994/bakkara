@@ -1,7 +1,7 @@
-"""Persistent, read-only N-18 Baccarat suit forecasts.
+"""Read-only cycle-18 predictions with a 20-hand warm-up on every scan start.
 
-This engine does not place stakes or interact with the bookmaker.  It never
-guesses a round number from a game ID or an arbitrary list position.
+The bookmaker controls are never accessed. All matching is based on confirmed
+Player hands and explicit round numbers (not game IDs or list positions).
 """
 from __future__ import annotations
 
@@ -15,48 +15,75 @@ from .observation import evaluate_prediction
 from .suit_calculator import SUIT_SYMBOL_TO_NAME, calculate_cards_suit
 
 CYCLE = 18
-MAX_ROUND = 1440
-MAX_AGE_SECONDS = 90 * 60
+WARMUP = 20
+ROUND_MAX = 1440
+MAX_GAP_SECONDS = 600
+STALE_SECONDS = 5400
 
 
-def round_int(value: Any) -> int | None:
-    text = str(value or "").strip()
-    if not text.isdigit():
+def round_number(value: Any) -> int | None:
+    value = str(value or "").strip()
+    if not value.isdecimal():
         return None
-    number = int(text)
-    return number if 1 <= number <= MAX_ROUND else None
+    number = int(value)
+    return number if 1 <= number <= ROUND_MAX else None
 
 
-def target_round(source: Any) -> int | None:
-    number = round_int(source)
-    return ((number - 1 + CYCLE) % MAX_ROUND) + 1 if number else None
-
-
-def source_round(target: Any) -> int | None:
-    number = round_int(target)
-    return ((number - 1 - CYCLE) % MAX_ROUND) + 1 if number else None
+def following(number: int) -> int:
+    return number % ROUND_MAX + 1
 
 
 def moment(value: Any) -> datetime | None:
+    if not value:
+        return None
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
-    except (ValueError, TypeError):
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
         return None
 
 
+def is_next(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    left, right = round_number(previous["round_number"]), round_number(current["round_number"])
+    first, second = moment(previous["discovered_at"]), moment(current["discovered_at"])
+    if not left or not right or not first or not second:
+        return False
+    gap = (second - first).total_seconds()
+    return following(left) == right and 0 < gap <= MAX_GAP_SECONDS
+
+
+def verified_suit(row: dict[str, Any]) -> str | None:
+    if not (row["finished_at"] or row["player_hand_final"]):
+        return None
+    if row["final_snapshot_reverified"] != 1 or row["calculation_status"] != "complete":
+        return None
+    try:
+        cards = json.loads(row["cards_json"] or "[]")
+    except (TypeError, ValueError):
+        return None
+    symbol = calculate_cards_suit(cards)
+    return SUIT_SYMBOL_TO_NAME.get(symbol) if symbol else None
+
+
 class Cycle18Engine:
-    """Independent table: the existing next-game predictions remain unchanged."""
+    """A session is reset on every real observer start, not on each HTTP poll."""
 
     def __init__(self, db_path: Path):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS cycle18_predictions (
-                source_game_id TEXT PRIMARY KEY,
+            db.execute("""CREATE TABLE IF NOT EXISTS cycle18_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                stopped_at TEXT
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS cycle18_forecasts (
+                session_id INTEGER NOT NULL,
+                source_game_id TEXT NOT NULL,
+                anchor_game_id TEXT NOT NULL,
                 source_round_number INTEGER NOT NULL,
                 target_round_number INTEGER NOT NULL,
-                target_game_id TEXT UNIQUE,
+                target_game_id TEXT,
                 predicted_suit TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 linked_at TEXT,
@@ -64,193 +91,225 @@ class Cycle18Engine:
                 result TEXT NOT NULL DEFAULT 'PENDING',
                 mode TEXT NOT NULL DEFAULT 'UNLINKED',
                 actual_cards_json TEXT,
-                reason TEXT NOT NULL DEFAULT ''
+                reason TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (session_id, source_game_id),
+                UNIQUE (session_id, target_game_id)
             )""")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_target_round ON cycle18_predictions(target_round_number)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_result ON cycle18_predictions(result)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_target ON cycle18_forecasts(session_id,target_round_number)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_status ON cycle18_forecasts(session_id,result)")
+
+    def start_session(self) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE cycle18_sessions SET stopped_at=? WHERE stopped_at IS NULL", (now,))
+            cursor = db.execute("INSERT INTO cycle18_sessions(started_at) VALUES(?)", (now,))
+            return int(cursor.lastrowid)
+
+    def stop_session(self) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE cycle18_sessions SET stopped_at=? WHERE stopped_at IS NULL",
+                       (datetime.now(timezone.utc).isoformat(),))
 
     def clear(self) -> None:
         with sqlite3.connect(self.path) as db:
-            db.execute("DELETE FROM cycle18_predictions")
+            db.execute("DELETE FROM cycle18_forecasts")
+            db.execute("DELETE FROM cycle18_sessions")
 
     def refresh(self, current: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Register confirmed source hands, link exact N+18 targets, settle final cards.
-
-        This method is idempotent across polling and process restarts.
-        Existing completed results are never overwritten. Historical results
-        are marked HISTORY, not misrepresented as prospective forecasts.
-        """
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
-            # Historical rows must have confirmed final Player cards.
-            observations = [dict(row) for row in db.execute("""
+            session = db.execute("SELECT * FROM cycle18_sessions ORDER BY id DESC LIMIT 1").fetchone()
+            if not session:
+                return self._empty()
+            sid, started_at = int(session["id"]), moment(session["started_at"])
+            stopped_at = moment(session["stopped_at"])
+            rows = [dict(row) for row in db.execute("""
                 SELECT game_id,round_number,discovered_at,finished_at,
                        cards_json,completeness,calculated_suit,calculation_status,
                        final_snapshot_reverified,player_hand_final
-                FROM observations ORDER BY discovered_at,game_id
-            """).fetchall()]
-            by_id = {row["game_id"]: row for row in observations}
-            confirmed_sources: dict[int, list[dict[str, Any]]] = {}
-            for row in observations:
-                number = round_int(row["round_number"])
-                if not number or row["calculation_status"] != "complete":
+                FROM observations
+                WHERE discovered_at>=?
+                ORDER BY discovered_at,game_id
+            """, (session["started_at"],)).fetchall()]
+            by_id = {row["game_id"]: row for row in rows}
+            completed = [row for row in rows if verified_suit(row)]
+            # A gap resets the warm-up. Deduplication is automatic: game_id is
+            # the PRIMARY KEY in observations.
+            chain: list[dict[str, Any]] = []
+            warmup_count = 0
+            for hand in completed:
+                chain = chain + [hand] if chain and is_next(chain[-1], hand) else [hand]
+                warmup_count = min(WARMUP, len(chain))
+                if stopped_at or len(chain) < WARMUP:
                     continue
-                if not (row["finished_at"] or row["player_hand_final"]) or row["final_snapshot_reverified"] != 1:
-                    continue
-                try:
-                    cards = json.loads(row["cards_json"] or "[]")
-                except (ValueError, TypeError):
-                    continue
-                symbol = calculate_cards_suit(cards)
-                predicted = SUIT_SYMBOL_TO_NAME.get(symbol) if symbol else None
+                # After hands #1..#20 are confirmed, source #3 forecasts #21.
+                # For later targets the source advances one game at a time.
+                source = chain[-CYCLE]
+                predicted = verified_suit(source)
                 if not predicted:
                     continue
-                confirmed_sources.setdefault(number, []).append(row)
-                db.execute("""INSERT OR IGNORE INTO cycle18_predictions
-                    (source_game_id,source_round_number,target_round_number,
-                     predicted_suit,created_at)
-                    VALUES (?,?,?,?,?)""",
-                    (row["game_id"], number, target_round(number), predicted, now))
+                db.execute("""INSERT OR IGNORE INTO cycle18_forecasts
+                    (session_id,source_game_id,anchor_game_id,source_round_number,
+                     target_round_number,predicted_suit,created_at)
+                    VALUES(?,?,?,?,?,?,?)""",
+                    (sid, source["game_id"], hand["game_id"],
+                     round_number(source["round_number"]),
+                     following(round_number(hand["round_number"])), predicted,
+                     now.isoformat()))
 
-            # Current game can be discovered by Playwright before the observer
-            # persists its cards, allowing a forecast to be shown in advance.
-            targets = list(observations)
-            if current and current.get("game_id") and current["game_id"] not in by_id:
+            # Link each prediction to the exact numbered next hand. Never infer
+            # the target ID from round number or list position.
+            targets = rows[:]
+            if current and current.get("game_id") not in by_id and current.get("game_id"):
                 targets.append({
                     "game_id": current["game_id"],
                     "round_number": current.get("round_number"),
-                    "discovered_at": now,
+                    "discovered_at": now.isoformat(),
                     "finished_at": None,
                     "player_hand_final": 0,
                     "final_snapshot_reverified": None,
                     "cards_json": "[]",
                 })
-            for target in targets:
-                target_number = round_int(target.get("round_number"))
-                if target_number is None:
+            forecasts = [dict(x) for x in db.execute(
+                "SELECT * FROM cycle18_forecasts WHERE session_id=? ORDER BY created_at,source_game_id",
+                (sid,)).fetchall()]
+            for prediction in forecasts:
+                if prediction["result"] != "PENDING" or prediction["target_game_id"]:
                     continue
-                previous_number = source_round(target_number)
-                target_time = moment(target.get("discovered_at"))
-                if target_time is None:
+                anchor = by_id.get(prediction["anchor_game_id"])
+                if not anchor:
                     continue
-                sources = []
-                for candidate in confirmed_sources.get(previous_number, []):
-                    source_time = moment(candidate.get("discovered_at"))
-                    if source_time is None or source_time >= target_time:
+                anchor_time = moment(anchor["discovered_at"])
+                if anchor_time is None:
+                    continue
+                matching = []
+                for target in targets:
+                    if (round_number(target.get("round_number")) != prediction["target_round_number"]
+                            or target["game_id"] == anchor["game_id"]):
                         continue
-                    age = (target_time - source_time).total_seconds()
-                    if 0 < age <= MAX_AGE_SECONDS and candidate["game_id"] != target["game_id"]:
-                        sources.append((source_time, candidate))
-                if not sources:
-                    continue
-                src = max(sources, key=lambda x: x[0])[1]
-                is_final = bool(target.get("finished_at") or target.get("player_hand_final"))
-                mode = "HISTORY" if is_final else "LIVE"
-                db.execute("""UPDATE cycle18_predictions
-                    SET target_game_id=?, linked_at=?, mode=?,
-                        reason='Точная связь по номеру раздачи N−18'
-                    WHERE source_game_id=? AND target_game_id IS NULL""",
-                    (target["game_id"], now, mode, src["game_id"]))
+                    target_time = moment(target["discovered_at"])
+                    if not target_time:
+                        continue
+                    gap = (target_time - anchor_time).total_seconds()
+                    if 0 < gap <= MAX_GAP_SECONDS:
+                        matching.append((target_time, target))
+                if matching:
+                    target = min(matching, key=lambda pair: pair[0])[1]
+                    # If target cards are already finalized when discovered,
+                    # this is historical reconstruction, not a live prediction.
+                    live = not (target.get("finished_at") or target.get("player_hand_final"))
+                    db.execute("""UPDATE cycle18_forecasts
+                        SET target_game_id=?, linked_at=?, mode=?,
+                            reason='Сопоставлено по номеру целевой раздачи'
+                        WHERE session_id=? AND source_game_id=? AND target_game_id IS NULL""",
+                        (target["game_id"], now.isoformat(), "LIVE" if live else "BACKFILL",
+                         sid, prediction["source_game_id"]))
+                elif (now - anchor_time).total_seconds() > STALE_SECONDS:
+                    db.execute("""UPDATE cycle18_forecasts SET result='UNKNOWN', checked_at=?,
+                        reason='Целевая раздача не найдена: срок ожидания истёк'
+                        WHERE session_id=? AND source_game_id=? AND target_game_id IS NULL""",
+                        (now.isoformat(), sid, prediction["source_game_id"]))
 
-            # Resolve only linked targets. An unfinished or incomplete hand
-            # remains PENDING/UNKNOWN: never count an absent card as LOSE.
-            pending = db.execute("""SELECT source_game_id,target_game_id,predicted_suit
-                FROM cycle18_predictions
-                WHERE target_game_id IS NOT NULL AND result='PENDING'""").fetchall()
+            pending = [dict(x) for x in db.execute("""
+                SELECT * FROM cycle18_forecasts
+                WHERE session_id=? AND target_game_id IS NOT NULL AND result='PENDING'
+            """, (sid,)).fetchall()]
             for prediction in pending:
                 target = by_id.get(prediction["target_game_id"])
-                if target is None:
+                if not target:
                     continue
                 try:
-                    actual = json.loads(target["cards_json"] or "[]")
+                    cards = json.loads(target["cards_json"] or "[]")
                 except (TypeError, ValueError):
-                    actual = []
-                outcome = evaluate_prediction(
-                    prediction["predicted_suit"], actual,
+                    cards = []
+                result = evaluate_prediction(
+                    prediction["predicted_suit"], cards,
                     finished_confirmed=bool(target["finished_at"]),
                     player_hand_final=bool(target["player_hand_final"]),
                     final_snapshot_reverified=target["final_snapshot_reverified"] == 1,
                 )
-                if outcome == "PENDING":
+                if result == "PENDING":
                     continue
-                # UNKNOWN is terminal for a confirmed-but-unverifiable hand;
-                # it does not contribute to the WIN/LOSE denominator.
-                db.execute("""UPDATE cycle18_predictions SET result=?,checked_at=?,
-                    actual_cards_json=?,reason=? WHERE source_game_id=? AND result='PENDING'""",
-                    (outcome, now, json.dumps(actual, ensure_ascii=False),
-                     "Проверено по окончательным картам Игрока" if outcome in ("WIN", "LOSE")
-                     else "Не удалось подтвердить карты Игрока",
-                     prediction["source_game_id"]))
-
-            # Old cleared history cannot leave ghost forecasts.
-            db.execute("""DELETE FROM cycle18_predictions
-                WHERE source_game_id NOT IN (SELECT game_id FROM observations)""")
-            results = [dict(row) for row in db.execute("""
+                db.execute("""UPDATE cycle18_forecasts SET result=?,checked_at=?,
+                    actual_cards_json=?,reason=?
+                    WHERE session_id=? AND source_game_id=? AND result='PENDING'""",
+                    (result, now.isoformat(), json.dumps(cards, ensure_ascii=False),
+                     "Проверено по финальным картам Игрока" if result in ("WIN", "LOSE")
+                     else "Нет достоверных финальных карт Игрока",
+                     sid, prediction["source_game_id"]))
+            forecasts = [dict(x) for x in db.execute("""
                 SELECT p.*, o.discovered_at AS target_discovered_at
-                FROM cycle18_predictions p
+                FROM cycle18_forecasts p
                 LEFT JOIN observations o ON o.game_id=p.target_game_id
+                WHERE p.session_id=?
                 ORDER BY COALESCE(o.discovered_at,p.linked_at,p.created_at),p.target_round_number
-            """).fetchall()]
+            """, (sid,)).fetchall()]
 
-        complete = [row for row in results if row["result"] in ("WIN", "LOSE") and row["target_game_id"]]
-        wins = sum(row["result"] == "WIN" for row in complete)
-        losses = len(complete) - wins
-        history = [row for row in complete if row["mode"] == "HISTORY"]
-        prospective = [row for row in complete if row["mode"] == "LIVE"]
-        max_losses, loss_streak, current_step = 0, 0, 1
-        step_wins: dict[int, int] = {}
-        prior = None
-        for row in results:
-            if row["result"] not in ("WIN", "LOSE") or not row["target_game_id"]:
-                if row["target_game_id"] and row["result"] == "UNKNOWN":
-                    loss_streak = 0
+        checked = [row for row in forecasts if row["result"] in ("WIN", "LOSE")]
+        wins = sum(row["result"] == "WIN" for row in checked)
+        losing = max_losing = 0
+        steps: dict[str, int] = {}
+        previous = None
+        for row in forecasts:
+            if not row["target_game_id"] or row["result"] not in ("WIN", "LOSE"):
+                if row["result"] == "UNKNOWN":
+                    losing = 0
+                    previous = None
                 continue
-            timestamp = moment(row.get("target_discovered_at"))
-            if prior:
-                prior_number, prior_time = prior
-                gap = (timestamp - prior_time).total_seconds() if timestamp and prior_time else -1
-                if (round_int(row["target_round_number"]) !=
-                        ((prior_number % MAX_ROUND) + 1) or not (0 < gap <= 600)):
-                    loss_streak = 0
-            else:
-                loss_streak = 0
+            if previous and (following(previous["target_round_number"]) != row["target_round_number"]
+                             or not self._close_in_time(previous, row)):
+                losing = 0
             if row["result"] == "LOSE":
-                loss_streak += 1
-                max_losses = max(max_losses, loss_streak)
+                losing += 1
+                max_losing = max(max_losing, losing)
             else:
-                step_wins[loss_streak + 1] = step_wins.get(loss_streak + 1, 0) + 1
-                loss_streak = 0
-            prior = (int(row["target_round_number"]), timestamp)
-        current_step = loss_streak + 1
-        active = None
-        if current and current.get("game_id"):
-            active = next((row for row in results
-                           if row["target_game_id"] == current["game_id"]), None)
-        # Only expose exact, already registered N+18 forecasts.
-        upcoming = [row for row in results if not row["target_game_id"]]
+                step = str(losing + 1)
+                steps[step] = steps.get(step, 0) + 1
+                losing = 0
+            previous = row
+        active = next((row for row in forecasts if current and row["target_game_id"] == current.get("game_id")), None)
+        pending_upcoming = [row for row in forecasts if row["result"] == "PENDING" and not row["target_game_id"]]
         return {
-            "cycle": CYCLE,
+            "cycle": CYCLE, "warmup_required": WARMUP,
+            "warmup_count": warmup_count, "ready": warmup_count >= WARMUP and not stopped_at,
+            "session_id": sid, "session_started_at": session["started_at"],
+            "session_active": stopped_at is None,
             "statistics": {
-                "checked_count": len(complete), "wins": wins, "losses": losses,
-                "win_rate": round(100 * wins / len(complete), 2) if complete else None,
-                "max_lose_streak": max_losses,
-                "current_lose_streak": loss_streak,
-                "next_step": current_step,
-                "wins_by_step": {str(k): v for k, v in sorted(step_wins.items())},
-                "historical_checked": len(history),
-                "prospective_checked": len(prospective),
+                "checked_count": len(checked), "wins": wins, "losses": len(checked) - wins,
+                "win_rate": round(100 * wins / len(checked), 2) if checked else None,
+                "max_lose_streak": max_losing, "current_lose_streak": losing,
+                "next_step": losing + 1, "wins_by_step": steps,
+                "live_checked": sum(row["mode"] == "LIVE" for row in checked),
+                "backfill_checked": sum(row["mode"] == "BACKFILL" for row in checked),
             },
             "current": self._public(active) if active else None,
-            "upcoming": [self._public(row) for row in upcoming[-CYCLE:]],
-            "recent": [self._public(row) for row in results if row["target_game_id"]][-50:][::-1],
+            "upcoming": [self._public(row) for row in pending_upcoming[-CYCLE:]],
+            "recent": [self._public(row) for row in forecasts if row["target_game_id"]][-50:][::-1],
         }
+
+    @staticmethod
+    def _close_in_time(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        first, second = moment(left["target_discovered_at"]), moment(right["target_discovered_at"])
+        return bool(first and second and 0 < (second - first).total_seconds() <= MAX_GAP_SECONDS)
 
     @staticmethod
     def _public(row: dict[str, Any]) -> dict[str, Any]:
         return {key: row.get(key) for key in (
-            "source_game_id", "source_round_number", "target_game_id",
-            "target_round_number", "predicted_suit", "created_at", "linked_at",
-            "checked_at", "result", "mode", "reason"
+            "source_game_id", "anchor_game_id", "source_round_number",
+            "target_round_number", "target_game_id", "predicted_suit",
+            "created_at", "linked_at", "checked_at", "result", "mode", "reason",
         )}
+
+    @staticmethod
+    def _empty() -> dict[str, Any]:
+        return {
+            "cycle": CYCLE, "warmup_required": WARMUP, "warmup_count": 0,
+            "ready": False, "session_active": False, "session_id": None,
+            "statistics": {
+                "checked_count": 0, "wins": 0, "losses": 0, "win_rate": None,
+                "max_lose_streak": 0, "current_lose_streak": 0, "next_step": 1,
+                "wins_by_step": {}, "live_checked": 0, "backfill_checked": 0,
+            }, "current": None, "upcoming": [], "recent": [],
+        }
