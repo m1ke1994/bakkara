@@ -109,7 +109,7 @@ def test_observer_links_forecast_to_the_next_row_it_selects_not_round_adjacency(
     asyncio.run(run())
 
 
-def test_observer_attempts_to_recover_finished_game_before_later_round(tmp_path, monkeypatch):
+def test_observer_prioritizes_upcoming_over_finished_recovery(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
@@ -128,9 +128,12 @@ def test_observer_attempts_to_recover_finished_game_before_later_round(tmp_path,
 
         await service._observe_iteration({"source"}, {})
 
-        assert [game.game_id for game in selected] == ["missed"]
-        assert store.pending_prediction_targets() == {"missed"}
-        assert store.get("source")["outgoing_target_game_id"] == "missed"
+        assert [game.game_id for game in selected] == ["target"]
+        # The legacy next-game chain cannot jump from 616 to 618, but
+        # the physical 617 remains reserved for later suit recovery.
+        assert store.pending_prediction_targets() == set()
+        assert store.get("source")["outgoing_prediction_result"] == "UNKNOWN"
+        assert store.get("missed")["scan_result"] == "DISCOVERED"
 
     asyncio.run(run())
 
@@ -191,7 +194,7 @@ def test_candidate_that_starts_before_opening_is_replaced_by_next_upcoming(tmp_p
     asyncio.run(run())
 
 
-def test_finished_started_and_unknown_rows_are_observed_in_order(tmp_path, monkeypatch):
+def test_started_unknown_and_finished_rows_are_prioritized_by_live_status(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
@@ -215,16 +218,16 @@ def test_finished_started_and_unknown_rows_are_observed_in_order(tmp_path, monke
 
         await service._observe_iteration(set(), {})
 
-        assert [game.game_id for game in selected] == ["finished"]
+        assert [game.game_id for game in selected] == ["started"]
         assert service.page.url == LIST_URL
         assert store.history() == []
-        assert service.current_observation["game_id"] == "finished"
+        assert service.current_observation["game_id"] == "started"
         assert service.game_diagnostics[0]["round_number"] == "811"
         assert service.game_diagnostics[2]["state"] == "UNKNOWN"
         assert "откроем игру" in service.game_diagnostics[2]["reason"]
-        await service._observe_iteration({"finished"}, {})
-        await service._observe_iteration({"finished", "started"}, {})
-        assert [game.game_id for game in selected] == ["finished", "started", "unknown"]
+        await service._observe_iteration({"started"}, {})
+        await service._observe_iteration({"started", "unknown"}, {})
+        assert [game.game_id for game in selected] == ["started", "unknown", "finished"]
 
     asyncio.run(run())
 
@@ -294,3 +297,28 @@ def test_finished_game_without_cards_yields_and_preserves_retry(tmp_path, monkey
         assert service.current_observation["scan_result"] == "SCAN_TIMEOUT"
         assert "продолжаем" in service.observation_diagnostic
     asyncio.run(run())
+
+
+def test_selects_live_and_nearest_hand_before_expired_recovery(tmp_path, monkeypatch):
+    from app.observation import choose_observation_game
+    old = Game("old", f"{TABLE}/old-player-banker", "00:01", "1027", "Завершена", 0,
+               finished=True, player_score="4", banker_score="5")
+    live = Game("live", f"{TABLE}/live-player-banker", "00:20", "1028", "", 1,
+                player_score="2", banker_score="3")
+    soon = Game("soon", f"{TABLE}/soon-player-banker", "00:27", "1029", "", 2,
+                player_score="0", banker_score="0")
+    far = Game("far", f"{TABLE}/far-player-banker", "03:27", "1032", "", 3,
+               player_score="0", banker_score="0")
+    assert choose_observation_game([old, live, soon, far], set()).game_id == "live"
+    assert choose_observation_game([old, live, soon, far], {"live"}).game_id == "soon"
+    assert choose_observation_game([old, live, soon, far], {"live", "soon"}).game_id == "old"
+    assert choose_observation_game([old, live, soon, far], {"live", "soon", "old"}) is None
+    assert choose_observation_game([old, far], {"old"}) is None
+    assert choose_observation_game([old], set()).game_id == "old"
+
+
+def test_unknown_without_timer_can_still_be_opened_as_last_resort():
+    from app.observation import choose_observation_game
+    no_status = Game("unknown", f"{TABLE}/unknown-player-banker",
+                     "", "840", "", 0)
+    assert choose_observation_game([no_status], set()).game_id == "unknown"
