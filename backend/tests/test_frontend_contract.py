@@ -20,14 +20,14 @@ def test_observation_panel_displays_live_cards_and_pending_slots_in_russian():
     assert 'Нераскрытых позиций' in app
 
 
-def test_history_shows_only_warmup_or_cycle18_results_and_inline_cards():
+def test_history_hides_win_lose_until_cycle18_ready_and_shows_only_cycle18_outcomes():
     app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
     assert '<table class="history-table"' in app
     assert 'Время</th>' in app
     assert '№ раздачи</th>' in app
     assert 'Карты Игрока</th>' in app
     assert 'Расчётная масть</th>' in app
-    assert 'WIN / LOSE</th>' in app
+    assert 'WIN / LOSE (цикл 18)</th>' in app
     assert 'item.player_cards' in app
     assert 'history-card-line' in app
     assert '.history-card-line { display: flex; flex-wrap: nowrap;' in app
@@ -36,10 +36,14 @@ def test_history_shows_only_warmup_or_cycle18_results_and_inline_cards():
     assert ':href="item.game_url || item.url"' in app
     assert 'item.calculated_suit' in app
     assert 'outcomeFor(item.game_id)' in app
-    assert 'WARMUP_N_MINUS_1' in app
-    assert "cycle18.value.warmup_results" in app
+    assert 'WARMUP_N_MINUS_1' not in app
+    assert "cycle18.value.warmup_results" not in app
     assert "cycle18.value.recent" in app
-    assert "Проверки подготовки N−1" in app
+    assert 'v-if="cycle18.ready" scope="col">WIN / LOSE' in app
+    assert 'v-if="cycle18.ready"><span v-if="outcomeFor(item.game_id)' in app
+    assert 'Подтверждено подряд:' in app
+    assert 'Во время первых 20' not in app
+    assert "Проверки подготовки N−1" not in app
     assert ':key="item.game_id"' in app
     assert 'prediction-win' in app and 'prediction-lose' in app
     assert 'Эффективность прогнозов на следующую игру (старый режим)' not in app
