@@ -1685,7 +1685,8 @@ class BrowserService:
                     )
                     self._active_chain_source_id = None
                     retry_after[game.game_id] = loop.time() + max(
-                        settings.incomplete_retry_seconds, 5)
+                        settings.incomplete_retry_seconds,
+                        180 if list_finished else 15)
                     self.observation_status = "INCOMPLETE"
                     self.observation_diagnostic = detail
                     self.current_observation = {
