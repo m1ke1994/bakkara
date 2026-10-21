@@ -141,6 +141,7 @@ class Cycle18Engine:
             chain: list[dict[str, Any]] = []
             completed_chain: list[dict[str, Any]] = []
             warmup_complete = False
+            latest_verified_run = 0
             missing_hands = []
             for hand in rows:
                 if not verified_suit(hand):
@@ -157,6 +158,8 @@ class Cycle18Engine:
                                        else [hand])
                 else:
                     completed_chain = []
+                if verified_suit(hand):
+                    latest_verified_run = len(completed_chain)
                 if len(completed_chain) >= WARMUP:
                     warmup_complete = True
                 if stopped_at or not warmup_complete or len(chain) < CYCLE:
@@ -179,7 +182,7 @@ class Cycle18Engine:
                      round_number(source["round_number"]),
                      following(round_number(hand["round_number"])), predicted,
                      now.isoformat()))
-            warmup_count = WARMUP if warmup_complete else min(WARMUP, len(completed_chain))
+            warmup_count = WARMUP if warmup_complete else min(WARMUP, latest_verified_run)
 
             # Link each prediction to the exact numbered next hand. Never infer
             # the target ID from round number or list position.
@@ -310,7 +313,7 @@ class Cycle18Engine:
                 "backfill_checked": sum(row["mode"] == "BACKFILL" for row in checked),
             },
             "current": self._public(active) if active else None,
-            "upcoming": [self._public(row) for row in pending_upcoming[-CYCLE:]],
+            "upcoming": [self._public(row) for row in pending_upcoming[-CYCLE:][::-1]],
             "recent": [self._public(row) for row in forecasts if row["target_game_id"]][-50:][::-1],
         }
 
