@@ -147,6 +147,19 @@ onBeforeUnmount(() => clearInterval(timer))
           <div class="section-title"><strong>Подготовка {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? 'Прогнозирование включено' : 'Ожидание подтверждённых игр' }}</span></div>
           <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
         </div>
+        <p class="diagnostic">
+          Всего обнаружено игр: <strong>{{ cycle18.discovered_count ?? 0 }}</strong>.
+          Ожидают подтверждения карт: <strong>{{ cycle18.missing_count ?? 0 }}</strong>.
+          Каждая раздача сохраняет свой номер в цикле, в том числе с UNKNOWN.
+          Неизвестные карты не подменяются картами соседних игр.
+        </p>
+        <details v-if="cycle18.missing_hands?.length">
+          <summary>Неподтверждённые игры ({{ cycle18.missing_count }})</summary>
+          <p v-for="item in cycle18.missing_hands" :key="item.game_id">
+            Раздача №{{ item.round_number || 'номер ещё не получен' }} ·
+            ID {{ item.game_id }} · {{ scanResultName(item.scan_result) }}
+          </p>
+        </details>
         <div class="prediction-stats">
           <article><span>Проверено (цикл 18)</span><strong>{{ cycleStats.checked_count ?? 0 }}</strong></article>
           <article><span>WIN</span><strong class="win-text">{{ cycleStats.wins ?? 0 }}</strong></article>
