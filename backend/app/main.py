@@ -8,6 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .browser import browser_service
 from .config import settings
+from .cycle18 import Cycle18Engine
+
+cycle18_engine = Cycle18Engine(settings.observation_db)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -31,7 +34,9 @@ async def health():
 
 @app.get("/api/state")
 async def state():
-    return await asyncio.to_thread(browser_service.snapshot)
+    snapshot = await asyncio.to_thread(browser_service.snapshot)
+    snapshot['cycle18'] = await asyncio.to_thread(cycle18_engine.refresh, snapshot.get('observation', {}).get('current'))
+    return snapshot
 
 
 @app.post("/api/browser/start")
@@ -60,7 +65,15 @@ async def stop_observation():
 
 @app.delete("/api/observations")
 async def clear_observations():
-    return await browser_service.clear_history()
+    result = await browser_service.clear_history()
+    await asyncio.to_thread(cycle18_engine.clear)
+    return result
+
+
+@app.get("/api/cycle18")
+async def cycle18_state():
+    snapshot = await asyncio.to_thread(browser_service.snapshot)
+    return await asyncio.to_thread(cycle18_engine.refresh, snapshot.get("observation", {}).get("current"))
 
 
 @app.delete("/api/logs")
