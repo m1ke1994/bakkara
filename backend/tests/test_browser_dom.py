@@ -151,8 +151,9 @@ def test_observer_confirms_stable_third_card_and_saves_without_waiting_for_game_
         lifecycle = [event["message"].split("state=", 1)[1].split()[0]
                      for event in reversed(service.events)
                      if event["message"].startswith("LIFECYCLE game_id=flow-1")]
-        assert lifecycle == ["OPENING", "OBSERVING", "CARDS_COMPLETE", "FINALIZED", "PREDICTION_EVALUATED"]
-        assert service.current_observation["lifecycle_state"] == "PREDICTION_EVALUATED"
+        assert lifecycle == ["OPENING", "OBSERVING", "CARDS_COMPLETE", "FINALIZED"]
+        assert service.current_observation["lifecycle_state"] == "FINALIZED"
+        assert not any("PREDICTION_RESULT" in event["message"] for event in service.events)
 
     async def _resolved(value):
         return value
