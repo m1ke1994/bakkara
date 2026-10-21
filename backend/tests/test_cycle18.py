@@ -469,3 +469,26 @@ def test_first_twenty_with_future_prefetch_does_not_fabricate_extra_forecasts(tm
     assert future[0]["source_round_number"] == 1124
     assert future[0]["result"] == "PENDING"
     assert result["statistics"]["checked_count"] == 0
+
+
+def test_prelisted_next_round_is_not_mistaken_for_an_already_finalized_hand():
+    """Observed_at exists even for the empty future list row, before the prior hand ends."""
+    from datetime import datetime, timedelta, timezone
+    end = datetime.now(timezone.utc)
+    previous = {
+        "round_number": "1128",
+        "discovered_at": (end - timedelta(minutes=2)).isoformat(),
+        "observed_at": end.isoformat(),
+        "finished_at": end.isoformat(),
+        "player_hand_final": 1,
+        "final_snapshot_reverified": 1,
+    }
+    future = {
+        "round_number": "1129",
+        "discovered_at": (end - timedelta(minutes=1)).isoformat(),
+        "observed_at": (end - timedelta(minutes=1)).isoformat(),
+        "finished_at": None,
+        "player_hand_final": 0,
+        "final_snapshot_reverified": None,
+    }
+    assert is_next(previous, future)
