@@ -1842,7 +1842,7 @@ class BrowserService:
                            if diagnostics.get("expired_screen") and not player_present else
                            f"окончательные карты Игрока не подтверждены за {max_wait:g} с; ")
                         + "сохраняем фактические карты и номер как неполную запись, "
-                          "переходим к следующей игре. Позже попробуем восстановить."
+                          "продолжаем наблюдение следующей игры. Позже попробуем восстановить."
                     )
                     self._active_chain_source_id = None
                     retry_after[game.game_id] = loop.time() + max(
