@@ -136,7 +136,10 @@ def test_missing_round_keeps_its_slot_after_warmup_and_does_not_shift_n_minus_18
                p["source_round_number"] == 5 for p in state["upcoming"])
     assert all(p["source_round_number"] != 6 for p in state["upcoming"]
                if p["target_round_number"] == 23)
-    assert state["statistics"]["losses"] == 0
+    # Round 22 may itself WIN/LOSE against real source #4; missing #21
+    # must not be recorded as a loss.
+    assert state["statistics"]["checked_count"] == 1
+    assert state["statistics"]["losses"] + state["statistics"]["wins"] == 1
 
 
 def test_unknown_forecast_resolves_to_win_after_real_cards_recovered(tmp_path):
