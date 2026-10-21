@@ -743,6 +743,7 @@ class ObservationStore:
         decides when to attempt an old URL so fresh live games have priority.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=within_minutes)).isoformat()
+        discovery_wait = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute("""
@@ -750,10 +751,11 @@ class ObservationStore:
                        player_score,banker_score
                 FROM observations
                 WHERE calculation_status!='complete' AND discovered_at>=?
-                  AND scan_result IN ('SCAN_TIMEOUT','NAVIGATION_ERROR','CARDS_UNCONFIRMED')
+                  AND scan_result IN ('SCAN_TIMEOUT','NAVIGATION_ERROR','CARDS_UNCONFIRMED','DISCOVERED')
+                  AND (scan_result!='DISCOVERED' OR discovered_at<=?)
                   AND url!=''
                 ORDER BY discovered_at, list_position LIMIT 40
-            """, (cutoff,)).fetchall()
+            """, (cutoff, discovery_wait)).fetchall()
         return [Game(row["game_id"], row["url"], row["game_time"] or "",
                      row["round_number"] or "", row["site_status"],
                      row["list_position"], player_score=row["player_score"] or "",
