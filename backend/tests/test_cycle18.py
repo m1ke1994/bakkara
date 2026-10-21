@@ -270,19 +270,19 @@ def test_first_twenty_are_observation_only_then_only_cycle18_wins_and_losses(tmp
     assert result["ready"] is True
     upcoming = result["upcoming"]
     assert len(upcoming) == 1
-    assert upcoming[0]["source_round_number"] == 103
-    assert upcoming[0]["target_round_number"] == 121
+    assert upcoming[0]["source_round_number"] == 102
+    assert upcoming[0]["target_round_number"] == 120
     assert upcoming[0]["predicted_suit"] == "spades"
 
     # First post-warmup round was forecast before its final cards appeared.
-    add_round(store, 121, cards=[
+    add_round(store, 120, cards=[
         {"position": 1, "rank": "K", "suit": "spades"},
         {"position": 2, "rank": "5", "suit": "hearts"},
     ])
     outcome = engine.refresh()
     assert outcome["statistics"]["checked_count"] == 1
     assert outcome["statistics"]["wins"] == 1
-    assert [(p["target_round_number"], p["result"]) for p in outcome["recent"]] == [(121, "WIN")]
+    assert [(p["target_round_number"], p["result"]) for p in outcome["recent"]] == [(120, "WIN")]
 
 
 def test_pending_future_placeholders_do_not_advance_or_reset_preparation(tmp_path):
@@ -294,24 +294,29 @@ def test_pending_future_placeholders_do_not_advance_or_reset_preparation(tmp_pat
         for n in range(1, 25)
     ]
     store.register_discovered_games(rows)
+    assert engine.refresh()["warmup_count"] == 0
     for n in range(1, 19):
-        add_round(store, n)
+        store.upsert(rows[n - 1], [
+            {"position": 1, "rank": "10", "suit": "hearts"},
+            {"position": 2, "rank": "2", "suit": "spades"},
+        ], "CONFIRMED", "final", "CARDS_CONFIRMED",
+           player_hand_final=True, final_snapshot_reverified=True)
     state = engine.refresh()
     assert state["warmup_count"] == 18
     assert state["statistics"]["checked_count"] == 0
     assert state["ready"] is False
-    # A complete final hand must occupy the SAME game ID as its list entry
-    # when it is known in advance. No duplicates can be silently ignored.
     for n in range(19, 21):
         game = rows[n - 1]
         store.upsert(game, [
             {"position": 1, "rank": "10", "suit": "hearts"},
             {"position": 2, "rank": "2", "suit": "spades"},
         ], "CONFIRMED", "final", "CARDS_CONFIRMED",
-            player_hand_final=True, final_snapshot_reverified=True)
-    # Earlier duplicates (1-18) intentionally have conflicting IDs:
-    # this session cannot invent a unique 20-hand preparation.
-    assert engine.refresh()["ready"] is False
+           player_hand_final=True, final_snapshot_reverified=True)
+    complete = engine.refresh()
+    assert complete["ready"] is True
+    assert complete["warmup_count"] == 20
+    assert complete["statistics"]["checked_count"] == 0
+    assert complete["upcoming"][0]["target_round_number"] == 21
 
 
 def test_duplicate_rounds_cannot_be_counted_to_complete_warmup(tmp_path):
