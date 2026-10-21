@@ -799,7 +799,8 @@ class ObservationStore:
             return
         with sqlite3.connect(self.path) as db:
             db.executemany(
-                "UPDATE observations SET round_number=? WHERE game_id=?",
+                """UPDATE observations SET round_number=? WHERE game_id=?
+                   AND (round_number IS NULL OR TRIM(round_number)='')""",
                 updates,
             )
 
@@ -846,7 +847,12 @@ class ObservationStore:
             prediction_checked = row["prediction_checked"] if row else None
             prediction_hit = row["prediction_hit"] if row else None
             cards_json = json.dumps(merged_cards, ensure_ascii=False)
-            values = (game.url, game.round_number or "", completeness, reason, game.position,
+            # Round identity is assigned once per URL/game_id. The live list
+            # sometimes briefly displays the next round's number for a row
+            # that is already finished; never overwrite a confirmed identity.
+            canonical_round = (row["round_number"] if row and row["round_number"]
+                               else game.round_number or "")
+            values = (game.url, canonical_round, completeness, reason, game.position,
                       game.status, game.player_score, game.banker_score, scan_result,
                       cards_json, game.time, stored_finished, reverified,
                       calculated, calculation_status, prediction, prediction_checked, prediction_hit,
@@ -866,7 +872,7 @@ class ObservationStore:
                 observed_at,calculated_suit,calculation_status,prediction_for_next_round,prediction_checked,prediction_hit,
                 player_hand_final)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(game_id) DO UPDATE SET
-                url=excluded.url,round_number=COALESCE(NULLIF(excluded.round_number,''),observations.round_number),
+                url=excluded.url,round_number=COALESCE(NULLIF(observations.round_number,''),excluded.round_number),
                 finished_at=COALESCE(observations.finished_at,excluded.finished_at),
                 cards_json=excluded.cards_json,completeness=excluded.completeness,reason=excluded.reason,
                 list_position=excluded.list_position,site_status=excluded.site_status,
@@ -879,7 +885,7 @@ class ObservationStore:
                 prediction_checked=COALESCE(excluded.prediction_checked,observations.prediction_checked),
                 prediction_hit=COALESCE(excluded.prediction_hit,observations.prediction_hit),
                 player_hand_final=MAX(observations.player_hand_final,excluded.player_hand_final)""",
-                (game.game_id, game.url, game.round_number or None, now, finished_at,
+                (game.game_id, game.url, canonical_round or None, now, finished_at,
                  cards_json, completeness, reason,
                  game.position, game.status, game.player_score, game.banker_score, scan_result, now,
                  game.time, None if reverified is None else int(bool(reverified)), now,
