@@ -365,7 +365,7 @@ def parse_game_list_html(
 
 def list_timer_seconds(value: str | None) -> int | None:
     """Read the displayed MM:SS delay to a future Baccarat round."""
-    match = re.fullmatch(r"(\\d{1,2}):(\\d{2})", str(value or "").strip())
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value or "").strip())
     if not match or int(match.group(2)) >= 60:
         return None
     return int(match.group(1)) * 60 + int(match.group(2))
