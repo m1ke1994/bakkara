@@ -19,3 +19,4 @@ def test_observation_allows_ambiguous_read_only_scan_but_never_bypasses_logout_o
     assert not authorization_allows_observation("CHECK_ERROR")
     assert not authorization_allows_observation("AUTH_LOST")
     assert authorization_allows_observation("AUTHORIZED")
+    assert not authorization_allows_observation("ACCESS_DENIED")
