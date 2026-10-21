@@ -136,10 +136,10 @@ def test_missing_round_keeps_its_slot_after_warmup_and_does_not_shift_n_minus_18
                p["source_round_number"] == 5 for p in state["upcoming"])
     assert all(p["source_round_number"] != 6 for p in state["upcoming"]
                if p["target_round_number"] == 23)
-    # Round 22 may itself WIN/LOSE against real source #4; missing #21
-    # must not be recorded as a loss.
-    assert state["statistics"]["checked_count"] == 1
-    assert state["statistics"]["losses"] + state["statistics"]["wins"] == 1
+    # No retroactive WIN/LOSE: #22 is already complete by the time the
+    # first forecast for it is published.
+    assert state["statistics"]["checked_count"] == 0
+    assert state["statistics"]["losses"] + state["statistics"]["wins"] == 0
 
 
 def test_unknown_forecast_resolves_to_win_after_real_cards_recovered(tmp_path):
@@ -242,7 +242,7 @@ def test_warmup_count_does_not_reach_twenty_by_skipping_unreadable_round(tmp_pat
     result = engine.refresh()
     assert result["ready"] is False
     assert result["warmup_count"] == 1
-    assert result["confirmed_warmup_count"] == 19
+    assert result["confirmed_warmup_count"] == 1
     # The missing real round is retained and no forecast is fabricated.
     assert result["missing_hands"][0]["round_number"] == "20"
     assert result["upcoming"] == []
@@ -316,7 +316,8 @@ def test_pending_future_placeholders_do_not_advance_or_reset_preparation(tmp_pat
     assert complete["ready"] is True
     assert complete["warmup_count"] == 20
     assert complete["statistics"]["checked_count"] == 0
-    assert 21 in [forecast["target_round_number"] for forecast in complete["upcoming"]]
+    assert 21 in [forecast["target_round_number"] for forecast in complete["recent"]]
+    assert all(p["result"] == "PENDING" for p in complete["recent"])
 
 
 def test_duplicate_rounds_cannot_be_counted_to_complete_warmup(tmp_path):
@@ -360,3 +361,33 @@ def test_missing_after_nineteen_requires_new_continuous_run(tmp_path):
     assert recovered["ready"] is True
     assert recovered["warmup_count"] == 20
     assert recovered["statistics"]["checked_count"] == 0
+
+
+def test_cycle18_does_not_announce_results_for_round_completed_before_prediction(tmp_path):
+    path = tmp_path / "never-backdate.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    for n in range(1, 20):
+        add_round(store, n)
+    hand20 = Game("round-20", "https://example.test/baccarat/20",
+                  "", "20", "Идёт", 20)
+    store.register_discovered_games([hand20])
+    add_round(store, 21, cards=[
+        {"position": 1, "rank": "7", "suit": "spades"},
+        {"position": 2, "rank": "4", "suit": "clubs"},
+    ])
+    assert engine.refresh()["statistics"]["checked_count"] == 0
+    store.upsert(hand20, [
+        {"position": 1, "rank": "9", "suit": "hearts"},
+        {"position": 2, "rank": "3", "suit": "clubs"},
+    ], "CONFIRMED", "final", "CARDS_CONFIRMED",
+       player_hand_final=True, final_snapshot_reverified=True)
+    late = engine.refresh()
+    assert late["ready"] is True
+    assert late["statistics"]["checked_count"] == 0
+    assert late["statistics"]["wins"] == 0
+    assert late["statistics"]["losses"] == 0
+    assert any(p["target_round_number"] == 21 and
+               p["result"] == "SKIPPED" and p["mode"] == "MISSED"
+               for p in late["recent"])
+    assert engine.refresh()["statistics"]["checked_count"] == 0
