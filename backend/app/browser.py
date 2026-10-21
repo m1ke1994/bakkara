@@ -471,18 +471,17 @@ class BrowserService:
     ) -> bool:
         try:
             def persist() -> dict[str, Any] | None:
-                # Keep selection metadata in current_observation, but never
-                # create an empty history row before any Player card is read.
+                # Even an unreadable hand occupies an actual physical
+                # Baccarat round. Persist the empty/partial attempt so it can
+                # be recovered later without shifting N-18 indexing.
+                self.store.upsert(
+                    game, cards, completeness, reason, scan_result,
+                    finished_confirmed=finished_confirmed,
+                    final_snapshot_reverified=final_snapshot_reverified,
+                    pending_card_slots=pending_card_slots,
+                    player_hand_final=player_hand_final,
+                )
                 stored = self.store.get(game.game_id)
-                if cards:
-                    self.store.upsert(
-                        game, cards, completeness, reason, scan_result,
-                        finished_confirmed=finished_confirmed,
-                        final_snapshot_reverified=final_snapshot_reverified,
-                        pending_card_slots=pending_card_slots,
-                        player_hand_final=player_hand_final,
-                    )
-                    stored = self.store.get(game.game_id)
                 if stored:
                     self.store.refresh_prediction_target(game.game_id)
                     stored = self.store.get(game.game_id)
@@ -1690,6 +1689,12 @@ class BrowserService:
                     retry_after[game.game_id] = loop.time() + max(
                         settings.incomplete_retry_seconds,
                         180 if list_finished else 15)
+                    await self._remember_game_scan(
+                        game, cards, "PARTIAL", detail, "SCAN_TIMEOUT",
+                        int((last_diagnostics or {}).get("pending_card_slots", 0)),
+                        finished_confirmed=False,
+                        diagnostics=last_diagnostics,
+                    )
                     self.observation_status = "INCOMPLETE"
                     self.observation_diagnostic = detail
                     self.current_observation = {
