@@ -19,6 +19,8 @@ const state = ref({ state_epoch: '', state_version: 0, backend: 'CHECKING', brow
 const busy = ref(false)
 const error = ref('')
 const statistics = computed(() => state.value.observation?.statistics || {})
+const cycle18 = computed(() => state.value.cycle18 || {})
+const cycleStats = computed(() => cycle18.value.statistics || {})
 const badge = value => String(value || 'UNKNOWN').toLowerCase().replaceAll('_', '-')
 const running = computed(() => !['STOPPED', 'ERROR'].includes(state.value.browser))
 const observing = computed(() => !['STOPPED', 'ERROR'].includes(state.value.observation?.status))
@@ -133,7 +135,51 @@ onBeforeUnmount(() => clearInterval(timer))
       </template>
       <p v-else>Текущая игра пока не выбрана.</p>
       <details v-if="state.observation?.games?.length"><summary>Проверенные игры: {{ state.observation.games.length }}</summary><ol><li v-for="game in state.observation.games" :key="game.game_id">№ {{ game.game_id }} · {{ game.time }} · {{ game.reason }}</li></ol></details>
-      <h3>Эффективность прогнозов</h3>
+      <section class="cycle18-panel" aria-label="Цикл 18 мастей Игрока">
+        <div class="section-title">
+          <h3>Цикл 18 · прогноз масти Игрока</h3>
+          <strong>{{ cycle18.ready ? 'Готов к прогнозированию' : 'Сбор истории' }}</strong>
+        </div>
+        <p class="diagnostic">Каждый запуск наблюдения требует 20 новых последовательных раздач с подтверждёнными картами Игрока. Для целевой игры №N берём расчётную масть из №N−18. Реальные ставки бот не делает.</p>
+        <div class="warmup">
+          <div class="section-title"><strong>Подготовка {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? 'Прогнозирование включено' : 'Ожидание подтверждённых игр' }}</span></div>
+          <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
+        </div>
+        <div class="prediction-stats">
+          <article><span>Проверено (цикл 18)</span><strong>{{ cycleStats.checked_count ?? 0 }}</strong></article>
+          <article><span>WIN</span><strong class="win-text">{{ cycleStats.wins ?? 0 }}</strong></article>
+          <article><span>LOSE</span><strong class="lose-text">{{ cycleStats.losses ?? 0 }}</strong></article>
+          <article><span>Точность</span><strong>{{ cycleStats.win_rate == null ? '—' : cycleStats.win_rate + '%' }}</strong></article>
+          <article><span>Онлайн-проверки</span><strong>{{ cycleStats.live_checked ?? 0 }}</strong></article>
+          <article><span>Постфактум</span><strong>{{ cycleStats.backfill_checked ?? 0 }}</strong></article>
+          <article><span>Максимум LOSE подряд</span><strong>{{ cycleStats.max_lose_streak ?? 0 }}</strong></article>
+          <article><span>Виртуальный следующий шаг</span><strong>{{ cycleStats.next_step ?? 1 }}</strong></article>
+        </div>
+        <p v-if="cycle18.current">Текущая игра №{{ cycle18.current.target_round_number }}: прогноз {{ suits[cycle18.current.predicted_suit]?.[0] || '—' }} из раздачи №{{ cycle18.current.source_round_number }} · {{ predictionLabels[cycle18.current.result] || cycle18.current.result }}</p>
+        <p v-else-if="cycle18.ready && cycle18.upcoming?.length">
+          <strong>Следующая раздача №{{ cycle18.upcoming[cycle18.upcoming.length - 1].target_round_number }}:</strong>
+          {{ suits[cycle18.upcoming[cycle18.upcoming.length - 1].predicted_suit]?.[0] || '—' }}
+          (из №{{ cycle18.upcoming[cycle18.upcoming.length - 1].source_round_number }})
+        </p>
+        <p v-else>Прогноз появится после завершения 20-й последовательной раздачи и определения следующей игры.</p>
+        <details v-if="Object.keys(cycleStats.wins_by_step || {}).length"><summary>Победы по шагам (виртуально)</summary><p v-for="(count, step) in cycleStats.wins_by_step" :key="step">Шаг {{ step }}: {{ count }} WIN</p></details>
+        <details v-if="cycle18.recent?.length">
+          <summary>История прогнозов цикла 18 ({{ cycle18.recent.length }})</summary>
+          <div class="history-table-scroll">
+            <table class="history-table" aria-label="Прогнозы цикла 18">
+              <thead><tr><th>Источник</th><th>Целевая игра</th><th>Прогноз</th><th>Результат</th><th>Шаг</th><th>Проверка</th></tr></thead>
+              <tbody><tr v-for="forecast in cycle18.recent" :key="forecast.source_game_id">
+                <td>№{{ forecast.source_round_number }}</td><td>№{{ forecast.target_round_number }}</td>
+                <td :class="isRedSuit(forecast.predicted_suit) ? 'red-suit' : 'black-suit'">{{ suits[forecast.predicted_suit]?.[0] || '—' }}</td>
+                <td><strong :class="forecast.result === 'WIN' ? 'win-text' : forecast.result === 'LOSE' ? 'lose-text' : ''">{{ predictionLabels[forecast.result] || forecast.result }}</strong></td>
+                <td>{{ forecast.step ?? '—' }}</td>
+                <td>{{ forecast.mode === 'BACKFILL' ? 'По истории' : 'Наблюдение' }}</td>
+              </tr></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+      <h3>Эффективность прогнозов на следующую игру (старый режим)</h3>
       <div class="prediction-stats" aria-label="Статистика проверенных прогнозов">
         <article><span>Проверено</span><strong>{{ statistics.checked_count ?? 0 }}</strong></article>
         <article><span>WIN</span><strong class="win-text">{{ statistics.wins ?? 0 }}</strong></article>
@@ -164,6 +210,17 @@ onBeforeUnmount(() => clearInterval(timer))
 </template>
 
 <style scoped>
+.cycle18-panel {
+  margin: 18px 0 24px;
+  padding: 18px;
+  border: 1px solid #356585;
+  border-radius: 12px;
+  background: #121f32;
+}
+.cycle18-panel h3 { margin: 0; }
+.warmup { display: grid; gap: 10px; margin: 16px 0; }
+.warmup progress { display: block; width: 100%; height: 12px; accent-color: #73e2a2; }
+.warmup .section-title { margin: 0; }
 .history-table-scroll {
   max-height: min(56vh, 620px);
   overflow: auto;

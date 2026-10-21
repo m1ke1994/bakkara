@@ -8,6 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .browser import browser_service
 from .config import settings
+from .cycle18 import Cycle18Engine
+
+cycle18_engine = Cycle18Engine(settings.observation_db)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -18,6 +21,7 @@ async def lifespan(_: FastAPI):
         yield
     finally:
         await browser_service.stop()
+        await asyncio.to_thread(cycle18_engine.stop_session)
 
 
 app = FastAPI(title="BAKKARA BOT API", lifespan=lifespan)
@@ -31,7 +35,9 @@ async def health():
 
 @app.get("/api/state")
 async def state():
-    return await asyncio.to_thread(browser_service.snapshot)
+    snapshot = await asyncio.to_thread(browser_service.snapshot)
+    snapshot['cycle18'] = await asyncio.to_thread(cycle18_engine.refresh, snapshot.get('observation', {}).get('current'))
+    return snapshot
 
 
 @app.post("/api/browser/start")
@@ -43,24 +49,39 @@ async def start_browser():
 @app.post("/api/browser/stop")
 async def stop_browser():
     await browser_service.stop()
+    await asyncio.to_thread(cycle18_engine.stop_session)
     return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.post("/api/observation/start")
 async def start_observation():
+    was_running = bool(browser_service.observation_task and not browser_service.observation_task.done())
     await browser_service.start_observation()
+    is_running = bool(browser_service.observation_task and not browser_service.observation_task.done())
+    if is_running and not was_running:
+        await asyncio.to_thread(cycle18_engine.start_session)
     return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.post("/api/observation/stop")
 async def stop_observation():
     await browser_service.stop_observation()
+    await asyncio.to_thread(cycle18_engine.stop_session)
     return await asyncio.to_thread(browser_service.snapshot)
 
 
 @app.delete("/api/observations")
 async def clear_observations():
-    return await browser_service.clear_history()
+    result = await browser_service.clear_history()
+    await asyncio.to_thread(cycle18_engine.clear)
+    result['cycle18'] = await asyncio.to_thread(cycle18_engine.refresh)
+    return result
+
+
+@app.get("/api/cycle18")
+async def cycle18_state():
+    snapshot = await asyncio.to_thread(browser_service.snapshot)
+    return await asyncio.to_thread(cycle18_engine.refresh, snapshot.get("observation", {}).get("current"))
 
 
 @app.delete("/api/logs")
