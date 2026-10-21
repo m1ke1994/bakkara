@@ -129,8 +129,11 @@ def test_observer_prioritizes_upcoming_over_finished_recovery(tmp_path, monkeypa
         await service._observe_iteration({"source"}, {})
 
         assert [game.game_id for game in selected] == ["target"]
-        assert store.pending_prediction_targets() == {"target"}
-        assert store.get("source")["outgoing_target_game_id"] == "target"
+        # The legacy next-game chain cannot jump from 616 to 618, but
+        # the physical 617 remains reserved for later suit recovery.
+        assert store.pending_prediction_targets() == set()
+        assert store.get("source")["outgoing_prediction_result"] == "UNKNOWN"
+        assert store.get("missed")["scan_result"] == "DISCOVERED"
 
     asyncio.run(run())
 
