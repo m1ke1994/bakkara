@@ -420,3 +420,29 @@ def test_migrates_existing_history_table_without_resetting_it(tmp_path):
     assert {'list_position', 'site_status', 'player_score', 'banker_score', 'scan_result', 'game_time',
             'final_snapshot_reverified', 'observed_at', 'calculated_suit', 'calculation_status',
             'prediction_for_next_round', 'prediction_checked', 'prediction_hit'} <= columns
+
+
+def test_round_number_cannot_be_reassigned_after_cards_saved(tmp_path):
+    store = ObservationStore(tmp_path / "immutable-ids.sqlite3")
+    game = Game("real-1045", "https://example.test/real-1045", "00:00",
+                "1045", "Завершена", 0)
+    cards = [
+        {"position": 1, "rank": "5", "suit": "hearts"},
+        {"position": 2, "rank": "K", "suit": "diamonds"},
+    ]
+    store.upsert(game, cards, "CONFIRMED", "final", "CARDS_CONFIRMED",
+                 finished_confirmed=True, final_snapshot_reverified=True,
+                 player_hand_final=True)
+    # A stale list row claims the already completed 1045 is now 1046.
+    mistake = Game(game.game_id, game.url, "00:00", "1046", "Завершена", 0)
+    store.update_game_list_metadata([mistake])
+    store.upsert(mistake, cards, "CONFIRMED", "final", "CARDS_CONFIRMED",
+                 finished_confirmed=True, final_snapshot_reverified=True,
+                 player_hand_final=True)
+    assert store.get(game.game_id)["round_number"] == "1045"
+    missing = Game("unknown-number", "https://example.test/unknown-number",
+                   "", "", "", 1)
+    store.register_discovered_games([missing])
+    missing.round_number = "1047"
+    store.update_game_list_metadata([missing])
+    assert store.get(missing.game_id)["round_number"] == "1047"
