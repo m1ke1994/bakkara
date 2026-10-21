@@ -1,5 +1,8 @@
 """Cycle 18 never borrows old games and waits for 20 new consecutive hands."""
-from app.cycle18 import Cycle18Engine, following, round_number, is_next
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
+from app.cycle18 import Cycle18Engine, following, round_number, is_next, order_physical_rounds
 from app.observation import Game, ObservationStore
 
 
@@ -391,3 +394,101 @@ def test_cycle18_does_not_announce_results_for_round_completed_before_prediction
                p["result"] == "SKIPPED" and p["mode"] == "MISSED"
                for p in late["recent"])
     assert engine.refresh()["statistics"]["checked_count"] == 0
+
+
+def test_1122_to_1128_counts_seven_even_if_future_games_were_discovered_first(tmp_path):
+    """Regression for the live screenshot: 7 completed rows but preparation 3/20."""
+    path = tmp_path / "out-of-order-discovery.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    games = {
+        number: Game(f"live-{number}", f"https://example.test/{number}",
+                     "00:21", str(number), "", number - 1122)
+        for number in range(1122, 1132)
+    }
+    # The bookmaker pre-registers multiple future rounds, in arbitrary DOM order.
+    store.register_discovered_games([games[n] for n in (
+        1125, 1128, 1130, 1122, 1127, 1123, 1129, 1124, 1131, 1126,
+    )])
+    now = datetime.now(timezone.utc)
+    # Deliberately shuffle discovered_at timestamps independently of round order.
+    with sqlite3.connect(path) as db:
+        for i, n in enumerate((1125, 1128, 1130, 1122, 1127,
+                               1123, 1129, 1124, 1131, 1126)):
+            db.execute(
+                "UPDATE observations SET discovered_at=? WHERE game_id=?",
+                ((now + timedelta(seconds=i + 1)).isoformat(), games[n].game_id),
+            )
+    for n in range(1122, 1129):
+        store.upsert(games[n], [
+            {"position": 1, "rank": "10", "suit": "diamonds"},
+            {"position": 2, "rank": "2", "suit": "spades"},
+        ], "CONFIRMED", "Финальные карты", "CARDS_CONFIRMED",
+            player_hand_final=True, final_snapshot_reverified=True)
+    result = engine.refresh()
+    assert result["captured_count"] == 7
+    assert result["verified_count"] == 7
+    assert result["warmup_count"] == 7
+    assert result["confirmed_warmup_count"] == 7
+    assert result["ready"] is False
+    assert result["upcoming"] == []
+    assert result["recent"] == []
+    assert result["statistics"]["checked_count"] == 0
+
+
+def test_cycle18_sorting_crosses_midnight_round_1440_to_1():
+    numbers = [2, 1439, 1, 1440, 3]
+    rows = [{
+        "game_id": f"game-{n}", "round_number": str(n),
+        "discovered_at": f"2026-10-21T21:00:{i:02d}+00:00",
+    } for i, n in enumerate(numbers)]
+    assert [int(row["round_number"]) for row in order_physical_rounds(rows)] == [
+        1439, 1440, 1, 2, 3,
+    ]
+
+
+def test_first_twenty_with_future_prefetch_does_not_fabricate_extra_forecasts(tmp_path):
+    path = tmp_path / "no-phantom-forecasts.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    games = [Game(f"live-{n}", f"https://example.test/{n}", "00:30", str(n), "", n)
+             for n in range(1122, 1146)]
+    store.register_discovered_games(games[::-1])
+    for game in games[:20]:
+        store.upsert(game, [
+            {"position": 1, "rank": "K", "suit": "clubs"},
+            {"position": 2, "rank": "4", "suit": "diamonds"},
+        ], "CONFIRMED", "Карты подтверждены", "CARDS_CONFIRMED",
+            player_hand_final=True, final_snapshot_reverified=True)
+    result = engine.refresh()
+    assert result["warmup_count"] == 20
+    assert result["ready"] is True
+    future = result["recent"]
+    assert len(future) == 1
+    assert future[0]["target_round_number"] == 1142
+    assert future[0]["source_round_number"] == 1124
+    assert future[0]["result"] == "PENDING"
+    assert result["statistics"]["checked_count"] == 0
+
+
+def test_prelisted_next_round_is_not_mistaken_for_an_already_finalized_hand():
+    """Observed_at exists even for the empty future list row, before the prior hand ends."""
+    from datetime import datetime, timedelta, timezone
+    end = datetime.now(timezone.utc)
+    previous = {
+        "round_number": "1128",
+        "discovered_at": (end - timedelta(minutes=2)).isoformat(),
+        "observed_at": end.isoformat(),
+        "finished_at": end.isoformat(),
+        "player_hand_final": 1,
+        "final_snapshot_reverified": 1,
+    }
+    future = {
+        "round_number": "1129",
+        "discovered_at": (end - timedelta(minutes=1)).isoformat(),
+        "observed_at": (end - timedelta(minutes=1)).isoformat(),
+        "finished_at": None,
+        "player_hand_final": 0,
+        "final_snapshot_reverified": None,
+    }
+    assert is_next(previous, future)

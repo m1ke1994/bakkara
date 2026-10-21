@@ -43,14 +43,57 @@ def moment(value: Any) -> datetime | None:
         return None
 
 
+def order_physical_rounds(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort a session by Baccarat round sequence, never list discovery time.
+
+    The live list pre-registers future round IDs. Their discovered_at values
+    can be earlier than the final cards of previous rounds. Choose the start
+    immediately after the largest circular gap among physical round numbers;
+    this also correctly orders 1439,1440,1,2.
+    """
+    numbers = sorted({value for row in rows
+                      if (value := round_number(row.get("round_number"))) is not None})
+    if not numbers:
+        return rows[:]
+    if len(numbers) == 1:
+        origin = numbers[0]
+    else:
+        gaps = [((numbers[(i + 1) % len(numbers)] - number) % ROUND_MAX, i)
+                for i, number in enumerate(numbers)]
+        _gap, index = max(gaps, key=lambda item: item[0])
+        origin = numbers[(index + 1) % len(numbers)]
+    return sorted(rows, key=lambda row: (
+        (round_number(row.get("round_number")) - origin) % ROUND_MAX
+            if round_number(row.get("round_number")) is not None else ROUND_MAX + 1,
+        str(row.get("discovered_at") or ""),
+        str(row.get("game_id") or ""),
+    ))
+
+
 def is_next(previous: dict[str, Any], current: dict[str, Any]) -> bool:
     left, right = round_number(previous["round_number"]), round_number(current["round_number"])
-    first, second = moment(previous["discovered_at"]), moment(current["discovered_at"])
-    if not left or not right or not first or not second:
+    if not left or not right or following(left) != right:
+        return False
+    # Confirmed rounds use the moment their actual cards became final. For
+    # prelisted future slots use discovery time and allow an earlier discovery
+    # than the finalization of the previous game (normal for a live list).
+    # The store sets observed_at even on a pre-discovered EMPTY future game.
+    # A timestamp is a final-hand timestamp only if real cards are confirmed.
+    # Otherwise it is merely the time the future row appeared in the list.
+    first_confirmed = bool(previous.get("finished_at") or previous.get("player_hand_final")) and previous.get("final_snapshot_reverified") == 1
+    second_confirmed = bool(current.get("finished_at") or current.get("player_hand_final")) and current.get("final_snapshot_reverified") == 1
+    first_final = (moment(previous.get("finished_at") or previous.get("observed_at"))
+                   if first_confirmed else None)
+    second_final = (moment(current.get("finished_at") or current.get("observed_at"))
+                    if second_confirmed else None)
+    first = first_final or moment(previous.get("discovered_at"))
+    second = second_final or moment(current.get("discovered_at"))
+    if not first or not second:
         return False
     gap = (second - first).total_seconds()
-    # One list snapshot can discover consecutive games at the same instant.
-    return following(left) == right and 0 <= gap <= MAX_GAP_SECONDS
+    if first_final and second_final:
+        return 0 <= gap <= MAX_GAP_SECONDS
+    return abs(gap) <= MAX_GAP_SECONDS
 
 
 def captured_cards(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -155,6 +198,9 @@ class Cycle18Engine:
                 WHERE discovered_at>=?
                 ORDER BY discovered_at,list_position,game_id
             """, (session["started_at"],)).fetchall()]
+            # IDs arrive in discovery order, which is NOT the order of the
+            # physical Baccarat rounds (future games appear in the list).
+            rows = order_physical_rounds(rows)
             by_id = {row["game_id"]: row for row in rows}
             # A unique, finalized physical round is the ONLY preparation unit.
             # List placeholders and partial two-card snapshots are never counted.
@@ -201,7 +247,10 @@ class Cycle18Engine:
                     confirmed_max_run = max(confirmed_max_run, len(confirmed_chain))
                 if confirmed_max_run >= WARMUP:
                     warmup_complete = True
-                if stopped_at or not warmup_complete or len(chain) < CYCLE:
+                # An unplayed future list slot can never serve as a forecast
+                # anchor. Only a confirmed final Player hand can schedule
+                # a prediction for the next numbered round.
+                if stopped_at or not warmup_complete or not confirmed or len(chain) < CYCLE:
                     continue
                 source = chain[-CYCLE]
                 source_number = round_number(source["round_number"])
@@ -267,7 +316,9 @@ class Cycle18Engine:
                     if not target_time:
                         continue
                     gap = (target_time - anchor_time).total_seconds()
-                    if 0 <= gap <= MAX_GAP_SECONDS:
+                    # The next game may already have been registered while
+                    # its predecessor was still running: that is not a gap.
+                    if abs(gap) <= MAX_GAP_SECONDS:
                         matching.append((target_time, target))
                 if len(matching) == 1:
                     target = matching[0][1]
