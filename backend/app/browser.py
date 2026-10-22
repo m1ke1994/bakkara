@@ -430,7 +430,10 @@ class BrowserService:
         self.playwright = None
 
     async def _observe(self) -> None:
-        """Run one game at a time until its exact in-page finish flag is observed."""
+        """Run one game at a time until its final Player hand is observed."""
+        # A new scan is a new physical sequence; never reuse the preceding
+        # session's last round as its starting position.
+        self._last_selected_round_number = None
         try:
             processed_ids = await asyncio.to_thread(self.store.finished_game_ids)
         except Exception as exc:
@@ -1173,7 +1176,9 @@ class BrowserService:
         invalidated_ids: set[str] = set()
         game: Game | None = None
         while True:
-            candidate = choose_observation_game(all_games, excluded_ids | invalidated_ids)
+            candidate = choose_observation_game(
+                all_games, excluded_ids | invalidated_ids,
+                after_round=getattr(self, "_last_selected_round_number", None))
             if candidate is None:
                 break
             async with self.page_lock:
@@ -1200,10 +1205,10 @@ class BrowserService:
                 )
         self.event("INFO", f"Проверка кандидата завершена за {(loop.time()-choose_started)*1000:.1f} мс.")
         recovering_old_game = False
-        if game is None:
-            # The live list may already have dropped a game whose URL we
-            # recorded earlier. Recover those real IDs when no new list game
-            # needs the active page. Do not invent a game/round or alter N-18.
+        if game is None and getattr(self, "_last_selected_round_number", None) is None:
+            # Older URLs must never block the physical next round after a
+            # selected game. Recover old pages only before the live observer
+            # has established its first sequential round.
             archived = await asyncio.to_thread(self.store.recoverable_games)
             visible_ids = {item.game_id for item in all_games}
             game = next((item for item in archived
@@ -1277,6 +1282,8 @@ class BrowserService:
         self.event("INFO", f"Раздача № {game.round_number or '—'} выбрана после повторной проверки непосредственно перед открытием.")
         if not game.round_number:
             self.event("WARNING", f"Номер раздачи не найден для game_id={game.game_id}; ID не используется вместо номера.")
+        if game.round_number.isdecimal():
+            self._last_selected_round_number = int(game.round_number)
         await self._scan_selected_game(game, previous_cards, processed_ids, retry_after)
 
     async def _scan_selected_game_legacy(
