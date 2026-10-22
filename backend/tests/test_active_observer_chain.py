@@ -468,3 +468,72 @@ def test_round_number_survives_transient_site_hydration_for_exact_game_id(tmp_pa
         assert [g.round_number for g in await another._read_game_list_snapshot()] == [
             "431", "432", ""]
     asyncio.run(run())
+
+
+def test_fast_handoff_opens_three_sequential_games_without_reloading_list(tmp_path, monkeypatch):
+    """Only one list hydration for known #500 -> #501 -> #502."""
+    async def run():
+        monkeypatch.setattr(browser_module, "LEGACY_NEXT_GAME_MODE", False)
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, game_list_url=LIST_URL,
+            observation_poll_seconds=0,
+        ))
+        store = ObservationStore(tmp_path / "fast-handoff.sqlite3")
+        selected = []
+        service = _service(store, selected)
+        service._last_selected_round_number = None
+        games = [
+            Game("r500", f"{TABLE}/500-player-banker", "00:15", "500",
+                 "Идёт", 0, started=True, player_score="2", banker_score="3"),
+            Game("r501", f"{TABLE}/501-player-banker", "00:45", "501",
+                 "Ожидается", 1, player_score="0", banker_score="0",
+                 is_countdown_to_start=True),
+            Game("r502", f"{TABLE}/502-player-banker", "01:30", "502",
+                 "Ожидается", 2, player_score="0", banker_score="0",
+                 is_countdown_to_start=True),
+        ]
+        reads = []
+        async def read_snapshot():
+            reads.append("read")
+            return games
+        service._read_game_list_snapshot = read_snapshot
+        goto_urls = []
+        original_goto = service.page.goto
+        async def counted_goto(url, **kwargs):
+            goto_urls.append(url)
+            await original_goto(url, **kwargs)
+        service.page.goto = counted_goto
+        processed, retry = set(), {}
+        await service._observe_iteration(processed, retry)
+        assert [g.round_number for g in selected] == ["500"]
+        reads_after_first = len(reads)
+        assert reads_after_first >= 2
+        assert goto_urls == [LIST_URL]
+        await service._observe_iteration(processed, retry)
+        await service._observe_iteration(processed, retry)
+        assert [g.round_number for g in selected] == ["500", "501", "502"]
+        assert len(reads) == reads_after_first
+        assert goto_urls == [LIST_URL]
+        # When no known #503 URL exists, fall back to a fresh list read;
+        # never invent a URL or skip a physical number.
+        await service._observe_iteration(processed, retry)
+        assert len(reads) > reads_after_first
+    asyncio.run(run())
+
+
+def test_fast_handoff_cache_rejects_ambiguous_and_missing_round_urls():
+    from app.browser import prefetched_round_urls, pop_prefetched_successor
+    games = [
+        Game("g1440", f"{TABLE}/1440", "", "1440", "Идёт", 0),
+        Game("g1", f"{TABLE}/1", "", "1", "Ожидается", 1),
+        Game("g1-duplicate", f"{TABLE}/1-copy", "", "1", "Ожидается", 2),
+        Game("unknown", f"{TABLE}/missing", "", "", "Ожидается", 3),
+    ]
+    cache = prefetched_round_urls(games)
+    assert set(cache) == {1440}
+    assert pop_prefetched_successor(cache, 1440, set()) is None
+    valid = prefetched_round_urls(games[:2])
+    assert pop_prefetched_successor(valid, 1440, set()).game_id == "g1"
+    assert pop_prefetched_successor(valid, 1440, set()) is None
+    valid = prefetched_round_urls(games[:2])
+    assert pop_prefetched_successor(valid, 1440, {"g1"}) is None
