@@ -59,3 +59,32 @@ def test_history_cells_are_compact_and_clear_buttons_use_separate_delete_routes(
     assert 'Очистить историю' in app and "command('/api/observations', 'DELETE')" in app
     assert 'window.confirm(' in app
     assert 'Очистить логи' in app and "command('/api/logs', 'DELETE')" in app
+
+
+def test_dashboard_has_two_numbered_suit_forecasts_and_independent_calculator():
+    app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
+    assert 'cycle18.value.live_preview' in app
+    assert 'data-testid="forecast-current"' in app
+    assert 'data-testid="forecast-next"' in app
+    assert "currentForecast?.source_round_number" in app
+    assert "nextForecast?.source_round_number" in app
+    assert "calculateLadder" in app
+    assert 'Калькулятор догона' in app
+    assert 'Без ставок' in app
+    assert 'value="double"' in app
+    assert 'value="recover"' in app
+    assert 'ladder.totalBankroll' in app
+    assert 'row.netIfWin' in app
+
+
+def test_history_supports_search_and_up_to_two_hundred_rows_without_live_poll_bloat():
+    app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
+    main = (Path(__file__).resolve().parents[1] / 'app' / 'main.py').read_text(encoding='utf-8')
+    cycle = (Path(__file__).resolve().parents[1] / 'app' / 'cycle18.py').read_text(encoding='utf-8')
+    assert 'api}/api/history?limit=200' in app
+    assert 'historySearch' in app
+    assert 'v-for="item in filteredHistory"' in app
+    assert 'history-full-scroll' in app
+    assert 'async def history(limit: int = 200)' in main
+    assert 'safe_limit = min(200, max(1, limit))' in main
+    assert '[-200:][::-1]' in cycle
