@@ -2,7 +2,7 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from app.cycle18 import Cycle18Engine, following, round_number, is_next, order_physical_rounds
+from app.cycle18 import Cycle18Engine, following, round_number, is_next, order_physical_rounds, preview_two_rounds
 from app.observation import Game, ObservationStore
 
 
@@ -561,3 +561,50 @@ def test_missing_actual_n_minus_18_source_is_never_replaced_by_saved_neighbor(tm
                p["source_round_number"] == 366 for p in next_result["upcoming"])
     assert all(p["target_round_number"] != 383 for p in next_result["recent"])
     assert next_result["statistics"]["checked_count"] == 0
+
+
+def test_cycle18_previews_two_real_rounds_and_never_substitutes_missing_source(tmp_path):
+    path = tmp_path / "preview.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    for number in range(580, 600):
+        add_round(store, number)
+    # N=600 => source=582, N+1=601 => source=583
+    result = engine.refresh({"game_id": "future-600", "round_number": "600"})
+    assert result["ready"]
+    assert [p["target_round_number"] for p in result["live_preview"]] == [600, 601]
+    assert [p["source_round_number"] for p in result["live_preview"]] == [582, 583]
+    assert [p["predicted_suit"] for p in result["live_preview"]] == ["spades", "spades"]
+    assert all(p["available"] for p in result["live_preview"])
+    assert result["statistics"]["checked_count"] == 0
+    assert engine.refresh()["live_preview"] == []
+
+    # If #583 was never conclusively collected, source for #601 must be
+    # unavailable; using #584 would shift the cycle and is forbidden.
+    path2 = tmp_path / "preview-missing.sqlite3"
+    second_store, second_engine = ObservationStore(path2), Cycle18Engine(path2)
+    second_engine.start_session()
+    for number in (*range(580, 583), *range(584, 601)):
+        add_round(second_store, number)
+    missed = second_engine.refresh({"game_id": "future-600", "round_number": "600"})
+    assert missed["ready"]
+    assert missed["live_preview"][0]["available"] is True
+    assert missed["live_preview"][1]["source_round_number"] == 583
+    assert missed["live_preview"][1]["predicted_suit"] is None
+    assert missed["live_preview"][1]["available"] is False
+
+
+def test_preview_handles_1440_to_1_without_modifying_saved_forecasts():
+    def verified(rank):
+        return {
+            "finished_at": "2026-10-22T10:00:00+00:00",
+            "player_hand_final": 1,
+            "final_snapshot_reverified": 1,
+            "calculation_status": "complete",
+            "cards_json": '[{"position":1,"rank":"' + rank + '","suit":"hearts"},'
+                          '{"position":2,"rank":"3","suit":"clubs"}]',
+        }
+    previews = preview_two_rounds(1440, {1422: verified("9"), 1423: verified("8")})
+    assert [(p["target_round_number"], p["source_round_number"])
+            for p in previews] == [(1440, 1422), (1, 1423)]
+    assert all(p["predicted_suit"] == "spades" for p in previews)
