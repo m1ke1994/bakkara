@@ -963,3 +963,52 @@ def test_dom_mutation_latches_transient_result_between_browser_polls():
             finally:
                 await browser.close()
     asyncio.run(run())
+
+
+def test_visible_result_without_readable_cards_does_not_hold_next_round_one_minute(tmp_path, monkeypatch):
+    """An incomplete final DOM must be released promptly for the next hand."""
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings,
+            card_poll_seconds=0.1, scan_incomplete_timeout_seconds=90,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **_kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "terminal-incomplete.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = {"game_id": "result-incomplete"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        async def inspect(*_args):
+            return {
+                "cards": [{"position": 1, "rank": "9", "suit": "spades"}],
+                "counts": {"player_fields": 1, "player_cards_containers": 1,
+                           "player_card_boxes": 3},
+                "pending_card_slots": 2, "finished": True,
+                "baccarat_result_visible": True,
+                "finish_flag_text": "Ничья", "status_text": "",
+                "cause": "result shown but card positions missing",
+            }
+        service._inspect_game_dom = inspect
+        game = Game("result-incomplete", "https://example.test/result-incomplete",
+                    "", "431", "Идёт", 0)
+        processed, retry = set(), {}
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, retry), timeout=6.5
+        )
+        assert not processed
+        assert service.observation_status == "INCOMPLETE"
+        assert "result-incomplete" in retry
+        record = service.store.get("result-incomplete")
+        assert record["cards"][0]["rank"] == "9"
+        assert record["player_hand_final"] is False
+        assert record["scan_result"] == "SCAN_TIMEOUT"
+    asyncio.run(run())
