@@ -394,12 +394,22 @@ class Cycle18Engine:
                      else "Нет достоверных финальных карт Игрока",
                      sid, prediction["source_game_id"]))
             forecasts = [dict(x) for x in db.execute("""
-                SELECT p.*, o.discovered_at AS target_discovered_at
+                SELECT p.*, o.discovered_at AS target_discovered_at,
+                       o.finished_at AS target_finished_at,
+                       o.observed_at AS target_observed_at,
+                       o.player_hand_final AS target_player_hand_final
                 FROM cycle18_forecasts p
                 LEFT JOIN observations o ON o.game_id=p.target_game_id
                 WHERE p.session_id=?
-                ORDER BY COALESCE(o.discovered_at,p.linked_at,p.created_at),p.target_round_number
             """, (sid,)).fetchall()]
+            # The live list can discover a future game before its predecessor.
+            # Discovery order must never determine the martingale step. Walk
+            # confirmed forecasts in physical round order (including 1440->1).
+            forecasts = order_physical_rounds([
+                {**row, "round_number": str(row["target_round_number"]),
+                 "discovered_at": row["target_discovered_at"] or row["created_at"]}
+                for row in forecasts
+            ])
 
         checked = [row for row in forecasts if row["result"] in ("WIN", "LOSE")]
         wins = sum(row["result"] == "WIN" for row in checked)
@@ -454,8 +464,14 @@ class Cycle18Engine:
 
     @staticmethod
     def _close_in_time(left: dict[str, Any], right: dict[str, Any]) -> bool:
-        first, second = moment(left["target_discovered_at"]), moment(right["target_discovered_at"])
-        return bool(first and second and 0 < (second - first).total_seconds() <= MAX_GAP_SECONDS)
+        # Discovery is a pre-listing timestamp, NOT the moment the hand
+        # finished. Prefer an actual completion timestamp to avoid breaking a
+        # consecutive loss streak when future rounds are listed out of order.
+        first = moment(left.get("target_finished_at")) or (
+            moment(left.get("target_observed_at")) if left.get("target_player_hand_final") else None)
+        second = moment(right.get("target_finished_at")) or (
+            moment(right.get("target_observed_at")) if right.get("target_player_hand_final") else None)
+        return bool(first and second and 0 <= (second - first).total_seconds() <= MAX_GAP_SECONDS)
 
     @staticmethod
     def _public(row: dict[str, Any]) -> dict[str, Any]:
