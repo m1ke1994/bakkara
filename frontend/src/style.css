@@ -1,1 +1,105 @@
-:root{font-family:Inter,"Segoe UI",Arial,sans-serif;color:#edf4ff;background:#09121e;color-scheme:dark}*{box-sizing:border-box}body{margin:0}main{width:min(1480px,calc(100% - 40px));margin:32px auto 64px}header{margin-bottom:26px}.dashboard-header{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;padding:26px 0 8px;border-bottom:1px solid #263753}.dashboard-header h1{letter-spacing:-.05em;font-size:clamp(1.9rem,3vw,2.6rem)}.header-spark{color:#64d7ff}.quick-nav{display:flex;flex-wrap:wrap;gap:9px}.quick-nav a{color:#afc5df;text-decoration:none;font-weight:700;font-size:.84rem;background:#17263b;border:1px solid #2d4260;border-radius:9px;padding:10px 13px}.quick-nav a:hover{color:#fff;border-color:#64d7ff}.eyebrow{color:#64d7ff;letter-spacing:.14em;font-size:.75rem;font-weight:700}h1{font-size:2.4rem;margin:8px 0}header p:not(.eyebrow),.diagnostic{color:#aebed4}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.workspace-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(330px,380px);align-items:start;gap:18px;margin-top:22px}.workspace-grid>.events{margin-top:0;min-width:0}.workspace-grid>.observation{min-width:0}.cards article,.events{background:#131f32;border:1px solid #263753;border-radius:14px;padding:21px}.cards article{background:linear-gradient(145deg,#152438,#111b2b)}.events{box-shadow:0 8px 32px rgba(0,0,0,.08)}.cards span{display:block;color:#9eb0c9;margin-bottom:10px}.cards strong{font-size:1.05rem}.ok,.authorized,.round-finished,.game-finished{color:#69e6a1}.offline,.error{color:#ff8b8b}.stopped,.unknown,.unconfirmed{color:#ffcd70}.waiting-auth,.browser-opened,.browser-starting,.auth-lost,.waiting-game,.game-opened,.waiting-cards,.two-cards-visible,.three-cards-visible,.returning-to-list{color:#64d7ff}.controls{display:flex;gap:12px;margin:24px 0}button{border:0;border-radius:8px;background:#44b9e8;color:#06101a;padding:12px 18px;font-weight:700;cursor:pointer}.secondary{background:#293c59;color:#eaf3ff}button:disabled{opacity:.5;cursor:not-allowed}.diagnostic,.error{margin:10px 0}.events{margin-top:22px}.events h2{margin-top:0;font-size:1.15rem}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.section-title h2{margin-bottom:0}.observation h3{font-size:1rem;margin:24px 0 10px}ol{margin:0;padding-left:18px}li{padding:8px 0;border-bottom:1px solid #263753;font-size:.9rem}time,small{color:#8da0ba;margin-right:8px}b{margin-right:6px;font-size:.75rem}@media(max-width:1080px){.workspace-grid{grid-template-columns:minmax(0,1fr)}.workspace-grid>.calculator-panel{position:static}}@media(max-width:650px){.cards{grid-template-columns:1fr}main{width:calc(100% - 24px);margin:18px auto 40px}.events{padding:16px}.controls{flex-wrap:wrap}.section-title{flex-wrap:wrap}}
+:root {
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  color: #edf4ff;
+  background: #09121e;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 20px; }
+body { margin: 0; }
+main {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 24px clamp(16px, 2.5vw, 52px) 72px;
+}
+header { margin-bottom: 22px; }
+.dashboard-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  padding: 12px 0 20px;
+  border-bottom: 1px solid #263753;
+}
+.dashboard-header h1 { letter-spacing: -.05em; font-size: clamp(1.9rem, 3vw, 2.6rem); }
+.header-spark { color: #64d7ff; }
+.quick-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+.quick-nav a {
+  color: #afc5df;
+  text-decoration: none;
+  font-weight: 700;
+  font-size: .84rem;
+  padding: 9px 12px;
+  border-bottom: 1px solid transparent;
+}
+.quick-nav a:hover { color: #fff; border-color: #64d7ff; }
+.eyebrow { color: #64d7ff; letter-spacing: .14em; font-size: .75rem; font-weight: 700; }
+h1 { margin: 8px 0; }
+header p:not(.eyebrow), .diagnostic { color: #aebed4; }
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #263753;
+}
+.cards article {
+  min-width: 200px;
+  flex: 1 1 auto;
+  background: none;
+  border: 0;
+  border-right: 1px solid #263753;
+  border-radius: 0;
+  padding: 12px 20px;
+}
+.cards article:first-child { padding-left: 0; }
+.cards article:last-child { border-right: 0; }
+.cards span { display: block; color: #9eb0c9; margin-bottom: 6px; font-size: .82rem; }
+.cards strong { font-size: 1.05rem; }
+.events {
+  min-width: 0;
+  margin: 0;
+  padding: 28px 0;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid #263753;
+  border-radius: 0;
+  box-shadow: none;
+}
+.events h2 { margin: 0; font-size: clamp(1.08rem, 1.3vw, 1.42rem); }
+.controls { display: flex; flex-wrap: wrap; gap: 12px; margin: 18px 0; }
+button {
+  border: 0;
+  border-radius: 8px;
+  background: #44b9e8;
+  color: #06101a;
+  padding: 11px 17px;
+  font-weight: 700;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { filter: brightness(1.08); }
+.secondary { background: #293c59; color: #eaf3ff; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+.section-title { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.section-title h2 { margin-bottom: 0; }
+.diagnostic, .error { margin: 10px 0; }
+.ok, .authorized, .round-finished, .game-finished { color: #69e6a1; }
+.offline, .error { color: #ff8b8b; }
+.stopped, .unknown, .unconfirmed { color: #ffcd70; }
+.waiting-auth, .browser-opened, .browser-starting, .auth-lost,
+.waiting-game, .game-opened, .waiting-cards, .two-cards-visible,
+.three-cards-visible, .returning-to-list { color: #64d7ff; }
+.observation h3 { font-size: 1rem; margin: 20px 0 10px; }
+ol { margin: 0; padding-left: 20px; }
+li { padding: 8px 0; border-bottom: 1px solid #263753; font-size: .9rem; }
+time, small { color: #8da0ba; margin-right: 8px; }
+b { margin-right: 6px; font-size: .75rem; }
+@media (max-width: 650px) {
+  main { padding: 16px 14px 46px; }
+  .events { padding: 22px 0; }
+  .cards article { min-width: 150px; flex-basis: 50%; padding: 12px; }
+  .cards article:first-child { padding-left: 12px; }
+  .section-title { align-items: flex-start; }
+}
