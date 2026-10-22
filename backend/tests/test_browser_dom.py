@@ -580,7 +580,9 @@ def test_visible_baccarat_victory_caption_is_terminal_only_for_player_widget():
                 assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
                 await page.locator("#outcome").evaluate("el => el.className='baccarat-panel__caption'")
                 await page.locator(".baccarat-player").evaluate("el => el.remove()")
-                assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
+                # Outcome caption is still explicit terminal evidence after
+                # the bookmaker removes the Player widget.
+                assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is True
             finally:
                 await browser.close()
     asyncio.run(run())
@@ -849,4 +851,76 @@ def test_expired_screen_does_not_block_observer_45_seconds(tmp_path, monkeypatch
         assert "expired" in retry
         assert "Событие завершено" in service.observation_diagnostic
         assert service.store.get("expired")["scan_result"] == "SCAN_TIMEOUT"
+    asyncio.run(run())
+
+
+def test_transient_victory_badge_survives_reread_and_two_cached_cards_finish(tmp_path, monkeypatch):
+    """Real failure: result appears for one frame and Player DOM vanishes."""
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, card_poll_seconds=0.1,
+            scan_incomplete_timeout_seconds=45,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **_kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "transient-victory.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = {"game_id": "transient-405"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        cards = [
+            {"position": 1, "rank": "K", "suit": "clubs"},
+            {"position": 2, "rank": "7", "suit": "diamonds"},
+        ]
+        count = 0
+        async def inspect(_player, _banker):
+            nonlocal count
+            count += 1
+            # First 2 polls: Player cards, no result. Poll 3: a visible
+            # victory banner, poll 4: banner gone (the scanner rereads).
+            # All subsequent polls: Baccarat player widget removed.
+            if count <= 4:
+                return {
+                    "cards": cards, "round_timer_text": "00:05",
+                    "counts": {"player_fields": 1, "player_cards_containers": 1,
+                               "player_card_boxes": 3},
+                    "pending_card_slots": 1,
+                    "finished": count == 3,
+                    "baccarat_result_visible": count == 3,
+                    "finish_flag_text": "Победа" if count == 3 else "",
+                    "status_text": "", "cause": "transient banner",
+                }
+            return {
+                "cards": [], "round_timer_text": "",
+                "counts": {"player_fields": 0, "player_cards_containers": 0,
+                           "player_card_boxes": 0},
+                "pending_card_slots": 0, "finished": False,
+                "baccarat_result_visible": False, "finish_flag_text": "",
+                "status_text": "", "cause": "result DOM vanished",
+            }
+        service._inspect_game_dom = inspect
+        game = Game("transient-405", "https://example.test/transient-405",
+                    "", "405", "Идёт", 0)
+        processed, retry = set(), {}
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, retry), timeout=4
+        )
+        saved = service.store.get("transient-405")
+        assert processed == {"transient-405"}
+        assert saved["cards"] == cards
+        assert saved["calculation_status"] == "complete"
+        assert saved["player_hand_final"] is True
+        assert saved["finished_confirmed"] is True
+        assert saved["final_snapshot_reverified"] is True
+        assert saved["scan_result"] == "CARDS_CONFIRMED"
+        assert service.observation_status == "SAVED"
+        assert count >= 5
     asyncio.run(run())

@@ -235,7 +235,8 @@ def test_started_unknown_and_finished_rows_are_prioritized_by_live_status(tmp_pa
         assert "откроем игру" in service.game_diagnostics[2]["reason"]
         await service._observe_iteration({"started"}, {})
         await service._observe_iteration({"started", "unknown"}, {})
-        assert [game.game_id for game in selected] == ["started", "unknown", "finished"]
+        # After observing #813, never rewind to completed #811.
+        assert [game.game_id for game in selected] == ["started", "unknown"]
 
     asyncio.run(run())
 
@@ -353,4 +354,54 @@ def test_default_cycle18_mode_never_links_legacy_prediction(tmp_path, monkeypatc
         assert store.pending_prediction_targets() == set()
         assert store.get("source").get("outgoing_target_game_id") is None
         assert not any("PREDICTION_RESULT" in e["message"] for e in service.events)
+    asyncio.run(run())
+
+
+def test_after_round_400_prioritizes_401_not_stale_399_or_finished_400():
+    from app.observation import choose_observation_game
+    games = [
+        Game("stale399", f"{TABLE}/399", "00:02", "399", "STARTED", 0,
+             started=True, player_score="3", banker_score="5"),
+        Game("done400", f"{TABLE}/400", "", "400", "Завершена", 1,
+             finished=True),
+        Game("next401", f"{TABLE}/401", "00:19", "401", "UPCOMING", 2,
+             player_score="0", banker_score="0", is_countdown_to_start=True),
+        Game("later402", f"{TABLE}/402", "00:52", "402", "UPCOMING", 3,
+             player_score="0", banker_score="0", is_countdown_to_start=True),
+    ]
+    choose = choose_observation_game
+    assert choose(games, set(), after_round=400).round_number == "401"
+    assert choose(games, {"next401"}, after_round=400).round_number == "402"
+    assert choose(games[:2], set(), after_round=400) is None
+
+
+def test_after_round_1440_selects_round_1():
+    from app.observation import choose_observation_game
+    before = Game("last1440", f"{TABLE}/1440", "00:00", "1440",
+                  "Завершена", 0, finished=True)
+    after = Game("next1", f"{TABLE}/1", "00:12", "1", "UPCOMING", 1,
+                 player_score="0", banker_score="0", is_countdown_to_start=True)
+    assert choose_observation_game([before, after], set(), after_round=1440).game_id == "next1"
+
+
+def test_next_round_scan_skips_archived_recovery_when_401_not_yet_listed(tmp_path, monkeypatch):
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, game_list_url=LIST_URL, observation_poll_seconds=0,
+        ))
+        store = ObservationStore(tmp_path / "avoid-archive.sqlite3")
+        old = Game("old399", f"{TABLE}/399", "00:00", "399", "Завершена", 0,
+                   finished=True, player_score="2", banker_score="3")
+        store.register_discovered_games([old])
+        selected = []
+        service = _service(store, selected)
+        service._last_selected_round_number = 400
+        service._read_game_list_snapshot = lambda: None
+        async def snapshots():
+            return [old]
+        service._read_game_list_snapshot = snapshots
+        await service._observe_iteration(set(), {})
+        assert selected == []
+        assert service.observation_status == "WAITING_FOR_GAME"
+        assert service._last_selected_round_number == 400
     asyncio.run(run())
