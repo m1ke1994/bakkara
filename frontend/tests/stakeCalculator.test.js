@@ -36,3 +36,13 @@ test('Invalid parameters cannot produce infinite or unsafe bankrolls', () => {
     { stake: 10, odds: 1.0000000001, steps: 20, mode: 'recover' },
   ]) assert.equal(calculateLadder(input), null)
 })
+
+test('Recovery calculator updates every following amount when odds change', () => {
+  const low = calculateLadder({ stake: 10, odds: 1.9, steps: 5, mode: 'recover' })
+  const high = calculateLadder({ stake: 10, odds: 2.1, steps: 5, mode: 'recover' })
+  assert.equal(low.rows[0].stake, high.rows[0].stake)
+  assert.notDeepEqual(low.rows.slice(1).map(row => row.stake), high.rows.slice(1).map(row => row.stake))
+  for (const result of [low, high]) {
+    assert.ok(result.rows.every(row => row.netIfWin >= result.targetNetProfit - 0.01))
+  }
+})
