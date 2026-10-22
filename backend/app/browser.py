@@ -727,15 +727,44 @@ class BrowserService:
                   let rankCount = 0;
                   let suitCount = 0;
                   for (const [boxIndex, box] of boxes.entries()) {
-                    const rankNode = box.querySelector('.baccarat-card__rank');
-                    const rank = text(rankNode).toUpperCase();
-                    if (rankNode && visible(rankNode)) rankCount += 1;
-                    const classes = [box.className, ...[...box.querySelectorAll('[class]')].map(node => node.getAttribute('class') || '')].join(' ').toLowerCase();
-                    const icons = [...box.querySelectorAll('svg[data-v-ico^="cardSuits|"]')].map(node => node.getAttribute('data-v-ico') || '').join(' ').toLowerCase();
-                    const suit = ['hearts','diamonds','clubs','spades'].find(value =>
-                      classes.includes('suit-' + value) || icons.includes('cardsuits|' + value)) || '';
+                    // The live Baccarat skin renders ranks both as
+                    // .baccarat-card__rank and as plain DOM leaf nodes inside
+                    // a card face. Only inspect the CURRENT Player card box,
+                    // never the Banker side or the scoreboard.
+                    const validRank = value => /^(?:A|[2-9]|10|J|Q|K)$/.test(value);
+                    const rankNodes = [
+                      ...box.querySelectorAll('.baccarat-card__rank, [data-rank], [class*="card__value"], [class*="card-rank"]'),
+                      ...box.querySelectorAll('*'),
+                    ];
+                    const rankNode = rankNodes.find(node =>
+                      visible(node) && (node.children.length === 0 || node.hasAttribute('data-rank')) &&
+                      validRank((node.getAttribute('data-rank') || text(node)).toUpperCase()));
+                    const rank = (rankNode?.getAttribute('data-rank') || text(rankNode)).toUpperCase();
+                    if (rankNode) rankCount += 1;
+                    // Card suits may be rendered in CSS classes, data-v-ico,
+                    // an SVG <use href>, or a real Unicode suit glyph.
+                    const cardNodes = [box, ...box.querySelectorAll('*')];
+                    const cardMeta = cardNodes.map(node => [
+                      node.getAttribute('class') || '',
+                      node.getAttribute('data-v-ico') || '',
+                      node.getAttribute('data-suit') || '',
+                      node.getAttribute('href') || '',
+                      node.getAttribute('xlink:href') || '',
+                      node.getAttribute('aria-label') || '',
+                      node.getAttribute('title') || '',
+                      node.getAttribute('alt') || '',
+                    ].join(' ')).join(' ').toLowerCase();
+                    const symbolText = text(box);
+                    const suit = [
+                      ['hearts', '♥', 'heart'],
+                      ['diamonds', '♦', 'diamond'],
+                      ['clubs', '♣', 'club'],
+                      ['spades', '♠', 'spade'],
+                    ].find(([plural, glyph, singular]) =>
+                      new RegExp('(?:^|[^a-z])' + singular + 's?(?:$|[^a-z])').test(cardMeta)
+                      || symbolText.includes(glyph))?.[0] || '';
                     if (suit) suitCount += 1;
-                    if (/^(?:A|[2-9]|10|J|Q|K)$/.test(rank) && suit) cards.push({position: boxIndex + 1, rank, suit});
+                    if (validRank(rank) && suit) cards.push({position: boxIndex + 1, rank, suit});
                     else pending += 1;
                   }
                   const timerLabels = [...document.querySelectorAll('.ui-game-timer__label')]
@@ -755,9 +784,10 @@ class BrowserService:
                   // render frame, between our Playwright polls. Keep the
                   // observed terminal caption in THIS page until navigation.
                   // Never synthesize a result from a timer or card count.
+                  const isBaccaratOutcome = value =>
+                    /^(?:победа(?:\s*:\s*(?:игрок|банкир|player|banker))?|ничья)$/i.test(value);
                   const scanOutcome = () => [...document.querySelectorAll('.baccarat-panel__caption')]
-                    .find(node => visible(node)
-                      && /^(?:победа|ничья)$/i.test(text(node))) || null;
+                    .find(node => visible(node) && isBaccaratOutcome(text(node))) || null;
                   const latch = window.__bakkaraOutcomeLatch || (
                     window.__bakkaraOutcomeLatch = {text: '', observer: null});
                   const outcomeFlag = scanOutcome();
@@ -783,6 +813,10 @@ class BrowserService:
                   const finishLabel = finishFlag ? text(finishFlag) : outcomeLabel;
                   const relevant = playerSide || finishFlag || outcomeFlag ||
                     [...document.querySelectorAll('.scoreboard-header__match-info, .ui-game-timer__label, .scoreboard-status')].find(visible);
+                  const cardSlotEvidence = boxes.map(box => ({
+                    text: text(box).slice(0, 80),
+                    html: (box.outerHTML || '').slice(0, 700),
+                  }));
                   return {
                     url: location.href,
                     captured_at_ms: performance.now(),
@@ -799,6 +833,7 @@ class BrowserService:
                       player_card_suits: suitCount
                     },
                     cards, pending_card_slots: pending, status_texts: statusTexts,
+                    card_slot_evidence: pending ? cardSlotEvidence : [],
                     round_timer_text: timerLabels[0] || '',
                     finished, finish_flag_text: finishLabel,
                     baccarat_result_visible: Boolean(outcomeLabel),
@@ -858,6 +893,7 @@ class BrowserService:
             "status_text": " ".join(dict.fromkeys(text for frame in frames for text in frame.get("status_texts", []))),
             "dom_fragment": (diagnostic_frame or {}).get("fragment", ""),
             "cause": cause,
+            "card_slot_evidence": (data_frame or {}).get("card_slot_evidence", []),
         }
 
     async def _probe_observation_auth_locked(self) -> bool:
