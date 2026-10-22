@@ -21,6 +21,25 @@ const state = ref({ state_epoch: '', state_version: 0, backend: 'CHECKING', brow
 const busy = ref(false)
 const error = ref('')
 const cycle18 = computed(() => state.value.cycle18 || {})
+const strategyChoice = ref('n18')
+const strategyTouched = ref(false)
+const strategyNotice = ref('')
+const strategyInfo = computed(() => state.value.strategy || {})
+const activeStrategy = computed(() => cycle18.value.session_active
+  ? cycle18.value.strategy : (strategyInfo.value.selected || 'n18'))
+const strategyLabel = computed(() => activeStrategy.value === 'n18'
+  ? 'Цикл N−18' : 'Голосование N−3/10/24/31/40')
+const strategyShortLabel = computed(() => activeStrategy.value === 'n18' ? 'цикл 18' : '5 циклов')
+const strategyDirty = computed(() => strategyChoice.value !== (strategyInfo.value.selected || 'n18'))
+const strategyOptions = [
+  { id: 'n18', label: 'Цикл N−18', detail: 'Один источник · 20 подтверждённых раздач для подготовки' },
+  { id: 'vote_3_10_24_31_40', label: 'Голосование N−3/10/24/31/40', detail: 'Пять голосов · 40 подтверждённых раздач для подготовки' },
+]
+const sourceDescription = forecast => (forecast?.source_round_numbers || [forecast?.source_round_number])
+  .filter(Boolean).map(number => '№' + number).join(', ') || '—'
+const votesDescription = forecast => (forecast?.votes || [])
+  .map(vote => 'N−' + vote.offset + ': ' + (suits[vote.suit]?.[0] || '—')).join(' · ')
+
 const cycleStats = computed(() => cycle18.value.statistics || {})
 const currentForecast = computed(() => cycle18.value.ready
   ? cycle18.value.live_preview?.find(item => item.phase === 'CURRENT') : null)
@@ -152,7 +171,11 @@ function applySnapshot(next) {
   if (!shouldApplySnapshot(version, highestStateVersion, nextEpoch, currentEpoch)) return false
   if (nextEpoch && currentEpoch && nextEpoch !== currentEpoch) highestStateVersion = 0
   highestStateVersion = version
+  // Browser/observer commands return a smaller snapshot than /api/state.
+  // Preserve the last confirmed backend strategy across such snapshots.
+  if (!next.strategy && state.value.strategy) next.strategy = state.value.strategy
   state.value = next
+  if (!strategyTouched.value && next.strategy?.selected) strategyChoice.value = next.strategy.selected
   return true
 }
 async function command(path, method = 'POST') {
@@ -164,6 +187,30 @@ async function command(path, method = 'POST') {
     error.value = ''
   } catch {
     error.value = 'Не удалось выполнить команду. Проверьте соединение с сервером.'
+  } finally {
+    busy.value = false
+  }
+}
+async function saveStrategy() {
+  if (busy.value || observing.value) return
+  busy.value = true
+  strategyNotice.value = ''
+  try {
+    const response = await fetch(`${api}/api/strategy`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy: strategyChoice.value }),
+    })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.detail || 'Сервер отклонил выбор фильтра')
+    state.value = { ...state.value, strategy: payload }
+    strategyChoice.value = payload.selected
+    strategyTouched.value = false
+    strategyNotice.value = 'Фильтр сохранён на сервере. Следующий запуск сканирования применит его.'
+    error.value = ''
+    await load()
+  } catch (exception) {
+    error.value = exception.message || 'Не удалось сохранить фильтр на сервере'
   } finally {
     busy.value = false
   }
@@ -196,7 +243,7 @@ onBeforeUnmount(() => {
 <template>
   <main>
     <header class="dashboard-header">
-      <div><p class="eyebrow">BAKKARA / LIVE ANALYTICS</p><h1>Панель наблюдения <span class="header-spark">✦</span></h1><p>Карты Игрока, прогнозы цикла 18 и расчёт виртуального бюджета.</p></div>
+      <div><p class="eyebrow">BAKKARA / LIVE ANALYTICS</p><h1>Панель наблюдения <span class="header-spark">✦</span></h1><p>Карты Игрока, прогнозы выбранной стратегии и расчёт виртуального бюджета.</p></div>
       <nav class="quick-nav" aria-label="Разделы панели">
         <a href="#observation">Наблюдение</a>
         <a href="#calculator">Калькулятор</a>
@@ -209,10 +256,25 @@ onBeforeUnmount(() => {
       <article><span>Браузер</span><strong :class="badge(state.browser)">{{ label('browser', state.browser) }}</strong></article>
       <article><span>Авторизация</span><strong :class="badge(state.authorization)">{{ label('authorization', state.authorization) }}</strong></article>
     </section>
+    <section class="events strategy-panel" aria-label="Выбор фильтра прогнозирования">
+      <div class="section-title"><div><p class="eyebrow">СТРАТЕГИЯ / ФИЛЬТР</p><h2>Выберите алгоритм прогнозирования</h2></div><span class="standalone-label">На сервере: {{ strategyInfo.selected === 'vote_3_10_24_31_40' ? '5 циклов' : 'N−18' }}</span></div>
+      <div class="strategy-options" role="radiogroup" aria-label="Фильтр прогноза">
+        <label v-for="option in strategyOptions" :key="option.id" class="strategy-option" :class="{ 'strategy-option-selected': strategyChoice === option.id }">
+          <input v-model="strategyChoice" type="radio" name="forecast-strategy" :value="option.id" :disabled="busy || observing" @change="strategyTouched = true; strategyNotice = ''" />
+          <span><strong>{{ option.label }}</strong><small>{{ option.detail }}</small></span>
+        </label>
+      </div>
+      <div class="controls strategy-save-controls">
+        <button :disabled="busy || observing || !strategyDirty" @click="saveStrategy">Сохранить стратегию</button>
+        <span class="diagnostic">{{ observing ? 'Сканирование активно: для смены фильтра сначала остановите его.' : (strategyDirty ? 'Выбор изменён — нажмите «Сохранить стратегию».' : 'Настройка хранится в базе данных бэкенда.') }}</span>
+      </div>
+      <p v-if="strategyNotice" class="strategy-notice">{{ strategyNotice }}</p>
+      <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. Прогнозы и WIN/LOSE виртуальные; бот не размещает ставки.</p>
+    </section>
     <section class="controls"><button :disabled="busy || running" @click="command('/api/browser/start')">Запустить браузер</button><button class="secondary" :disabled="busy || !running" @click="command('/api/browser/stop')">Остановить браузер</button></section>
     <p class="diagnostic">{{ state.diagnostic }}</p><p v-if="error" class="error">{{ error }}</p>
     <section class="events forecast-strip" id="forecasts" aria-label="Прогнозы следующих раздач">
-      <div class="section-title"><div><p class="eyebrow">LIVE / ПРОГНОЗЫ</p><h2>Текущая и следующая раздачи</h2></div><span class="standalone-label">{{ cycle18.ready ? 'Цикл N−18 активен' : 'Подготовка прогноза' }}</span></div>
+      <div class="section-title"><div><p class="eyebrow">LIVE / ПРОГНОЗЫ</p><h2>Текущая и следующая раздачи</h2></div><span class="standalone-label">{{ cycle18.ready ? strategyLabel + ' активен' : 'Подготовка прогноза' }}</span></div>
         <div v-if="cycle18.ready" class="forecast-pair" aria-label="Текущая и следующая раздачи">
           <article class="forecast-tile" data-testid="forecast-current">
             <div class="forecast-tile-head"><span>Текущая раздача</span><span class="forecast-round">№{{ currentForecast?.target_round_number || state.observation?.current?.round_number || '—' }}</span></div>
@@ -220,7 +282,9 @@ onBeforeUnmount(() => {
               {{ suits[currentForecast.predicted_suit]?.[0] }} <small>{{ suits[currentForecast.predicted_suit]?.[1] }}</small>
             </div>
             <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
-            <p>Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
+            <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
+            <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
+            <p v-if="currentForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(currentForecast) }}</p>
           </article>
           <article class="forecast-tile" data-testid="forecast-next">
             <div class="forecast-tile-head"><span>Следующая раздача</span><span class="forecast-round">№{{ nextForecast?.target_round_number || '—' }}</span></div>
@@ -228,11 +292,13 @@ onBeforeUnmount(() => {
               {{ suits[nextForecast.predicted_suit]?.[0] }} <small>{{ suits[nextForecast.predicted_suit]?.[1] }}</small>
             </div>
             <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
-            <p>Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
+            <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
+            <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
+            <p v-if="nextForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(nextForecast) }}</p>
           </article>
         </div>
         <p v-if="cycle18.ready && !currentForecast" class="diagnostic">Ожидаем выбора текущей игры с действительным номером; прогнозы нельзя определить без N.</p>
-        <p v-if="!cycle18.ready" class="diagnostic">Прогнозы двух раздач появятся только после подтверждения 20 игр.</p>
+        <p v-if="!cycle18.ready" class="diagnostic">Прогнозы появятся после {{ cycle18.warmup_required ?? 20 }} подтверждённых игр в этом запуске.</p>
     </section>
     <section class="events calculator-panel" id="calculator" aria-label="Калькулятор догона">
       <div class="section-title"><h2>Калькулятор догона</h2><span class="standalone-label">Без ставок</span></div>
@@ -285,10 +351,10 @@ onBeforeUnmount(() => {
       <p v-else-if="!virtualBetRows.length" class="diagnostic">Проверенных виртуальных результатов пока нет.</p>
       <div v-else class="history-table-scroll virtual-history-scroll">
         <table class="history-table" aria-label="История виртуальных ставок цикла 18">
-          <thead><tr><th>Целевая игра</th><th>Источник N−18</th><th>Прогноз</th><th>Шаг</th><th>Виртуальная ставка</th><th>Коэффициент</th><th>Результат</th><th>Виртуальный итог</th><th>Тип проверки</th></tr></thead>
+          <thead><tr><th>Целевая игра</th><th>Источники ({{ strategyShortLabel }})</th><th>Прогноз</th><th>Шаг</th><th>Виртуальная ставка</th><th>Коэффициент</th><th>Результат</th><th>Виртуальный итог</th><th>Тип проверки</th></tr></thead>
           <tbody><tr v-for="item in virtualBetRows" :key="item.source_game_id">
             <td>№{{ item.target_round_number || '—' }}</td>
-            <td>№{{ item.source_round_number || '—' }}</td>
+            <td>{{ sourceDescription(item) }}</td>
             <td :class="isRedSuit(item.predicted_suit) ? 'red-suit' : 'black-suit'">{{ suits[item.predicted_suit]?.[0] || '—' }}</td>
             <td>{{ item.step ?? '—' }}</td>
             <td>{{ item.virtualStake === null ? 'За пределами лестницы' : money(item.virtualStake) }}</td>
@@ -313,7 +379,7 @@ onBeforeUnmount(() => {
         </p>
         <details><summary>Адрес страницы игры</summary><p>{{ state.observation.current.url }}</p></details>
         <p>Игра: {{ state.observation.current.game_id }} · Раздача: {{ state.observation.current.round_number || '—' }}</p>
-        <p v-if="cycle18.ready && outcomeFor(state.observation.current.game_id)">Цикл N−18: {{ suits[outcomeFor(state.observation.current.game_id).predicted_suit]?.[0] || '—' }} · {{ outcomeLabel(outcomeFor(state.observation.current.game_id).result) }}</p>
+        <p v-if="cycle18.ready && outcomeFor(state.observation.current.game_id)">{{ strategyLabel }}: {{ suits[outcomeFor(state.observation.current.game_id).predicted_suit]?.[0] || '—' }} · {{ outcomeLabel(outcomeFor(state.observation.current.game_id).result) }}</p>
         <details v-if="state.observation.current.round_number_diagnostic"><summary>Проверка номера раздачи</summary><p>{{ state.observation.current.round_number_diagnostic }}</p></details>
         <ol><li v-for="(card, index) in state.observation.current.cards" :key="card.position || index">{{ card.position || index + 1 }}. {{ card.rank }} {{ suits[card.suit]?.[0] }} — {{ suits[card.suit]?.[1] }}</li></ol>
         <p>Раскрытых карт: {{ state.observation.current.cards_count }} · Нераскрытых позиций: {{ state.observation.current.pending_card_slots }}</p>
@@ -326,17 +392,17 @@ onBeforeUnmount(() => {
       </template>
       <p v-else>Текущая игра пока не выбрана.</p>
       <details v-if="state.observation?.games?.length"><summary>Проверенные игры: {{ state.observation.games.length }}</summary><ol><li v-for="game in state.observation.games" :key="game.game_id">№ {{ game.game_id }} · {{ game.time }} · {{ game.reason }}</li></ol></details>
-      <section class="cycle18-panel" aria-label="Цикл 18 мастей Игрока">
+      <section class="cycle18-panel" aria-label="Прогноз масти Игрока по выбранной стратегии">
         <div class="section-title">
-          <h3>Цикл 18 · прогноз масти Игрока</h3>
+          <h3>{{ strategyLabel }} · прогноз масти Игрока</h3>
           <strong>{{ cycle18.ready ? 'Готов к прогнозированию' : 'Сбор истории' }}</strong>
         </div>
-        <p class="diagnostic">Каждый запуск наблюдения требует 20 уникальных финально подтверждённых раздач Игрока. Пропуски не обнуляют собранные карты и не сдвигают источник прогноза N−18. Для целевой игры №N берём расчётную масть из №N−18. Реальные ставки бот не делает.</p>
+        <p class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. Реальные ставки бот не делает.</p>
         <div class="warmup">
-          <div class="section-title"><strong>Подтверждено за запуск: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? 'Цикл 18 активен' : 'Только сбор карт' }}</span></div>
+          <div class="section-title"><strong>Подтверждено за запуск: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? strategyLabel + ' активен' : 'Только сбор карт' }}</span></div>
           <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
-          <p v-if="!cycle18.ready" class="diagnostic">Первые 20 уникальных подтверждённых раздач: только чтение и запись карт Игрока, без WIN/LOSE. Если сайт пропустил игру, счётчик не сбрасывается. После 20-й подтверждённой игры запускается цикл N−18 по реальным номерам (прогноз возможен лишь при наличии исходной игры N−18).</p>
-          <p v-else class="diagnostic">Подготовка завершена. Прогноз для №N берётся из подтверждённой раздачи №N−18.</p>
+          <p v-if="!cycle18.ready" class="diagnostic">Подготовка: первые {{ cycle18.warmup_required ?? 20 }} финально подтверждённых раздач. До её завершения WIN/LOSE не рассчитываем. Если источник отсутствует, сигнал пропускается.</p>
+          <p v-else class="diagnostic">Подготовка завершена. Прогнозы строятся только по реальным номерам завершённых источников: {{ strategyLabel }}.</p>
         </div>
         <p class="diagnostic">
           Всего обнаружено игр: <strong>{{ cycle18.discovered_count ?? 0 }}</strong>.
@@ -355,7 +421,7 @@ onBeforeUnmount(() => {
           </p>
         </details>
         <div v-if="cycle18.ready" class="prediction-stats">
-          <article><span>Проверено (цикл 18)</span><strong>{{ cycleStats.checked_count ?? 0 }}</strong></article>
+          <article><span>Проверено ({{ strategyShortLabel }})</span><strong>{{ cycleStats.checked_count ?? 0 }}</strong></article>
           <article><span>WIN</span><strong class="win-text">{{ cycleStats.wins ?? 0 }}</strong></article>
           <article><span>LOSE</span><strong class="lose-text">{{ cycleStats.losses ?? 0 }}</strong></article>
           <article><span>Точность</span><strong>{{ cycleStats.win_rate == null ? '—' : cycleStats.win_rate + '%' }}</strong></article>
@@ -366,12 +432,12 @@ onBeforeUnmount(() => {
         </div>
         <details v-if="cycle18.ready && Object.keys(cycleStats.wins_by_step || {}).length"><summary>Победы по шагам (виртуально)</summary><p v-for="(count, step) in cycleStats.wins_by_step" :key="step">Шаг {{ step }}: {{ count }} WIN</p></details>
         <details v-if="cycle18.ready && cycle18.recent?.length">
-          <summary>История прогнозов цикла 18 ({{ cycle18.recent.length }})</summary>
+          <summary>История прогнозов — {{ strategyLabel }} ({{ cycle18.recent.length }})</summary>
           <div class="history-table-scroll">
-            <table class="history-table" aria-label="Прогнозы цикла 18">
+            <table class="history-table" aria-label="Прогнозы выбранной стратегии">
               <thead><tr><th>Источник</th><th>Целевая игра</th><th>Прогноз</th><th>Результат</th><th>Шаг</th><th>Проверка</th></tr></thead>
               <tbody><tr v-for="forecast in cycle18.recent" :key="forecast.source_game_id">
-                <td>№{{ forecast.source_round_number }}</td><td>№{{ forecast.target_round_number }}</td>
+                <td>{{ sourceDescription(forecast) }}</td><td>№{{ forecast.target_round_number }}</td>
                 <td :class="isRedSuit(forecast.predicted_suit) ? 'red-suit' : 'black-suit'">{{ suits[forecast.predicted_suit]?.[0] || '—' }}</td>
                 <td><strong :class="forecast.result === 'WIN' ? 'win-text' : forecast.result === 'LOSE' ? 'lose-text' : ''">{{ predictionLabels[forecast.result] || forecast.result }}</strong></td>
                 <td>{{ forecast.step ?? '—' }}</td>
@@ -392,14 +458,14 @@ onBeforeUnmount(() => {
       <p v-else-if="!filteredHistory.length" class="diagnostic">По указанному запросу раздач не найдено.</p>
       <div v-else class="history-table-scroll history-full-scroll">
         <table class="history-table" aria-label="История наблюдений">
-          <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th scope="col">Расчётная масть</th><th v-if="cycle18.ready" scope="col">WIN / LOSE (цикл 18)</th></tr></thead>
+          <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th scope="col">Расчётная масть</th><th v-if="cycle18.ready" scope="col">WIN / LOSE ({{ strategyShortLabel }})</th></tr></thead>
           <tbody>
             <tr v-for="item in filteredHistory" :key="item.game_id">
               <td class="history-time">{{ formatObservedAt(item.observed_at || item.last_scanned_at || item.discovered_at) }}</td>
               <td class="history-round"><strong><a v-if="item.game_url || item.url" :href="item.game_url || item.url" target="_blank" rel="noopener noreferrer" :title="`Открыть игру ${item.game_id}`">{{ item.round_number || '—' }}</a><span v-else>{{ item.round_number || '—' }}</span></strong></td>
               <td><div v-if="item.player_cards?.length" class="history-card-line"><span v-for="(card, index) in item.player_cards" :key="card.position || index" class="history-card" :class="isRedSuit(card.suit) ? 'red-suit' : 'black-suit'">{{ card.rank }}{{ suits[card.suit]?.[0] || '' }}</span></div><span v-else class="prediction-none">—</span></td>
               <td><span v-if="item.calculated_suit" class="calculated-suit" :class="isRedSuit(item.calculated_suit) ? 'red-suit' : 'black-suit'" title="Масть, рассчитанная из карт этой раздачи">{{ suits[item.calculated_suit]?.[0] || '—' }}</span><span v-else class="prediction-none">—</span></td>
-              <td v-if="cycle18.ready"><span v-if="outcomeFor(item.game_id) && ['WIN', 'LOSE'].includes(outcomeFor(item.game_id).result)" class="prediction-result" :class="`prediction-${outcomeFor(item.game_id).result.toLowerCase()}`" :title="`Цикл N−18: прогноз ${suits[outcomeFor(item.game_id).predicted_suit]?.[1] || '—'}`">{{ outcomeFor(item.game_id).result }}</span><span v-else-if="outcomeFor(item.game_id)?.result === 'PENDING'" class="prediction-pending">Ожидаем карт</span></td>
+              <td v-if="cycle18.ready"><span v-if="outcomeFor(item.game_id) && ['WIN', 'LOSE'].includes(outcomeFor(item.game_id).result)" class="prediction-result" :class="`prediction-${outcomeFor(item.game_id).result.toLowerCase()}`" :title="`${strategyLabel}: прогноз ${suits[outcomeFor(item.game_id).predicted_suit]?.[1] || '—'}`">{{ outcomeFor(item.game_id).result }}</span><span v-else-if="outcomeFor(item.game_id)?.result === 'PENDING'" class="prediction-pending">Ожидаем карт</span></td>
             </tr>
           </tbody>
         </table>

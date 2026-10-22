@@ -27,7 +27,7 @@ def test_history_hides_win_lose_until_cycle18_ready_and_shows_only_cycle18_outco
     assert '№ раздачи</th>' in app
     assert 'Карты Игрока</th>' in app
     assert 'Расчётная масть</th>' in app
-    assert 'WIN / LOSE (цикл 18)</th>' in app
+    assert 'WIN / LOSE ({{ strategyShortLabel }})</th>' in app
     assert 'item.player_cards' in app
     assert 'history-card-line' in app
     assert '.history-card-line { display: flex; flex-wrap: nowrap;' in app
@@ -88,3 +88,16 @@ def test_history_supports_search_and_up_to_two_hundred_rows_without_live_poll_bl
     assert 'async def history(limit: int = 200)' in main
     assert 'safe_limit = min(200, max(1, limit))' in main
     assert '[-200:][::-1]' in cycle
+
+
+def test_saved_strategy_has_two_filters_and_selects_40_hand_voting():
+    app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
+    main = (Path(__file__).resolve().parents[1] / 'app' / 'main.py').read_text(encoding='utf-8')
+    assert 'name="forecast-strategy"' in app
+    assert "vote_3_10_24_31_40" in app
+    assert 'Сохранить стратегию' in app
+    assert "method: 'PUT'" in app
+    assert '/api/strategy' in app and '@app.put("/api/strategy")' in main
+    assert 'cycle18.warmup_required' in app
+    assert 'strategyShortLabel' in app
+    assert 'votesDescription' in app

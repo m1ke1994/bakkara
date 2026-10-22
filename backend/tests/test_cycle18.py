@@ -694,3 +694,85 @@ def test_october_22_rounds_817_to_827_match_exact_n_minus_18_rule():
             expected, cards, finished_confirmed=True, final_snapshot_reverified=True,
         ))
     assert checked == ["LOSE"] * 10 + ["WIN"]
+
+
+
+def test_voting_strategy_is_persisted_and_uses_five_exact_sources(tmp_path):
+    path = tmp_path / "voting.sqlite3"
+    store = ObservationStore(path)
+    engine = Cycle18Engine(path)
+    from app.cycle18 import STRATEGY_VOTE
+    assert engine.get_strategy()["selected"] == "n18"
+    engine.save_strategy(STRATEGY_VOTE)
+    assert Cycle18Engine(path).get_strategy()["selected"] == STRATEGY_VOTE
+    engine.start_session()
+
+    # Each of the five original-table votes uses different source hands.
+    # n41: n38 and n31 vote clubs; n17 and n10 vote hearts;
+    # n1 votes diamonds -> tie 2:2 resolved in favour of hearts.
+    for number in range(1, 41):
+        if number in (38, 31):
+            suits = ("clubs", "spades")  # clubs
+        elif number in (17, 10):
+            suits = ("spades", "spades")  # hearts
+        elif number == 1:
+            suits = ("hearts", "hearts")  # diamonds
+        else:
+            suits = ("hearts", "clubs")
+        add_round(store, number, cards=[
+            {"position": 1, "rank": "9", "suit": suits[0]},
+            {"position": 2, "rank": "3", "suit": suits[1]},
+        ])
+    result = engine.refresh({"game_id": "new-41", "round_number": "41"})
+    assert result["strategy"] == STRATEGY_VOTE
+    assert result["warmup_required"] == 40
+    assert result["warmup_count"] == 40
+    assert result["ready"]
+    current = result["live_preview"][0]
+    assert current["source_round_numbers"] == [38, 31, 17, 10, 1]
+    assert current["predicted_suit"] == "hearts"
+    assert [v["suit"] for v in current["votes"]] == [
+        "clubs", "clubs", "hearts", "hearts", "diamonds",
+    ]
+    assert len(result["upcoming"]) == 1
+    assert result["upcoming"][0]["target_round_number"] == 41
+    assert result["upcoming"][0]["source_round_numbers"] == [38, 31, 17, 10, 1]
+    add_round(store, 41, cards=[
+        {"position": 1, "rank": "A", "suit": "hearts"},
+        {"position": 2, "rank": "2", "suit": "diamonds"},
+    ])
+    assert engine.refresh()["statistics"]["wins"] == 1
+
+
+def test_voting_missing_one_exact_source_never_uses_neighbour(tmp_path):
+    from app.cycle18 import STRATEGY_VOTE
+    path = tmp_path / "missing-voter.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.save_strategy(STRATEGY_VOTE)
+    engine.start_session()
+    for number in range(1, 43):
+        if number != 3:
+            add_round(store, number)
+    result = engine.refresh({"game_id": "future-43", "round_number": "43"})
+    assert result["ready"]
+    # 43-40 = 3 (missing), whereas #4 exists. This must NOT be shifted.
+    assert result["live_preview"][0]["source_round_numbers"] == [40, 33, 19, 12, 3]
+    assert result["live_preview"][0]["available"] is False
+    assert all(row["target_round_number"] != 43 for row in result["upcoming"])
+
+
+def test_strategy_can_only_change_between_sessions(tmp_path):
+    from app.cycle18 import STRATEGY_VOTE
+    import pytest
+    path = tmp_path / "choose.sqlite3"
+    engine = Cycle18Engine(path)
+    with pytest.raises(ValueError):
+        engine.save_strategy("unknown")
+    engine.start_session()
+    with pytest.raises(RuntimeError, match="Остановите"):
+        engine.save_strategy(STRATEGY_VOTE)
+    assert engine.refresh()["strategy"] == "n18"
+    engine.stop_session()
+    assert engine.save_strategy(STRATEGY_VOTE)["selected"] == STRATEGY_VOTE
+    engine.start_session()
+    assert engine.refresh()["strategy"] == STRATEGY_VOTE

@@ -103,3 +103,14 @@ b { margin-right: 6px; font-size: .75rem; }
   .cards article:first-child { padding-left: 12px; }
   .section-title { align-items: flex-start; }
 }
+
+/* Persisted strategy selection */
+.strategy-panel { padding-block: 22px; }
+.strategy-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 12px; margin-top: 18px; }
+.strategy-option { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border: 1px solid #2e4260; border-radius: 10px; background: #111f32; cursor: pointer; }
+.strategy-option-selected { border-color: #56c8f1; background: #182d42; }
+.strategy-option input { accent-color: #56c8f1; margin-top: 3px; width: 18px; height: 18px; }
+.strategy-option span { display: grid; gap: 7px; }
+.strategy-option small { color: #adbeda; font-size: .8rem; }
+.strategy-save-controls { align-items: center; }
+.strategy-notice { color: #7bebb0; font-weight: 700; }
