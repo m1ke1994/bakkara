@@ -3,7 +3,8 @@ import asyncio
 import logging
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
 from .browser import browser_service
@@ -11,6 +12,10 @@ from .config import settings
 from .cycle18 import Cycle18Engine
 
 cycle18_engine = Cycle18Engine(settings.observation_db)
+
+
+class StrategySelection(BaseModel):
+    strategy: str
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -37,7 +42,28 @@ async def health():
 async def state():
     snapshot = await asyncio.to_thread(browser_service.snapshot)
     snapshot['cycle18'] = await asyncio.to_thread(cycle18_engine.refresh, snapshot.get('observation', {}).get('current'))
+    snapshot['strategy'] = await asyncio.to_thread(cycle18_engine.get_strategy)
     return snapshot
+
+
+@app.get("/api/strategy")
+async def get_strategy():
+    return await asyncio.to_thread(cycle18_engine.get_strategy)
+
+
+@app.put("/api/strategy")
+async def save_strategy(selection: StrategySelection):
+    # Running observation sessions cannot silently change their scoring rule.
+    active_observer = bool(browser_service.observation_task and not browser_service.observation_task.done())
+    if active_observer:
+        raise HTTPException(status_code=409, detail="Остановите сканирование перед сменой фильтра")
+    await asyncio.to_thread(cycle18_engine.stop_session)
+    try:
+        return await asyncio.to_thread(cycle18_engine.save_strategy, selection.strategy)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/browser/start")

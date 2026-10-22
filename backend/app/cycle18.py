@@ -20,6 +20,53 @@ ROUND_MAX = 1440
 MAX_GAP_SECONDS = 600
 STALE_SECONDS = 5400
 
+STRATEGY_N18 = "n18"
+STRATEGY_VOTE = "vote_3_10_24_31_40"
+VOTE_OFFSETS = (3, 10, 24, 31, 40)
+SUIT_PRIORITY = ("hearts", "diamonds", "clubs", "spades")
+STRATEGY_OPTIONS = (
+    {"id": STRATEGY_N18, "label": "Цикл N−18", "description": "Один источник N−18, подготовка 20 рук"},
+    {"id": STRATEGY_VOTE, "label": "Голосование N−3/10/24/31/40",
+     "description": "Пять источников, большинство голосов, подготовка 40 рук"},
+)
+
+
+def strategy_warmup(strategy: str) -> int:
+    return 40 if strategy == STRATEGY_VOTE else WARMUP
+
+
+def strategy_offsets(strategy: str) -> tuple[int, ...]:
+    return VOTE_OFFSETS if strategy == STRATEGY_VOTE else (CYCLE,)
+
+
+def predict_target(number: int, sources: dict[int, dict[str, Any]],
+                   strategy: str = STRATEGY_N18) -> dict[str, Any] | None:
+    """One advance prediction from exact, verified physical source rounds.
+
+    Majority uses the unmodified ordered 2/3-card suit table. Ties use
+    hearts, diamonds, clubs, spades, fixed before observing the target.
+    If any required source is absent, there is no signal at all.
+    """
+    if not 1 <= number <= ROUND_MAX:
+        return None
+    votes = []
+    for offset in strategy_offsets(strategy):
+        source_number = ((number - offset - 1) % ROUND_MAX) + 1
+        source = sources.get(source_number)
+        suit = verified_suit(source) if source else None
+        if suit is None:
+            return None
+        votes.append({"offset": offset, "round_number": source_number, "suit": suit})
+    counts = {suit: sum(vote["suit"] == suit for vote in votes) for suit in SUIT_PRIORITY}
+    predicted = max(SUIT_PRIORITY, key=lambda suit: counts[suit])
+    return {
+        "predicted_suit": predicted,
+        "source_round_number": votes[0]["round_number"],
+        "source_round_numbers": [vote["round_number"] for vote in votes],
+        "votes": votes,
+        "vote_counts": counts,
+    }
+
 
 def round_number(value: Any) -> int | None:
     value = str(value or "").strip()
@@ -129,7 +176,8 @@ def verified_suit(row: dict[str, Any]) -> str | None:
     return SUIT_SYMBOL_TO_NAME.get(symbol) if symbol else None
 
 
-def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, Any]],
+                       strategy: str = STRATEGY_N18) -> list[dict[str, Any]]:
     """Preview physical N and N+1 strictly from verified N-18 sources.
 
     This is presentation ONLY. It must not insert a forecast, announce
@@ -139,15 +187,17 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
         return []
     previews = []
     for phase, number in (("CURRENT", current_round), ("NEXT", following(current_round))):
-        source_number = ((number - CYCLE - 1) % ROUND_MAX) + 1
-        source = sources.get(source_number)
-        suit = verified_suit(source) if source else None
+        source_numbers = [((number - offset - 1) % ROUND_MAX) + 1
+                          for offset in strategy_offsets(strategy)]
+        forecast = predict_target(number, sources, strategy)
         previews.append({
             "phase": phase,
             "target_round_number": number,
-            "source_round_number": source_number,
-            "predicted_suit": suit,
-            "available": suit is not None,
+            "source_round_number": source_numbers[0],
+            "source_round_numbers": source_numbers,
+            "predicted_suit": forecast["predicted_suit"] if forecast else None,
+            "votes": forecast["votes"] if forecast else [],
+            "available": forecast is not None,
         })
     return previews
 
@@ -182,14 +232,52 @@ class Cycle18Engine:
                 PRIMARY KEY (session_id, source_game_id),
                 UNIQUE (session_id, target_game_id)
             )""")
+            # Both columns are additive migrations: existing N−18 sessions and
+            # their historical forecast rows remain readable.
+            session_columns = {row[1] for row in db.execute("PRAGMA table_info(cycle18_sessions)")}
+            if "strategy" not in session_columns:
+                db.execute("ALTER TABLE cycle18_sessions ADD COLUMN strategy TEXT NOT NULL DEFAULT 'n18'")
+            forecast_columns = {row[1] for row in db.execute("PRAGMA table_info(cycle18_forecasts)")}
+            if "sources_json" not in forecast_columns:
+                db.execute("ALTER TABLE cycle18_forecasts ADD COLUMN sources_json TEXT")
+            if "votes_json" not in forecast_columns:
+                db.execute("ALTER TABLE cycle18_forecasts ADD COLUMN votes_json TEXT")
+            db.execute("""CREATE TABLE IF NOT EXISTS bot_strategy_settings (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                strategy TEXT NOT NULL
+            )""")
+            db.execute("INSERT OR IGNORE INTO bot_strategy_settings(id,strategy) VALUES(1,?)",
+                       (STRATEGY_N18,))
             db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_target ON cycle18_forecasts(session_id,target_round_number)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_status ON cycle18_forecasts(session_id,result)")
+
+    def get_strategy(self) -> dict[str, Any]:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT strategy FROM bot_strategy_settings WHERE id=1").fetchone()
+            session = db.execute("SELECT strategy FROM cycle18_sessions WHERE stopped_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+        selected = row[0] if row and row[0] in (STRATEGY_N18, STRATEGY_VOTE) else STRATEGY_N18
+        return {"selected": selected, "active": session[0] if session else None,
+                "options": list(STRATEGY_OPTIONS)}
+
+    def save_strategy(self, strategy: str) -> dict[str, Any]:
+        if strategy not in (STRATEGY_N18, STRATEGY_VOTE):
+            raise ValueError("Неизвестный фильтр прогнозирования")
+        with sqlite3.connect(self.path, timeout=5) as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM cycle18_sessions WHERE stopped_at IS NULL LIMIT 1").fetchone():
+                raise RuntimeError("Остановите сканирование перед сменой фильтра")
+            db.execute("UPDATE bot_strategy_settings SET strategy=? WHERE id=1", (strategy,))
+        return self.get_strategy()
 
     def start_session(self) -> int:
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            selected = db.execute("SELECT strategy FROM bot_strategy_settings WHERE id=1").fetchone()
+            strategy = selected[0] if selected else STRATEGY_N18
             db.execute("UPDATE cycle18_sessions SET stopped_at=? WHERE stopped_at IS NULL", (now,))
-            cursor = db.execute("INSERT INTO cycle18_sessions(started_at) VALUES(?)", (now,))
+            cursor = db.execute("INSERT INTO cycle18_sessions(started_at,strategy) VALUES(?,?)",
+                                (now, strategy))
             return int(cursor.lastrowid)
 
     def stop_session(self) -> None:
@@ -209,7 +297,9 @@ class Cycle18Engine:
             db.execute("PRAGMA busy_timeout=3000")
             session = db.execute("SELECT * FROM cycle18_sessions ORDER BY id DESC LIMIT 1").fetchone()
             if not session:
-                return self._empty()
+                return self._empty(self.get_strategy()["selected"])
+            strategy = session["strategy"] if session["strategy"] in (STRATEGY_N18, STRATEGY_VOTE) else STRATEGY_N18
+            warmup_required = strategy_warmup(strategy)
             sid, started_at = int(session["id"]), moment(session["started_at"])
             stopped_at = moment(session["stopped_at"])
             rows = [dict(row) for row in db.execute("""
@@ -265,7 +355,7 @@ class Cycle18Engine:
                 # Warm-up counts unique final Player hands, not the length of
                 # the LAST run of uninterrupted round numbers. A temporary
                 # unavailable round stays at its real number in physical history.
-                if verified_total >= WARMUP:
+                if verified_total >= warmup_required:
                     warmup_complete = True
                 if stopped_at or not warmup_complete or not confirmed:
                     continue
@@ -273,28 +363,26 @@ class Cycle18Engine:
                 if hand_number is None:
                     continue
                 target_number = following(hand_number)
-                # Physical N-18 offset: for target (anchor + 1), the source
-                # round is (anchor - 17), NEVER "18 saved rows earlier".
-                source_number = ((target_number - CYCLE - 1) % ROUND_MAX) + 1
-                source = valid_hands.get(source_number)
-                if source is None:
-                    # The genuine source round is missing/unconfirmed; don't
-                    # replace it with a neighbouring hand or invent a forecast.
+                forecast = predict_target(target_number, valid_hands, strategy)
+                if forecast is None:
+                    # An absent N−18 source, or ANY of the five voter sources,
+                    # suppresses the signal instead of shifting to a neighbour.
                     continue
-                predicted = verified_suit(source)
-                if not predicted:
-                    continue
+                source_number = forecast["source_round_number"]
+                source = valid_hands[source_number]
                 db.execute("""INSERT OR IGNORE INTO cycle18_forecasts
                     (session_id,source_game_id,anchor_game_id,source_round_number,
-                     target_round_number,predicted_suit,created_at)
-                    VALUES(?,?,?,?,?,?,?)""",
+                     target_round_number,predicted_suit,created_at,sources_json,votes_json)
+                    VALUES(?,?,?,?,?,?,?,?,?)""",
                     (sid, source["game_id"], hand["game_id"],
-                     source_number, following(hand_number), predicted,
-                     now.isoformat()))
+                     source_number, target_number, forecast["predicted_suit"],
+                     now.isoformat(),
+                     json.dumps(forecast["source_round_numbers"]),
+                     json.dumps(forecast["votes"], ensure_ascii=False)))
             # A completed hand always keeps its credit in the current session.
             # Neither missing physical round numbers nor future list shells
             # reset the counter. Old sessions are excluded by started_at.
-            warmup_count = min(WARMUP, verified_total)
+            warmup_count = min(warmup_required, verified_total)
             confirmed_warmup_count = warmup_count
 
             # Link each prediction to the exact numbered next hand. Never infer
@@ -435,11 +523,14 @@ class Cycle18Engine:
                 losing = 0
             previous = row
         current_number = round_number(current.get("round_number")) if current else None
-        previews = preview_two_rounds(current_number, valid_hands) if warmup_complete and not stopped_at else []
+        previews = preview_two_rounds(current_number, valid_hands, strategy) if warmup_complete and not stopped_at else []
         active = next((row for row in forecasts if current and row["target_game_id"] == current.get("game_id")), None)
         pending_upcoming = [row for row in forecasts if row["result"] == "PENDING" and not row["target_game_id"]]
         return {
-            "cycle": CYCLE, "warmup_required": WARMUP,
+            "cycle": CYCLE if strategy == STRATEGY_N18 else None,
+            "strategy": strategy,
+            "strategy_label": next(item["label"] for item in STRATEGY_OPTIONS if item["id"] == strategy),
+            "warmup_required": warmup_required,
             "warmup_count": warmup_count,
             "confirmed_warmup_count": confirmed_warmup_count,
             "captured_count": captured_total, "verified_count": verified_total,
@@ -458,7 +549,7 @@ class Cycle18Engine:
             },
             "current": self._public(active) if active else None,
             "live_preview": previews,
-            "upcoming": [self._public(row) for row in pending_upcoming[-CYCLE:][::-1]],
+            "upcoming": [self._public(row) for row in pending_upcoming[-max(strategy_offsets(strategy)):][::-1]],
             "recent": [self._public(row) for row in forecasts if row["target_game_id"]][-200:][::-1],
         }
 
@@ -475,16 +566,27 @@ class Cycle18Engine:
 
     @staticmethod
     def _public(row: dict[str, Any]) -> dict[str, Any]:
-        return {key: row.get(key) for key in (
+        result = {key: row.get(key) for key in (
             "source_game_id", "anchor_game_id", "source_round_number",
             "target_round_number", "target_game_id", "predicted_suit",
             "created_at", "linked_at", "checked_at", "result", "mode", "reason", "step",
         )}
+        try:
+            sources = json.loads(row.get("sources_json") or "null")
+            votes = json.loads(row.get("votes_json") or "null")
+        except (ValueError, TypeError):
+            sources, votes = None, None
+        result["source_round_numbers"] = sources if isinstance(sources, list) else [row.get("source_round_number")]
+        result["votes"] = votes if isinstance(votes, list) else []
+        return result
 
     @staticmethod
-    def _empty() -> dict[str, Any]:
+    def _empty(strategy: str = STRATEGY_N18) -> dict[str, Any]:
         return {
-            "cycle": CYCLE, "warmup_required": WARMUP, "warmup_count": 0,
+            "cycle": CYCLE if strategy == STRATEGY_N18 else None,
+            "strategy": strategy,
+            "strategy_label": next(item["label"] for item in STRATEGY_OPTIONS if item["id"] == strategy),
+            "warmup_required": strategy_warmup(strategy), "warmup_count": 0,
             "confirmed_warmup_count": 0,
             "captured_count": 0, "verified_count": 0,
             "ready": False, "session_active": False, "session_id": None,
