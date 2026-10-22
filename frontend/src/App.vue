@@ -25,7 +25,7 @@ const strategyChoice = ref('n18')
 const strategyTouched = ref(false)
 const strategyNotice = ref('')
 const strategyInfo = computed(() => state.value.strategy || {})
-const activeStrategy = computed(() => cycle18.value.session_active
+const activeStrategy = computed(() => cycle18.value.session_id
   ? cycle18.value.strategy : (strategyInfo.value.selected || 'n18'))
 const strategyLabel = computed(() => activeStrategy.value === 'n18'
   ? 'Цикл N−18' : 'Голосование N−3/10/24/31/40')

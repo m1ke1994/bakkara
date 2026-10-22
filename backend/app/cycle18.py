@@ -506,12 +506,18 @@ class Cycle18Engine:
         previous = None
         for row in forecasts:
             if not row["target_game_id"] or row["result"] not in ("WIN", "LOSE"):
-                if row["result"] == "UNKNOWN":
+                if row["result"] == "UNKNOWN" and strategy == STRATEGY_N18:
                     losing = 0
                     previous = None
+                # A missing vote source means no attempt, not a success. In
+                # voting mode preserve the attempted-loss count over skipped
+                # physical rounds, provided the time gap is still plausible.
                 continue
-            if previous and (following(previous["target_round_number"]) != row["target_round_number"]
-                             or not self._close_in_time(previous, row)):
+            if previous and (
+                not self._close_in_time(previous, row)
+                or (strategy == STRATEGY_N18
+                    and following(previous["target_round_number"]) != row["target_round_number"])
+            ):
                 losing = 0
             row["step"] = losing + 1
             if row["result"] == "LOSE":
