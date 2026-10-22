@@ -1012,3 +1012,64 @@ def test_visible_result_without_readable_cards_does_not_hold_next_round_one_minu
         assert record["player_hand_final"] is False
         assert record["scan_result"] == "SCAN_TIMEOUT"
     asyncio.run(run())
+
+
+def test_real_winner_caption_banker_and_two_player_cards_with_empty_third_slot():
+    """Screenshot #453: ПОБЕДА: Банкир; Player cards A♥ 3♣; 3rd box empty."""
+    async def run():
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            service.page = page
+            try:
+                await page.set_content("""
+                  <div class="baccarat-player baccarat__player">
+                    <span class="baccarat-player__name">Игрок</span>
+                    <ul class="baccarat-player__cards">
+                      <li class="baccarat-player__card-box">
+                        <div class="card-value">A</div>
+                        <svg><use href="#cardSuit-hearts"></use></svg>
+                      </li>
+                      <li class="baccarat-player__card-box">
+                        <strong>3</strong><span>♣</span>
+                      </li>
+                      <li class="baccarat-player__card-box">
+                        <span class="baccarat-card__back"></span>
+                      </li>
+                    </ul>
+                  </div>
+                  <span class="baccarat-panel__caption">ПОБЕДА: Банкир</span>
+                """)
+                result = await service._inspect_game_dom("Игрок", "Банкир")
+                assert result["baccarat_result_visible"]
+                assert result["finished"]
+                assert result["finish_flag_text"] == "ПОБЕДА: Банкир"
+                assert result["cards"] == [
+                    {"position": 1, "rank": "A", "suit": "hearts"},
+                    {"position": 2, "rank": "3", "suit": "clubs"},
+                ]
+                assert result["counts"]["player_card_boxes"] == 3
+                assert result["pending_card_slots"] == 1
+            finally:
+                await browser.close()
+    asyncio.run(run())
+
+
+def test_winner_label_does_not_match_non_result_text():
+    async def run():
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            service.page = page
+            try:
+                await page.set_content(
+                    '<div class="baccarat-panel__caption">Победа ожидается</div>'
+                )
+                result = await service._inspect_game_dom("Игрок", "Банкир")
+                assert not result["finished"]
+                assert not result["baccarat_result_visible"]
+            finally:
+                await browser.close()
+    asyncio.run(run())
