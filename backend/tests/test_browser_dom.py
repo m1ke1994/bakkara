@@ -778,15 +778,20 @@ def test_countdown_aware_timeout_covers_prestart_and_final_cards():
     from app.observation import Game
     scheduled = Game("1028", "https://example.test/1028", "00:28", "1028",
                      "", 1, player_score="0", banker_score="0")
-    assert scan_timeout_budget(scheduled, 45) == 68
+    assert scan_timeout_budget(scheduled, 45) == 83
     scheduled.time = "00:27"
-    assert scan_timeout_budget(scheduled, 45) == 67
+    assert scan_timeout_budget(scheduled, 45) == 82
     scheduled.time = "03:27"
-    assert scan_timeout_budget(scheduled, 45) == 120
+    assert scan_timeout_budget(scheduled, 45) == 150
+    # Production #468: countdown disappeared in the list. A 45s timeout
+    # abandoned a live game with TWO real cards and 4 seconds remaining.
     scheduled.time = "not available"
-    assert scan_timeout_budget(scheduled, 45) == 45
+    assert scan_timeout_budget(scheduled, 45) == 105
     scheduled.status = "Завершена"
     assert scan_timeout_budget(scheduled, 45) == 45
+    # Explicit tiny budgets in isolated tests remain tiny.
+    scheduled.status = "Идёт"
+    assert scan_timeout_budget(scheduled, 5) == 5
 
 
 def test_expired_event_screen_detected_without_player_cards():
@@ -1072,4 +1077,55 @@ def test_winner_label_does_not_match_non_result_text():
                 assert not result["baccarat_result_visible"]
             finally:
                 await browser.close()
+    asyncio.run(run())
+
+
+def test_explicit_finished_with_two_player_cards_and_third_empty_slot(tmp_path, monkeypatch):
+    """A real end caption counts even when winner-specific text is hidden."""
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings, card_poll_seconds=0.1,
+            scan_incomplete_timeout_seconds=6,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **_kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "finish-two-placeholder.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = {"game_id": "end-two"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        cards = [
+            {"position": 1, "rank": "6", "suit": "diamonds"},
+            {"position": 2, "rank": "Q", "suit": "diamonds"},
+        ]
+        async def inspect(*_):
+            return {
+                "cards": cards, "round_timer_text": "",
+                "counts": {"player_fields": 1, "player_cards_containers": 1,
+                           "player_card_boxes": 3},
+                "pending_card_slots": 1,
+                "finished": True, "baccarat_result_visible": False,
+                "finish_flag_text": "Игра завершена", "status_text": "",
+                "cause": "explicit final result, two real cards, empty third",
+            }
+        service._inspect_game_dom = inspect
+        game = Game("end-two", "https://example.test/end-two", "",
+                    "468", "Идёт", 0)
+        processed, retry = set(), {}
+        await asyncio.wait_for(service._scan_selected_game(
+            game, [], processed, retry), timeout=4)
+        assert processed == {"end-two"}
+        record = service.store.get("end-two")
+        assert record["player_hand_final"] is True
+        assert record["final_snapshot_reverified"] is True
+        assert record["cards"] == cards
+        assert record["scan_result"] == "CARDS_CONFIRMED"
     asyncio.run(run())
