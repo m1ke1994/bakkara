@@ -728,11 +728,9 @@ class BrowserService:
                   // <span class="... baccarat-panel__caption">Победа</span>
                   // (or Ничья), not "Игра завершена". Only trust a visible
                   // Baccarat result badge in the SAME frame as Player cards.
-                  const outcomeFlag = playerSide
-                    ? [...document.querySelectorAll('.baccarat-panel__caption')]
-                        .find(node => visible(node)
-                          && /^(?:победа|ничья)$/i.test(text(node))) || null
-                    : null;
+                  const outcomeFlag = [...document.querySelectorAll('.baccarat-panel__caption')]
+                    .find(node => visible(node)
+                      && /^(?:победа|ничья)$/i.test(text(node))) || null;
                   const finished = Boolean(finishFlag || outcomeFlag);
                   // An expired match can replace the Baccarat widget with an
                   // unavailable-event screen. Distinguish that from a game
@@ -1574,6 +1572,8 @@ class BrowserService:
         countdown_zero_announced = False
         result_end_announced = False
         outcome_first_seen_at: float | None = None
+        last_two_signature: tuple[Any, ...] | None = None
+        stable_two_reads = 0
         list_finished = game.status == "Завершена" or is_finished_status(game.status_text)
         # The outer list timer represents time UNTIL kickoff. The old fixed
         # 45-second deadline started on page opening and expired a few seconds
@@ -1612,16 +1612,25 @@ class BrowserService:
                     in_page_finished = bool(diagnostics.get("finished"))
                     if in_page_finished:
                         finish_text = diagnostics.get("finish_flag_text") or "Игра завершена"
+                        result_visible = bool(diagnostics.get("baccarat_result_visible"))
+                        first_read_cards = diagnostics.get("cards", [])
                         reread = await self._inspect_game_dom(settings.player_name_text, settings.banker_name_text)
                         reread["finish_flag_seen_on_final_read"] = bool(reread.get("finished"))
                         reread["finished"] = True
                         reread["finish_flag_text"] = reread.get("finish_flag_text") or finish_text
+                        # The Baccarat result banner may disappear during
+                        # the second read. NEVER lose its terminal evidence.
+                        reread["baccarat_result_visible"] = (
+                            result_visible or bool(reread.get("baccarat_result_visible")))
+                        reread["result_cards_first_read"] = first_read_cards
                         diagnostics = reread
                 finish_seen = in_page_finished or list_finished
                 # A confirmed Baccarat result is an explicit end-of-round
                 # signal. It must not wait for the timer to reach zero.
                 if diagnostics.get("baccarat_result_visible") and outcome_first_seen_at is None:
                     outcome_first_seen_at = loop.time()
+                if outcome_first_seen_at is not None:
+                    finish_seen = True
                 if diagnostics.get("baccarat_result_visible") and not result_end_announced:
                     result_end_announced = True
                     self.event("INFO", f"Раздача № {game.round_number or game.game_id}: "
@@ -1676,6 +1685,17 @@ class BrowserService:
                         labels = {1: "Первая", 2: "Вторая", 3: "Третья"}
                         self.event("INFO", f"{labels[position]} карта обнаружена через {(first_card_at[position]-page_ready_at)*1000:.0f} мс после загрузки страницы.")
 
+                if (len(observed_cards) == 2
+                        and [item.get("position") for item in observed_cards] == [1, 2]):
+                    signature = tuple((c.get("position"), c.get("rank"), c.get("suit"))
+                                      for c in observed_cards)
+                    stable_two_reads = (stable_two_reads + 1 if signature == last_two_signature else 1)
+                    last_two_signature = signature
+                elif len(observed_cards) == 3:
+                    stable_two_reads = 0
+                # Two separate DOM snapshots of exactly the same actual
+                # Player cards are required if the end banner outlives the
+                # widget: one isolated screenshot isn't a final hand.
                 exact_two = (len(observed_cards) == 2 and box_count == 2 and pending == 0
                              and [item.get("position") for item in observed_cards] == [1, 2])
                 exact_three = (len(observed_cards) == 3 and box_count == 3 and pending == 0
@@ -1688,13 +1708,13 @@ class BrowserService:
                 # "Победа"/"Ничья" is terminal, but wait a short rendering
                 # grace period before choosing a true two-card final hand.
                 result_two = bool(
-                    diagnostics.get("baccarat_result_visible")
-                    and outcome_first_seen_at is not None
-                    and loop.time() - outcome_first_seen_at >= 0.35
-                    and len(observed_cards) == 2
-                    and [item.get("position") for item in observed_cards] == [1, 2]
-                    and 2 <= box_count <= 3
-                    and pending == box_count - 2
+                    outcome_first_seen_at is not None
+                    and loop.time() - outcome_first_seen_at >= 0.65
+                    and stable_two_reads >= 2
+                    and len(cards) == 2
+                    and [item.get("position") for item in cards] == [1, 2]
+                    and (box_count == 0 or 2 <= box_count <= 3)
+                    and (box_count == 0 or pending == box_count - 2)
                 )
                 timer_end_two = bool(
                     exact_two and countdown_zero_since is not None
@@ -1716,14 +1736,28 @@ class BrowserService:
                         and final_pending == final_boxes - 2
                     )
                     confirmed_two = (
-                        final_read.get("cards", []) == observed_cards
+                        len(observed_cards) == 2
+                        and final_read.get("cards", []) == observed_cards
                         and (final_exact_two or final_result_two)
                     )
+                    if not confirmed_two and result_two:
+                        # Some skins remove Player DOM immediately after the
+                        # win banner. The SAME two valid cards were seen in
+                        # several prior DOM frames and result was explicit.
+                        confirmed_two = (
+                            not final_read.get("cards")
+                            and stable_two_reads >= 2
+                            and len(cards) == 2
+                        )
                 hand_final = bool(confirmed_three or confirmed_two)
                 # A terminal blank slot is not an unconfirmed *card*. Once
                 # two real positions were reverified, ignore only the empty
                 # third placeholder in calculating the final Player hand.
                 settled_pending = 0 if confirmed_two and result_two else pending
+                if confirmed_two and not player_present:
+                    # An ended screen hides the original Player component;
+                    # confirmation relied on repeated actual card snapshots.
+                    player_present, container_present, box_count = True, True, 2
                 if confirmed_three:
                     # This one atomic frame snapshot contains all three positions;
                     # don't carry any older per-position values into the final record.
