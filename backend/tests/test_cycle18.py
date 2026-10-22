@@ -780,3 +780,32 @@ def test_strategy_can_only_change_between_sessions(tmp_path):
     assert engine.save_strategy(STRATEGY_VOTE)["selected"] == STRATEGY_VOTE
     engine.start_session()
     assert engine.refresh()["strategy"] == STRATEGY_VOTE
+
+
+def test_voting_missing_target_does_not_reset_loss_step(tmp_path):
+    from app.cycle18 import STRATEGY_VOTE
+    path = tmp_path / "skip-vote.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.save_strategy(STRATEGY_VOTE)
+    engine.start_session()
+    for number in range(1, 42):
+        if number != 3:
+            add_round(store, number)
+    engine.refresh()  # #42 is predicted using all five valid source rounds.
+    add_round(store, 42, cards=[
+        {"position": 1, "rank": "9", "suit": "hearts"},
+        {"position": 2, "rank": "2", "suit": "diamonds"},
+    ])  # all five votes say spades -> LOSE
+    engine.refresh()
+    add_round(store, 43)  # #43 had no N−40 source (#3), so no signal.
+    engine.refresh()  # #44's N−40 source is #4 and all votes are present.
+    add_round(store, 44, cards=[
+        {"position": 1, "rank": "9", "suit": "spades"},
+        {"position": 2, "rank": "2", "suit": "hearts"},
+    ])
+    result = engine.refresh()
+    assert result["statistics"]["checked_count"] == 2
+    assert result["statistics"]["losses"] == 1
+    assert result["statistics"]["wins"] == 1
+    assert result["statistics"]["wins_by_step"] == {"2": 1}
+    assert all(item["target_round_number"] != 43 for item in result["recent"])
