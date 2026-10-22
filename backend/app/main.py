@@ -88,6 +88,17 @@ async def clear_observations():
     return result
 
 
+@app.get("/api/history")
+async def history(limit: int = 200):
+    """Read the last 200 completed Player hands without bloating live polling.
+
+    This endpoint is read-only; calculation and observation state are never
+    changed by opening history.
+    """
+    safe_limit = min(200, max(1, limit))
+    return await asyncio.to_thread(browser_service.store.history, safe_limit)
+
+
 @app.get("/api/cycle18")
 async def cycle18_state():
     snapshot = await asyncio.to_thread(browser_service.snapshot)
