@@ -235,7 +235,8 @@ def test_started_unknown_and_finished_rows_are_prioritized_by_live_status(tmp_pa
         assert "откроем игру" in service.game_diagnostics[2]["reason"]
         await service._observe_iteration({"started"}, {})
         await service._observe_iteration({"started", "unknown"}, {})
-        assert [game.game_id for game in selected] == ["started", "unknown", "finished"]
+        # After observing #813, never rewind to completed #811.
+        assert [game.game_id for game in selected] == ["started", "unknown"]
 
     asyncio.run(run())
 
