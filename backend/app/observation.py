@@ -389,20 +389,20 @@ def choose_observation_game(
         future = []
         for game in readable:
             raw = game.round_number.strip()
-            if not raw.isdecimal() or classify_game(game) == "FINISHED":
+            if not raw.isdecimal():
                 continue
             distance = (int(raw) - after_round) % 1440
-            if 0 < distance <= 60:
+            # A just-ended immediate next game may still contain the real
+            # cards for a moment. Give #N+1 one short chance to be captured,
+            # but never chase older finished games from a live sequence.
+            state = classify_game(game)
+            if 0 < distance <= 60 and (state != "FINISHED" or distance == 1):
                 future.append((distance, game))
         if future:
-            distance, expected = min(future, key=lambda pair: pair[0])
-            timer = list_timer_seconds(expected.time)
-            if (classify_game(expected) == "STARTED"
-                    or timer is None or timer <= 60):
-                return expected
-            # Known next round has not approached kickoff. Do not open a
-            # stale round or historical recovery while waiting.
-            return None
+            # Following a numbered sequence takes precedence over guessed
+            # UPCOMING/STARTED statuses and arbitrary list order. Reserve
+            # the page for #N+1 immediately, even during its countdown.
+            return min(future, key=lambda pair: pair[0])[1]
         # No later physical round has appeared yet. Recheck the list instead
         # of moving backwards to completed games with stale STARTED badges.
         return None
@@ -814,6 +814,25 @@ class ObservationStore:
                      row["list_position"], player_score=row["player_score"] or "",
                      banker_score=row["banker_score"] or "")
                 for row in rows]
+
+    def known_rounds_for_ids(self, game_ids: list[str]) -> dict[str, str]:
+        """Recover only identities previously read for the EXACT same game_id.
+
+        Live list hydration can temporarily remove every round label. Never
+        guess a number from DOM position, relative offset or the site's ID.
+        """
+        ids = sorted(set(str(value) for value in game_ids if value))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                f"SELECT game_id, round_number FROM observations "
+                f"WHERE game_id IN ({placeholders}) AND round_number IS NOT NULL",
+                ids,
+            ).fetchall()
+        return {str(game_id): str(number) for game_id, number in rows
+                if str(number).isdecimal()}
 
     def update_game_list_metadata(self, games: list[Game]) -> None:
         """Backfill newly visible round numbers without touching observed results."""
