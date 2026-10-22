@@ -572,6 +572,9 @@ def test_visible_baccarat_victory_caption_is_terminal_only_for_player_widget():
                 tie = await service._inspect_game_dom("Игрок", "Банкир")
                 assert tie["finished"] is True
                 assert tie["finish_flag_text"] == "Ничья"
+                # Reset the test latch to verify that unrelated text alone
+                # is never counted as an outcome.
+                await page.evaluate("window.__bakkaraOutcomeLatch?.observer?.disconnect(); delete window.__bakkaraOutcomeLatch")
                 await page.locator("#outcome").evaluate("el => el.textContent = 'Ход: Игрок'")
                 assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
                 await page.locator("#outcome").evaluate("el => { el.textContent='Победа'; el.style.display='none'; }")
@@ -923,4 +926,40 @@ def test_transient_victory_badge_survives_reread_and_two_cached_cards_finish(tmp
         assert saved["scan_result"] == "CARDS_CONFIRMED"
         assert service.observation_status == "SAVED"
         assert count >= 5
+    asyncio.run(run())
+
+
+def test_dom_mutation_latches_transient_result_between_browser_polls():
+    """The visible Baccarat outcome may disappear before the next read."""
+    async def run():
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            service.page = page
+            try:
+                await page.set_content("""
+                  <div class="baccarat-player baccarat__player">
+                    <span class="baccarat-player__name">Игрок</span>
+                    <ul class="baccarat-player__cards">
+                      <li class="baccarat-player__card-box suit-clubs">
+                        <span class="baccarat-card__rank">Q</span></li>
+                      <li class="baccarat-player__card-box suit-hearts">
+                        <span class="baccarat-card__rank">10</span></li>
+                    </ul>
+                  </div>
+                  <span id="outcome" class="baccarat-panel__caption">Ход: Игрок</span>
+                """)
+                assert not (await service._inspect_game_dom("Игрок", "Банкир"))["finished"]
+                # Transition happens between calls to _inspect_game_dom,
+                # but is a separate DOM task, observable by MutationObserver.
+                await page.locator("#outcome").evaluate("el => el.textContent = 'Победа'")
+                await page.locator("#outcome").evaluate("el => el.remove()")
+                outcome = await service._inspect_game_dom("Игрок", "Банкир")
+                assert outcome["finished"] is True
+                assert outcome["baccarat_result_visible"] is True
+                assert outcome["finish_flag_text"] == "Победа"
+                assert [c["rank"] for c in outcome["cards"]] == ["Q", "10"]
+            finally:
+                await browser.close()
     asyncio.run(run())
