@@ -1129,3 +1129,150 @@ def test_explicit_finished_with_two_player_cards_and_third_empty_slot(tmp_path, 
         assert record["cards"] == cards
         assert record["scan_result"] == "CARDS_CONFIRMED"
     asyncio.run(run())
+
+
+def test_result_is_a_card_wait_signal_never_a_three_second_timeout():
+    from app.browser import final_card_wait_budget
+
+    # #485: prestart game had 00:17, then site showed outcome with
+    # Player cards still missing. The 72-second hand budget must survive.
+    assert final_card_wait_budget(72, result_elapsed=15.0) == 72
+    assert final_card_wait_budget(12, result_elapsed=3.0) == 33
+    assert final_card_wait_budget(
+        72, first_card_elapsed=40, result_elapsed=50) == 85
+    assert final_card_wait_budget(
+        90, expired_without_player=True) == 2.5
+    # Even an expired screen cannot bypass a REAL result already observed.
+    assert final_card_wait_budget(
+        90, result_elapsed=2, expired_without_player=True) == 90
+
+
+def test_round_485_waits_for_player_cards_after_result_for_more_than_three_seconds(
+    tmp_path, monkeypatch,
+):
+    """Regression: #485 was discarded at 18.5s despite the live cards arriving later."""
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings,
+            card_poll_seconds=0.1, scan_incomplete_timeout_seconds=8,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **_kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "wait-for-real-cards.sqlite3")
+        service.events = deque(maxlen=150)
+        service.current_observation = {"game_id": "round-485"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        begin = asyncio.get_running_loop().time()
+        cards = [
+            {"position": 1, "rank": "9", "suit": "spades"},
+            {"position": 2, "rank": "2", "suit": "hearts"},
+        ]
+        async def inspect(*_args):
+            # The result is visible from the first check. The actual
+            # Player ranks/suits appear 3.7 seconds later.
+            has_cards = asyncio.get_running_loop().time() - begin >= 3.7
+            return {
+                "cards": cards if has_cards else [],
+                "round_timer_text": "",
+                "counts": {
+                    "player_fields": 1,
+                    "player_cards_containers": 1,
+                    "player_card_boxes": 3,
+                },
+                "pending_card_slots": 1 if has_cards else 3,
+                "finished": True,
+                "baccarat_result_visible": True,
+                "finish_flag_text": "ПОБЕДА: Банкир",
+                "status_text": "",
+                "cause": "result precedes actual card DOM",
+            }
+        service._inspect_game_dom = inspect
+        game = Game("round-485", "https://example.test/round-485",
+                    "00:17", "485", "Ожидается", 0,
+                    player_score="0", banker_score="0",
+                    is_countdown_to_start=True)
+        processed, retry = set(), {}
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, retry), timeout=8
+        )
+        assert asyncio.get_running_loop().time() - begin >= 3.7
+        assert processed == {"round-485"}
+        saved = service.store.get("round-485")
+        assert saved["cards"] == cards
+        assert saved["player_hand_final"] is True
+        assert saved["scan_result"] == "CARDS_CONFIRMED"
+        assert service.observation_status == "SAVED"
+    asyncio.run(run())
+
+
+def test_first_atomic_result_snapshot_is_not_erased_by_empty_dom_reread(
+    tmp_path, monkeypatch,
+):
+    """Result overlay may replace the Player DOM between immediate reads."""
+    async def run():
+        monkeypatch.setattr(browser_module, "settings", replace(
+            browser_module.settings,
+            card_poll_seconds=0.1, scan_incomplete_timeout_seconds=8,
+        ))
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **_kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "keep-atomic-result.sqlite3")
+        service.events = deque(maxlen=50)
+        service.current_observation = {"game_id": "round-483"}
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        cards = [
+            {"position": 1, "rank": "3", "suit": "diamonds"},
+            {"position": 2, "rank": "A", "suit": "hearts"},
+            {"position": 3, "rank": "3", "suit": "clubs"},
+        ]
+        calls = 0
+        async def inspect(*_args):
+            nonlocal calls
+            calls += 1
+            # First atomic snapshot has 3 cards, but the result overlay
+            # immediately hides Player during the second DOM read.
+            real = calls == 1
+            return {
+                "cards": cards if real else [],
+                "counts": {
+                    "player_fields": int(real),
+                    "player_cards_containers": int(real),
+                    "player_card_boxes": 3 if real else 0,
+                },
+                "pending_card_slots": 0,
+                "finished": True, "baccarat_result_visible": True,
+                "finish_flag_text": "ПОБЕДА: Игрок", "status_text": "",
+                "cause": "Player widget vanished under result overlay",
+            }
+        service._inspect_game_dom = inspect
+        game = Game("round-483", "https://example.test/round-483",
+                    "", "483", "Идёт", 0)
+        processed, retry = set(), {}
+        await asyncio.wait_for(
+            service._scan_selected_game(game, [], processed, retry), timeout=4
+        )
+        assert calls >= 2
+        assert processed == {"round-483"}
+        saved = service.store.get("round-483")
+        assert saved["cards"] == cards
+        assert saved["player_hand_final"] is True
+        assert saved["scan_result"] == "CARDS_CONFIRMED"
+    asyncio.run(run())
