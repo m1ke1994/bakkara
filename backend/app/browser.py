@@ -1767,7 +1767,7 @@ class BrowserService:
                     player_field_present=player_present,
                     cards_container_present=container_present,
                     card_boxes_count=box_count,
-                    cards_count=len(observed_cards),
+                    cards_count=len(cards) if confirmed_two else len(observed_cards),
                     pending_card_slots=settled_pending,
                     finished=hand_final,
                 )
