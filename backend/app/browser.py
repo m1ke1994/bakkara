@@ -434,6 +434,7 @@ class BrowserService:
         # A new scan is a new physical sequence; never reuse the preceding
         # session's last round as its starting position.
         self._last_selected_round_number = None
+        self._known_round_numbers = {}
         try:
             processed_ids = await asyncio.to_thread(self.store.finished_game_ids)
         except Exception as exc:
@@ -642,7 +643,29 @@ class BrowserService:
                 if previous is not None:
                     game.position = previous.position
                 unique[game.game_id] = game
-        return infer_upcoming_games(sorted(unique.values(), key=lambda game: game.position))
+        games = sorted(unique.values(), key=lambda game: game.position)
+        # Some list re-renders strip every .additional-info round number.
+        # Retain actual, previously observed numbers for the very same ID.
+        # NEVER infer round N from the bookmaker's numeric game_id.
+        remembered = getattr(self, "_known_round_numbers", None)
+        if remembered is None:
+            remembered = self._known_round_numbers = {}
+        missing = [game.game_id for game in games if not game.round_number]
+        saved = {}
+        if missing and getattr(self, "store", None) is not None:
+            saved = await asyncio.to_thread(self.store.known_rounds_for_ids, missing)
+        for game in games:
+            if game.round_number:
+                remembered[game.game_id] = game.round_number
+            else:
+                actual_number = remembered.get(game.game_id) or saved.get(game.game_id)
+                if actual_number:
+                    game.round_number = actual_number
+                    remembered[game.game_id] = actual_number
+                    game.round_number_diagnostic += (
+                        f" Восстановлен ранее прочитанный номер #{actual_number}"
+                        f" по идентичному game_id={game.game_id}.")
+        return infer_upcoming_games(games)
 
     @staticmethod
     def _log_game_list_snapshot(games: list[Game]) -> None:
