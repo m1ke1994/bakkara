@@ -41,7 +41,7 @@ def test_history_hides_win_lose_until_cycle18_ready_and_shows_only_cycle18_outco
     assert "cycle18.value.recent" in app
     assert 'v-if="cycle18.ready" scope="col">WIN / LOSE' in app
     assert 'v-if="cycle18.ready"><span v-if="outcomeFor(item.game_id)' in app
-    assert 'Подтверждено подряд:' in app
+    assert 'Подтверждено за запуск:' in app
     assert 'Во время первых 20' not in app
     assert "Проверки подготовки N−1" not in app
     assert ':key="item.game_id"' in app
