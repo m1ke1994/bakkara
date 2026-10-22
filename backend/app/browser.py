@@ -1924,6 +1924,12 @@ class BrowserService:
                     max_wait = max(max_wait, max(first_card_at.values()) - started_at + 20)
                 if diagnostics.get("expired_screen") and not player_present:
                     max_wait = min(max_wait, 2.5)
+                if outcome_first_seen_at is not None:
+                    # The explicit result is already on screen: do not spend
+                    # another 45-120s on an unrecoverable incomplete widget
+                    # while the next numbered live game is being dealt.
+                    max_wait = min(
+                        max_wait, max(0, outcome_first_seen_at - started_at) + 3.0)
                 if loop.time() - started_at >= max_wait:
                     detail = (
                         f"Раздача № {game.round_number or game.game_id}: "
