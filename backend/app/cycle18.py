@@ -129,6 +129,29 @@ def verified_suit(row: dict[str, Any]) -> str | None:
     return SUIT_SYMBOL_TO_NAME.get(symbol) if symbol else None
 
 
+def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preview physical N and N+1 strictly from verified N-18 sources.
+
+    This is presentation ONLY. It must not insert a forecast, announce
+    WIN/LOSE, or shift its source to the 18th row when a hand is missing.
+    """
+    if current_round is None or not 1 <= current_round <= ROUND_MAX:
+        return []
+    previews = []
+    for phase, number in (("CURRENT", current_round), ("NEXT", following(current_round))):
+        source_number = ((number - CYCLE - 1) % ROUND_MAX) + 1
+        source = sources.get(source_number)
+        suit = verified_suit(source) if source else None
+        previews.append({
+            "phase": phase,
+            "target_round_number": number,
+            "source_round_number": source_number,
+            "predicted_suit": suit,
+            "available": suit is not None,
+        })
+    return previews
+
+
 class Cycle18Engine:
     """A session is reset on every real observer start, not on each HTTP poll."""
 
@@ -401,6 +424,8 @@ class Cycle18Engine:
                 steps[step] = steps.get(step, 0) + 1
                 losing = 0
             previous = row
+        current_number = round_number(current.get("round_number")) if current else None
+        previews = preview_two_rounds(current_number, valid_hands) if warmup_complete and not stopped_at else []
         active = next((row for row in forecasts if current and row["target_game_id"] == current.get("game_id")), None)
         pending_upcoming = [row for row in forecasts if row["result"] == "PENDING" and not row["target_game_id"]]
         return {
@@ -422,8 +447,9 @@ class Cycle18Engine:
                 "backfill_checked": sum(row["mode"] == "BACKFILL" for row in checked),
             },
             "current": self._public(active) if active else None,
+            "live_preview": previews,
             "upcoming": [self._public(row) for row in pending_upcoming[-CYCLE:][::-1]],
-            "recent": [self._public(row) for row in forecasts if row["target_game_id"]][-50:][::-1],
+            "recent": [self._public(row) for row in forecasts if row["target_game_id"]][-200:][::-1],
         }
 
     @staticmethod
@@ -451,5 +477,5 @@ class Cycle18Engine:
                 "checked_count": 0, "wins": 0, "losses": 0, "win_rate": None,
                 "max_lose_streak": 0, "current_lose_streak": 0, "next_step": 1,
                 "wins_by_step": {}, "live_checked": 0, "backfill_checked": 0,
-            }, "current": None, "upcoming": [], "recent": [],
+            }, "current": None, "live_preview": [], "upcoming": [], "recent": [],
         }
