@@ -723,7 +723,11 @@ def test_voting_strategy_is_persisted_and_uses_five_exact_sources(tmp_path):
             {"position": 1, "rank": "9", "suit": suits[0]},
             {"position": 2, "rank": "3", "suit": suits[1]},
         ])
-    result = engine.refresh({"game_id": "new-41", "round_number": "41"})
+    unlinked = engine.refresh()
+    assert len(unlinked["upcoming"]) == 1
+    assert unlinked["upcoming"][0]["target_round_number"] == 41
+    assert unlinked["upcoming"][0]["source_round_numbers"] == [38, 31, 17, 10, 1]
+    result = engine.refresh({"game_id": "round-41", "round_number": "41"})
     assert result["strategy"] == STRATEGY_VOTE
     assert result["warmup_required"] == 40
     assert result["warmup_count"] == 40
@@ -734,9 +738,8 @@ def test_voting_strategy_is_persisted_and_uses_five_exact_sources(tmp_path):
     assert [v["suit"] for v in current["votes"]] == [
         "clubs", "clubs", "hearts", "hearts", "diamonds",
     ]
-    assert len(result["upcoming"]) == 1
-    assert result["upcoming"][0]["target_round_number"] == 41
-    assert result["upcoming"][0]["source_round_numbers"] == [38, 31, 17, 10, 1]
+    assert result["current"]["target_round_number"] == 41
+    assert result["current"]["source_round_numbers"] == [38, 31, 17, 10, 1]
     add_round(store, 41, cards=[
         {"position": 1, "rank": "A", "suit": "hearts"},
         {"position": 2, "rank": "2", "suit": "diamonds"},
