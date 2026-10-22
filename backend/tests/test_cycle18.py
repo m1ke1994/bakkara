@@ -660,3 +660,37 @@ def test_ten_losses_keep_step_eleven_when_future_rounds_were_discovered_out_of_o
     assert state["statistics"]["max_lose_streak"] == 10
     assert state["statistics"]["wins_by_step"]["11"] == 1
     assert state["statistics"]["next_step"] == 1
+
+
+def test_october_22_rounds_817_to_827_match_exact_n_minus_18_rule():
+    """Audit actual Player suit sequences: no hidden 6/7-step win assumption."""
+    from app.suit_calculator import calculate_suit
+    from app.observation import evaluate_prediction
+
+    source_hands = {
+        799: ("♥", "♦"), 800: ("♣", "♥"), 801: ("♥", "♦"),
+        802: ("♣", "♣", "♣"), 803: ("♣", "♦", "♦"),
+        804: ("♥", "♥"), 805: ("♣", "♠", "♠"),
+        806: ("♦", "♥", "♥"), 807: ("♠", "♠"),
+        808: ("♥", "♥"), 809: ("♦", "♣", "♠"),
+    }
+    actual_hands = {
+        817: ("♣", "♣", "♠"), 818: ("♦", "♥"),
+        819: ("♥", "♥"), 820: ("♥", "♠"),
+        821: ("♣", "♦"), 822: ("♠", "♠"),
+        823: ("♠", "♦"), 824: ("♥", "♥", "♥"),
+        825: ("♠", "♠"), 826: ("♥", "♥", "♠"),
+        827: ("♣", "♣", "♣"),
+    }
+    checked = []
+    for target in range(817, 828):
+        source = target - 18
+        expected = calculate_suit(source_hands[source])
+        cards = [
+            {"position": i, "rank": "A", "suit": suit}
+            for i, suit in enumerate(actual_hands[target], start=1)
+        ]
+        checked.append(evaluate_prediction(
+            expected, cards, finished_confirmed=True, final_snapshot_reverified=True,
+        ))
+    assert checked == ["LOSE"] * 10 + ["WIN"]
