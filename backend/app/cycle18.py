@@ -1,4 +1,4 @@
-"""Read-only cycle-18 predictions with a 20-hand warm-up on every scan start.
+"""Read-only cycle-18 predictions after 20 unique confirmed hands in a session.
 
 The bookmaker controls are never accessed. All matching is based on confirmed
 Player hands and explicit round numbers (not game IDs or list positions).
@@ -211,9 +211,14 @@ class Cycle18Engine:
                 number = round_number(row.get("round_number"))
                 if number is not None:
                     physical_counts[number] = physical_counts.get(number, 0) + 1
-            chain: list[dict[str, Any]] = []
-            confirmed_chain: list[dict[str, Any]] = []
-            confirmed_max_run = 0
+            # A skipped physical round remains in the database, but must not
+            # erase confirmed observations already collected during warm-up.
+            # Still require true, unique, FINAL Player hands for 20/20.
+            valid_hands: dict[int, dict[str, Any]] = {
+                number: row for row in rows
+                if (number := round_number(row.get("round_number"))) is not None
+                and physical_counts[number] == 1 and verified_suit(row)
+            }
             warmup_complete = False
             missing_hands: list[dict[str, Any]] = []
             verified_total = 0
@@ -234,36 +239,24 @@ class Cycle18Engine:
                         "scan_result": hand.get("scan_result", "DISCOVERED"),
                         "reason": hand.get("reason", ""),
                     })
-                chain = chain + [hand] if chain and is_next(chain[-1], hand) else [hand]
-
-                # The first 20 confirmed hands receive neither a forecast
-                # nor a WIN/LOSE. A gap resets the continuous run. Empty
-                # future list placeholders are ignored, but a confirmed later
-                # round is never allowed to jump over a missing round.
-                if confirmed:
-                    confirmed_chain = (confirmed_chain + [hand]
-                        if confirmed_chain and is_next(confirmed_chain[-1], hand)
-                        else [hand])
-                    confirmed_max_run = max(confirmed_max_run, len(confirmed_chain))
-                if confirmed_max_run >= WARMUP:
+                # Warm-up counts unique final Player hands, not the length of
+                # the LAST run of uninterrupted round numbers. A temporary
+                # unavailable round stays at its real number in physical history.
+                if verified_total >= WARMUP:
                     warmup_complete = True
-                # An unplayed future list slot can never serve as a forecast
-                # anchor. Only a confirmed final Player hand can schedule
-                # a prediction for the next numbered round.
-                if stopped_at or not warmup_complete or not confirmed or len(chain) < CYCLE:
+                if stopped_at or not warmup_complete or not confirmed:
                     continue
-                source = chain[-CYCLE]
-                source_number = round_number(source["round_number"])
                 hand_number = round_number(hand["round_number"])
-                if source_number is None or hand_number is None:
+                if hand_number is None:
                     continue
-                # Explicit arithmetic guards against a missing slot: it must
-                # be the true N-18 hand, not the eighteenth preceding CSV row.
-                if source_number != ((hand_number - CYCLE) % ROUND_MAX) + 1:
-                    continue
-                # A duplicated source round is ambiguous, even if both
-                # copies happened to contain valid Player cards.
-                if physical_counts.get(source_number) != 1:
+                target_number = following(hand_number)
+                # Physical N-18 offset: for target (anchor + 1), the source
+                # round is (anchor - 17), NEVER "18 saved rows earlier".
+                source_number = ((target_number - CYCLE - 1) % ROUND_MAX) + 1
+                source = valid_hands.get(source_number)
+                if source is None:
+                    # The genuine source round is missing/unconfirmed; don't
+                    # replace it with a neighbouring hand or invent a forecast.
                     continue
                 predicted = verified_suit(source)
                 if not predicted:
@@ -275,11 +268,10 @@ class Cycle18Engine:
                     (sid, source["game_id"], hand["game_id"],
                      source_number, following(hand_number), predicted,
                      now.isoformat()))
-            # Once the first 20 final hands are validated, progress stays
-            # complete. Later partial hands remain visible as recoverable slots.
-            # Show the CURRENT confirmed streak, not all cards ever read
-            # and not the largest historical streak after a new gap.
-            warmup_count = WARMUP if warmup_complete else min(WARMUP, len(confirmed_chain))
+            # A completed hand always keeps its credit in the current session.
+            # Neither missing physical round numbers nor future list shells
+            # reset the counter. Old sessions are excluded by started_at.
+            warmup_count = min(WARMUP, verified_total)
             confirmed_warmup_count = warmup_count
 
             # Link each prediction to the exact numbered next hand. Never infer
