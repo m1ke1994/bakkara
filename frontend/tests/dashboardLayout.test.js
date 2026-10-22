@@ -4,35 +4,43 @@ import { readFileSync } from 'node:fs'
 
 const app = readFileSync(new URL('../src/App.vue', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
+const template = app.split('<template>', 2)[1] || ''
 
-test('Forecasts come first, followed by a full-width calculator and virtual history', () => {
-  const positions = ['id="forecasts"', 'id="calculator"', 'id="virtual-bets"', 'id="observation"']
-    .map(marker => app.indexOf(marker))
+test('Current and next forecasts are immediately above the full-width overall history', () => {
+  const sectionMarkers = [
+    'id="virtual-results"', 'id="observation"', 'id="forecasts"', 'id="history"', 'id="events"',
+  ]
+  const positions = sectionMarkers.map(marker => template.indexOf(marker))
   assert.ok(positions.every(position => position >= 0))
   assert.deepEqual(positions, [...positions].sort((a, b) => a - b))
-  assert.ok(!app.includes('workspace-grid'))
+  const afterForecast = template.slice(template.indexOf('id="forecasts"'), template.indexOf('id="history"'))
+  assert.ok(afterForecast.includes('data-testid="forecast-current"'))
+  assert.ok(afterForecast.includes('data-testid="forecast-next"'))
+  assert.equal((afterForecast.match(/<section /g) || []).length, 1)
   assert.ok(css.includes('max-width: none'))
   assert.ok(css.includes('width: 100%'))
 })
 
-test('Stake ladder is horizontal and recomputes in recovery mode by default', () => {
-  assert.ok(app.includes("const stakeMode = ref('recover')"))
-  assert.ok(app.includes('class="step-strip"'))
-  assert.ok(app.includes('v-for="row in ladder.rows"'))
-  assert.ok(app.includes('v-model.number="odds"'))
-  assert.ok(app.includes('mode: stakeMode.value'))
-  assert.ok(app.includes("['double', 'recover'].includes(raw.mode)"))
-  assert.ok(app.includes('currentSettings &&'))
-  assert.ok(app.includes('scroll-snap-type: x proximity'))
-  assert.ok(app.includes('grid-template-columns: repeat(4, minmax(0, 1fr))'))
+test('Martingale calculator and its old navigation link are absent', () => {
+  assert.ok(!template.includes('id="calculator"'))
+  assert.ok(!template.includes('href="#calculator"'))
+  assert.ok(!template.includes('class="calculator-panel"'))
+  assert.ok(!app.includes('calculateLadder'))
+  assert.ok(!app.includes('savedCalculatorKey'))
+  assert.ok(!app.includes('stakeMode'))
+  assert.ok(!app.includes('virtualStake'))
+  assert.ok(!app.includes('virtualNet'))
+  assert.ok(!app.includes('ladder.totalBankroll'))
+  assert.ok(!app.includes('class="step-strip"'))
+  assert.ok(!app.includes('.calculator-overview'))
 })
 
-test('Virtual bet rows are explicitly modeled from confirmed results', () => {
-  assert.ok(app.includes('const virtualBetRows = computed('))
+test('Verified outcomes remain visible with steps and no fictional money amounts', () => {
+  assert.ok(app.includes('const verifiedPredictionRows = computed('))
   assert.ok(app.includes(".filter(item => ['WIN', 'LOSE'].includes(item.result))"))
-  assert.ok(app.includes('Number(odds.value) - 1'))
-  assert.ok(app.includes('item.virtualStake'))
-  assert.ok(app.includes('item.virtualNet'))
-  assert.ok(app.includes('Только виртуально'))
-  assert.ok(app.includes('не берутся из истории реальных ставок'))
+  assert.ok(template.includes('История виртуальных результатов'))
+  assert.ok(template.includes('v-for="item in verifiedPredictionRows"'))
+  assert.ok(template.includes('item.step'))
+  assert.ok(template.includes("item.result === 'WIN'"))
+  assert.ok(template.includes('Без реальных ставок'))
 })

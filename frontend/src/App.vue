@@ -1,7 +1,6 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { shouldApplySnapshot } from './stateVersion.js'
-import { calculateLadder } from './stakeCalculator.js'
 
 const api = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8010'
 const scanResultNames = {
@@ -45,46 +44,9 @@ const currentForecast = computed(() => cycle18.value.ready
   ? cycle18.value.live_preview?.find(item => item.phase === 'CURRENT') : null)
 const nextForecast = computed(() => cycle18.value.ready
   ? cycle18.value.live_preview?.find(item => item.phase === 'NEXT') : null)
-const initialStake = ref(10)
-const odds = ref(1.90)
-const steps = ref(6)
-const stakeMode = ref('recover')
-const savedCalculatorKey = 'bakkara.calculator.settings.v2'
-function restoreCalculatorSettings() {
-  try {
-    const currentSettings = window.localStorage.getItem(savedCalculatorKey)
-    const raw = JSON.parse(currentSettings || window.localStorage.getItem('bakkara.calculator.settings.v1') || 'null')
-    if (!raw || typeof raw !== 'object') return
-    if (Number.isFinite(Number(raw.stake)) && Number(raw.stake) > 0) initialStake.value = Number(raw.stake)
-    if (Number.isFinite(Number(raw.odds)) && Number(raw.odds) > 1) odds.value = Number(raw.odds)
-    if (Number.isInteger(Number(raw.steps)) && Number(raw.steps) >= 1 && Number(raw.steps) <= 20) steps.value = Number(raw.steps)
-    if (currentSettings && ['double', 'recover'].includes(raw.mode)) stakeMode.value = raw.mode
-  } catch { /* Private browsing and restricted storage must not break the calculator. */ }
-}
-watch([initialStake, odds, steps, stakeMode], () => {
-  try {
-    window.localStorage.setItem(savedCalculatorKey, JSON.stringify({
-      stake: initialStake.value, odds: odds.value, steps: steps.value, mode: stakeMode.value,
-    }))
-  } catch { /* Storage is optional. */ }
-})
-const ladder = computed(() => calculateLadder({
-  stake: initialStake.value, odds: odds.value, steps: steps.value, mode: stakeMode.value,
-}))
-// Simulation only: results come from the verified cycle; amounts are recalculated
-// locally from the current calculator settings and were never placed as bets.
-const virtualBetRows = computed(() => (cycle18.value.recent || [])
-  .filter(item => ['WIN', 'LOSE'].includes(item.result))
-  .map(item => {
-    const step = ladder.value?.rows.find(row => row.step === Number(item.step))
-    const virtualStake = step?.stake ?? null
-    const virtualNet = virtualStake === null ? null : item.result === 'WIN'
-      ? Math.round(virtualStake * (Number(odds.value) - 1) * 100) / 100 : -virtualStake
-    return { ...item, virtualStake, virtualNet }
-  }))
-const money = amount => new Intl.NumberFormat('ru-RU', {
-  minimumFractionDigits: 2, maximumFractionDigits: 2,
-}).format(Number(amount) || 0) + ' ₽'
+// Read-only outcomes: the selected strategy and the backend provide all WIN/LOSE data.
+const verifiedPredictionRows = computed(() => (cycle18.value.recent || [])
+  .filter(item => ['WIN', 'LOSE'].includes(item.result)))
 const historyRows = ref([])
 const historyLoaded = ref(false)
 const historySearch = ref('')
@@ -228,7 +190,6 @@ async function clearLogs() {
 let timer
 let historyTimer
 onMounted(() => {
-  restoreCalculatorSettings()
   load()
   refreshHistory()
   timer = window.setInterval(load, 500)
@@ -243,10 +204,10 @@ onBeforeUnmount(() => {
 <template>
   <main>
     <header class="dashboard-header">
-      <div><p class="eyebrow">BAKKARA / LIVE ANALYTICS</p><h1>Панель наблюдения <span class="header-spark">✦</span></h1><p>Карты Игрока, прогнозы выбранной стратегии и расчёт виртуального бюджета.</p></div>
+      <div><p class="eyebrow">BAKKARA / LIVE ANALYTICS</p><h1>Панель наблюдения <span class="header-spark">✦</span></h1><p>Карты Игрока, прогнозы выбранной стратегии и история раздач.</p></div>
       <nav class="quick-nav" aria-label="Разделы панели">
         <a href="#observation">Наблюдение</a>
-        <a href="#calculator">Калькулятор</a>
+        <a href="#forecasts">Прогнозы</a>
         <a href="#history">История</a>
         <a href="#events">События</a>
       </nav>
@@ -273,94 +234,20 @@ onBeforeUnmount(() => {
     </section>
     <section class="controls"><button :disabled="busy || running" @click="command('/api/browser/start')">Запустить браузер</button><button class="secondary" :disabled="busy || !running" @click="command('/api/browser/stop')">Остановить браузер</button></section>
     <p class="diagnostic">{{ state.diagnostic }}</p><p v-if="error" class="error">{{ error }}</p>
-    <section class="events forecast-strip" id="forecasts" aria-label="Прогнозы следующих раздач">
-      <div class="section-title"><div><p class="eyebrow">LIVE / ПРОГНОЗЫ</p><h2>Текущая и следующая раздачи</h2></div><span class="standalone-label">{{ cycle18.ready ? strategyLabel + ' активен' : 'Подготовка прогноза' }}</span></div>
-        <div v-if="cycle18.ready" class="forecast-pair" aria-label="Текущая и следующая раздачи">
-          <article class="forecast-tile" data-testid="forecast-current">
-            <div class="forecast-tile-head"><span>Текущая раздача</span><span class="forecast-round">№{{ currentForecast?.target_round_number || state.observation?.current?.round_number || '—' }}</span></div>
-            <div v-if="currentForecast?.available" class="forecast-suit" :class="isRedSuit(currentForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
-              {{ suits[currentForecast.predicted_suit]?.[0] }} <small>{{ suits[currentForecast.predicted_suit]?.[1] }}</small>
-            </div>
-            <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
-            <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
-            <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
-            <p v-if="currentForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(currentForecast) }}</p>
-          </article>
-          <article class="forecast-tile" data-testid="forecast-next">
-            <div class="forecast-tile-head"><span>Следующая раздача</span><span class="forecast-round">№{{ nextForecast?.target_round_number || '—' }}</span></div>
-            <div v-if="nextForecast?.available" class="forecast-suit" :class="isRedSuit(nextForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
-              {{ suits[nextForecast.predicted_suit]?.[0] }} <small>{{ suits[nextForecast.predicted_suit]?.[1] }}</small>
-            </div>
-            <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
-            <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
-            <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
-            <p v-if="nextForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(nextForecast) }}</p>
-          </article>
-        </div>
-        <p v-if="cycle18.ready && !currentForecast" class="diagnostic">Ожидаем выбора текущей игры с действительным номером; прогнозы нельзя определить без N.</p>
-        <p v-if="!cycle18.ready" class="diagnostic">Прогнозы появятся после {{ cycle18.warmup_required ?? 20 }} подтверждённых игр в этом запуске.</p>
-    </section>
-    <section class="events calculator-panel" id="calculator" aria-label="Калькулятор догона">
-      <div class="section-title"><h2>Калькулятор догона</h2><span class="standalone-label">Без ставок</span></div>
-      <p class="diagnostic">Горизонтальная лестница · изменение коэффициента пересчитывает следующие суммы в режиме покрытия потерь. Не влияет на работу бота.</p>
-      <div class="calculator-fields">
-        <label class="field">Начальная ставка, ₽
-          <input v-model.number="initialStake" type="number" min="0.01" step="0.01" inputmode="decimal" />
-        </label>
-        <label class="field">Коэффициент
-          <input v-model.number="odds" type="number" min="1.01" step="0.01" inputmode="decimal" />
-        </label>
-        <label class="field">Количество шагов
-          <input v-model.number="steps" type="number" min="1" max="20" step="1" inputmode="numeric" />
-        </label>
-        <label class="field">Расчёт суммы
-          <select v-model="stakeMode">
-            <option value="recover">Покрытие потерь и прибыли · зависит от кф</option>
-            <option value="double">Фиксированное ×2 · не зависит от кф</option>
-          </select>
-        </label>
-      </div>
-      <template v-if="ladder">
-        <div class="calculator-overview">
-          <div class="bankroll-summary">
-            <span>Бюджет на все {{ ladder.rows.length }} шагов</span>
-            <strong>{{ money(ladder.totalBankroll) }}</strong>
-            <small>Потери, если проиграют все шаги</small>
-          </div>
-          <div class="calculator-meta"><span>Целевая прибыль первого шага</span><strong>{{ money(ladder.targetNetProfit) }}</strong></div>
-          <div class="calculator-meta"><span>Безубыточная доля WIN</span><strong>{{ ladder.breakEvenChance.toFixed(2) }}%</strong></div>
-        </div>
-        <p v-if="stakeMode === 'double'" class="diagnostic">Режим ×2 фиксированный: изменение коэффициента влияет на прибыль, но не на суммы шагов. Для пересчёта следующих сумм выберите «Покрытие потерь и прибыли».</p>
-        <p v-if="ladder.anyNegativeProfit" class="calculator-warning">При выбранном коэффициенте WIN на некоторых шагах не покрывает предыдущие проигрыши.</p>
-        <div class="step-strip" role="list" aria-label="Горизонтальная лестница ставок">
-          <div v-for="row in ladder.rows" :key="row.step" class="step-column" role="listitem">
-            <strong class="step-title">Шаг {{ row.step }}</strong>
-            <span>Ставка</span><strong>{{ money(row.stake) }}</strong>
-            <span>Бюджет до шага</span><strong>{{ money(row.bankThroughStep) }}</strong>
-            <span>Итог при WIN</span><strong :class="row.netIfWin < 0 ? 'lose-text' : 'win-text'">{{ money(row.netIfWin) }}</strong>
-          </div>
-        </div>
-        <p class="diagnostic">Расчёт предполагает постоянный коэффициент и последовательные LOSE до выигрышного шага. Фактическая вероятность выигрыша не определяется калькулятором.</p>
-      </template>
-      <p v-else class="calculator-warning">Введите ставку больше нуля, коэффициент больше 1 и от 1 до 20 шагов.</p>
-    </section>
-    <section class="events virtual-history" id="virtual-bets" aria-label="История виртуальных ставок">
-      <div class="section-title"><div><h2>История виртуальных ставок</h2><p class="diagnostic">Моделирование по проверенным прогнозам цикла 18 · {{ virtualBetRows.length }} результатов</p></div><span class="standalone-label">Только виртуально</span></div>
-      <p class="diagnostic">Ставка и финансовый итог вычисляются по текущим настройкам калькулятора, а не берутся из истории реальных ставок. При изменении коэффициента суммы здесь также изменятся. Результаты WIN/LOSE получены из наблюдений.</p>
-      <p v-if="!cycle18.ready" class="diagnostic">История появится после подготовки цикла и проверки прогнозов.</p>
-      <p v-else-if="!virtualBetRows.length" class="diagnostic">Проверенных виртуальных результатов пока нет.</p>
+    <section class="events virtual-history" id="virtual-results" aria-label="История виртуальных результатов">
+      <div class="section-title"><div><h2>История виртуальных результатов</h2><p class="diagnostic">Подтверждённые прогнозы · {{ strategyLabel }} · {{ verifiedPredictionRows.length }} результатов</p></div><span class="standalone-label">Без реальных ставок</span></div>
+      <p class="diagnostic">Только WIN/LOSE, шаги и источники по подтверждённым картам Игрока. Финансовые расчёты не выполняются.</p>
+      <p v-if="!cycle18.ready" class="diagnostic">Результаты появятся после подготовки выбранной стратегии.</p>
+      <p v-else-if="!verifiedPredictionRows.length" class="diagnostic">Проверенных результатов пока нет.</p>
       <div v-else class="history-table-scroll virtual-history-scroll">
-        <table class="history-table" aria-label="История виртуальных ставок цикла 18">
-          <thead><tr><th>Целевая игра</th><th>Источники ({{ strategyShortLabel }})</th><th>Прогноз</th><th>Шаг</th><th>Виртуальная ставка</th><th>Коэффициент</th><th>Результат</th><th>Виртуальный итог</th><th>Тип проверки</th></tr></thead>
-          <tbody><tr v-for="item in virtualBetRows" :key="item.source_game_id">
+        <table class="history-table" aria-label="История результатов выбранной стратегии">
+          <thead><tr><th>Целевая игра</th><th>Источники ({{ strategyShortLabel }})</th><th>Прогноз</th><th>Шаг</th><th>Результат</th><th>Тип проверки</th></tr></thead>
+          <tbody><tr v-for="item in verifiedPredictionRows" :key="item.target_game_id || item.source_game_id">
             <td>№{{ item.target_round_number || '—' }}</td>
             <td>{{ sourceDescription(item) }}</td>
             <td :class="isRedSuit(item.predicted_suit) ? 'red-suit' : 'black-suit'">{{ suits[item.predicted_suit]?.[0] || '—' }}</td>
             <td>{{ item.step ?? '—' }}</td>
-            <td>{{ item.virtualStake === null ? 'За пределами лестницы' : money(item.virtualStake) }}</td>
-            <td>{{ item.virtualStake === null ? '—' : Number(odds).toFixed(2) }}</td>
             <td><strong :class="item.result === 'WIN' ? 'win-text' : 'lose-text'">{{ item.result }}</strong></td>
-            <td :class="item.virtualNet !== null ? (item.virtualNet >= 0 ? 'win-text' : 'lose-text') : ''">{{ item.virtualNet === null ? '—' : money(item.virtualNet) }}</td>
             <td>{{ item.mode === 'BACKFILL' ? 'По истории' : 'Наблюдение' }}</td>
           </tr></tbody>
         </table>
@@ -449,6 +336,33 @@ onBeforeUnmount(() => {
       </section>
     </section>
 
+    <section class="events forecast-strip" id="forecasts" aria-label="Прогнозы следующих раздач">
+      <div class="section-title"><div><p class="eyebrow">LIVE / ПРОГНОЗЫ</p><h2>Текущая и следующая раздачи</h2></div><span class="standalone-label">{{ cycle18.ready ? strategyLabel + ' активен' : 'Подготовка прогноза' }}</span></div>
+        <div v-if="cycle18.ready" class="forecast-pair" aria-label="Текущая и следующая раздачи">
+          <article class="forecast-tile" data-testid="forecast-current">
+            <div class="forecast-tile-head"><span>Текущая раздача</span><span class="forecast-round">№{{ currentForecast?.target_round_number || state.observation?.current?.round_number || '—' }}</span></div>
+            <div v-if="currentForecast?.available" class="forecast-suit" :class="isRedSuit(currentForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
+              {{ suits[currentForecast.predicted_suit]?.[0] }} <small>{{ suits[currentForecast.predicted_suit]?.[1] }}</small>
+            </div>
+            <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
+            <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
+            <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
+            <p v-if="currentForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(currentForecast) }}</p>
+          </article>
+          <article class="forecast-tile" data-testid="forecast-next">
+            <div class="forecast-tile-head"><span>Следующая раздача</span><span class="forecast-round">№{{ nextForecast?.target_round_number || '—' }}</span></div>
+            <div v-if="nextForecast?.available" class="forecast-suit" :class="isRedSuit(nextForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
+              {{ suits[nextForecast.predicted_suit]?.[0] }} <small>{{ suits[nextForecast.predicted_suit]?.[1] }}</small>
+            </div>
+            <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
+            <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
+            <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
+            <p v-if="nextForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(nextForecast) }}</p>
+          </article>
+        </div>
+        <p v-if="cycle18.ready && !currentForecast" class="diagnostic">Ожидаем выбора текущей игры с действительным номером; прогнозы нельзя определить без N.</p>
+        <p v-if="!cycle18.ready" class="diagnostic">Прогнозы появятся после {{ cycle18.warmup_required ?? 20 }} подтверждённых игр в этом запуске.</p>
+    </section>
     <section class="events history-panel" id="history">
       <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Последние {{ fullHistory.length }} подтверждённых раздач · доступно до 200 записей.</p></div><div class="history-actions"><button class="secondary" @click="refreshHistory">Обновить</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div></div>
       <label class="field history-search">Поиск по номеру, ID или картам
@@ -592,13 +506,6 @@ onBeforeUnmount(() => {
 .forecast-suit small { font-size: 1.02rem; font-weight: 600; color: #cad9ee; }
 .forecast-unavailable { margin: 20px 0 10px; color: #ffd08d; font-weight: 650; }
 .forecast-tile p { font-size: .85rem; color: #94a9c4; margin: 5px 0 0; }
-.calculator-panel { width: 100%; position: static; }
-.calculator-fields {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-  margin: 20px 0;
-}
 .field { display: grid; gap: 8px; font-size: .84rem; color: #aebed4; font-weight: 600; }
 .field input, .field select {
   color: #edf4ff;
@@ -613,55 +520,6 @@ onBeforeUnmount(() => {
   outline-offset: 3px;
 }
 .field input:focus, .field select:focus { border-color: #64d7ff; outline: 2px solid #335776; }
-.calculator-overview {
-  display: grid;
-  grid-template-columns: minmax(260px, 1.4fr) repeat(2, minmax(160px, 1fr));
-  gap: 0;
-  margin: 12px 0 20px;
-  border-top: 1px solid #263753;
-  border-bottom: 1px solid #263753;
-}
-.bankroll-summary, .calculator-meta {
-  display: grid;
-  align-content: center;
-  gap: 7px;
-  min-width: 0;
-  margin: 0;
-  padding: 18px 20px;
-  border-right: 1px solid #263753;
-}
-.bankroll-summary { padding-left: 0; }
-.calculator-meta:last-child { border-right: 0; }
-.bankroll-summary span, .bankroll-summary small, .calculator-meta span { color: #aec2d8; font-size: .85rem; }
-.bankroll-summary strong { font-size: clamp(1.5rem, 2.5vw, 2.2rem); letter-spacing: -.04em; color: #78ebc9; }
-.calculator-meta strong { color: #edf4ff; font-size: 1.25rem; }
-.calculator-warning { padding: 10px 12px; border-left: 2px solid #ffcb8a; color: #ffd08d; background: #3d2b2033; font-size: .86rem; }
-.step-strip {
-  display: flex;
-  width: 100%;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scroll-snap-type: x proximity;
-  border-top: 1px solid #263753;
-  border-bottom: 1px solid #263753;
-  margin: 16px 0;
-}
-.step-column {
-  display: grid;
-  align-content: start;
-  gap: 6px;
-  flex: 1 0 175px;
-  min-width: 175px;
-  padding: 18px 17px;
-  border-right: 1px solid #263753;
-  scroll-snap-align: start;
-}
-.step-column:first-child { padding-left: 0; }
-.step-column:last-child { border-right: 0; }
-.step-title { display: block; margin-bottom: 9px; color: #64d7ff; font-size: 1rem; }
-.step-column span { margin-top: 8px; color: #98acc8; font-size: .78rem; }
-.step-column strong { font-size: .94rem; }
-.step-column .step-title { font-size: 1.02rem; }
 .virtual-history-scroll { max-height: 56vh; }
 .virtual-history th, .virtual-history td { white-space: nowrap; }
 .history-panel { min-width: 0; }
@@ -674,19 +532,9 @@ onBeforeUnmount(() => {
   color: #86d7f2;
   padding: 4px 0;
 }
-@media (max-width: 980px) {
-  .calculator-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
 @media (max-width: 760px) {
   .forecast-pair { grid-template-columns: 1fr; }
   .forecast-tile { padding-right: 0; border-right: 0; border-bottom: 1px solid #263753; }
   .forecast-tile + .forecast-tile { padding-left: 0; border-bottom: 0; }
-  .calculator-overview { grid-template-columns: 1fr; }
-  .bankroll-summary, .calculator-meta { padding: 12px 0; border-right: 0; border-bottom: 1px solid #263753; }
-  .calculator-meta:last-child { border-bottom: 0; }
-}
-@media (max-width: 480px) {
-  .calculator-fields { grid-template-columns: 1fr; }
-  .step-column { min-width: 168px; flex-basis: 168px; }
 }
 </style>

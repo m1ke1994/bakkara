@@ -61,20 +61,21 @@ def test_history_cells_are_compact_and_clear_buttons_use_separate_delete_routes(
     assert 'Очистить логи' in app and "command('/api/logs', 'DELETE')" in app
 
 
-def test_dashboard_has_two_numbered_suit_forecasts_and_independent_calculator():
+def test_dashboard_has_two_numbered_suit_forecasts_immediately_above_history():
     app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
+    template = app.split('<template>', 1)[1]
     assert 'cycle18.value.live_preview' in app
-    assert 'data-testid="forecast-current"' in app
-    assert 'data-testid="forecast-next"' in app
-    assert "currentForecast?.source_round_number" in app
-    assert "nextForecast?.source_round_number" in app
-    assert "calculateLadder" in app
-    assert 'Калькулятор догона' in app
-    assert 'Без ставок' in app
-    assert 'value="double"' in app
-    assert 'value="recover"' in app
-    assert 'ladder.totalBankroll' in app
-    assert 'row.netIfWin' in app
+    assert 'data-testid="forecast-current"' in template
+    assert 'data-testid="forecast-next"' in template
+    assert "currentForecast?.source_round_number" in template
+    assert "nextForecast?.source_round_number" in template
+    forecast_start = template.index('id="forecasts"')
+    history_start = template.index('id="history"')
+    assert forecast_start < history_start
+    assert template[forecast_start:history_start].count('<section ') == 1
+    assert 'id="calculator"' not in template
+    assert 'Калькулятор догона' not in template
+    assert 'История виртуальных результатов' in template
 
 
 def test_history_supports_search_and_up_to_two_hundred_rows_without_live_poll_bloat():
