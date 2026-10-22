@@ -618,3 +618,45 @@ def test_observation_history_returns_two_hundred_completed_rounds(tmp_path):
     assert len(rows) == 200
     assert len({row["game_id"] for row in rows}) == 200
     assert all(len(row["player_cards"]) == 2 for row in rows)
+
+
+def test_ten_losses_keep_step_eleven_when_future_rounds_were_discovered_out_of_order(tmp_path):
+    """Prelisted game timestamps must not split an otherwise continuous N-18 run."""
+    path = tmp_path / "reordered-prelisted-steps.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    for number in range(1, 21):
+        add_round(store, number)
+        engine.refresh()
+
+    # Every source round #3..#13 computes spades from hearts + clubs.
+    # Targets #21..#30 have no spades, #31 contains spades: 10 LOSE, then WIN.
+    for number in range(21, 32):
+        target_cards = [
+            {"position": 1, "rank": "6", "suit": "hearts"},
+            {"position": 2, "rank": "4", "suit": "clubs"},
+        ] if number < 31 else [
+            {"position": 1, "rank": "9", "suit": "spades"},
+            {"position": 2, "rank": "3", "suit": "clubs"},
+        ]
+        add_round(store, number, cards=target_cards)
+        engine.refresh()
+
+    # The site may register a future target earlier than an older target.
+    # Reverse their discovery timestamps while leaving finalization times
+    # and numbered hand identities untouched.
+    future = datetime.now(timezone.utc) + timedelta(minutes=2)
+    with sqlite3.connect(path) as db:
+        for number in range(21, 32):
+            db.execute("UPDATE observations SET discovered_at=? WHERE game_id=?",
+                       ((future - timedelta(seconds=3 * (number - 21))).isoformat(),
+                        f"round-{number}"))
+
+    state = engine.refresh()
+    recent = {row["target_round_number"]: row for row in state["recent"]}
+    assert [recent[number]["result"] for number in range(21, 31)] == ["LOSE"] * 10
+    assert [recent[number]["step"] for number in range(21, 32)] == list(range(1, 12))
+    assert recent[31]["result"] == "WIN"
+    assert state["statistics"]["max_lose_streak"] == 10
+    assert state["statistics"]["wins_by_step"]["11"] == 1
+    assert state["statistics"]["next_step"] == 1
