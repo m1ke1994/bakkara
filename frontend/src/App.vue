@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { shouldApplySnapshot } from './stateVersion.js'
+import { calculateLadder } from './stakeCalculator.js'
 
 const api = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8010'
 const scanResultNames = {
@@ -19,8 +20,46 @@ const scanResultName = value => scanResultNames[value] || value || '\u2014'
 const state = ref({ state_epoch: '', state_version: 0, backend: 'CHECKING', browser: 'STOPPED', authorization: 'UNKNOWN', diagnostic: '', events: [], observation: { status: 'STOPPED', current: null, history: [], games: [] } })
 const busy = ref(false)
 const error = ref('')
- const cycle18 = computed(() => state.value.cycle18 || {})
+const cycle18 = computed(() => state.value.cycle18 || {})
 const cycleStats = computed(() => cycle18.value.statistics || {})
+const currentForecast = computed(() => cycle18.value.ready
+  ? cycle18.value.live_preview?.find(item => item.phase === 'CURRENT') : null)
+const nextForecast = computed(() => cycle18.value.ready
+  ? cycle18.value.live_preview?.find(item => item.phase === 'NEXT') : null)
+const initialStake = ref(10)
+const odds = ref(1.90)
+const steps = ref(6)
+const stakeMode = ref('double')
+const ladder = computed(() => calculateLadder({
+  stake: initialStake.value, odds: odds.value, steps: steps.value, mode: stakeMode.value,
+}))
+const money = amount => new Intl.NumberFormat('ru-RU', {
+  minimumFractionDigits: 2, maximumFractionDigits: 2,
+}).format(Number(amount) || 0) + ' ₽'
+const historyRows = ref([])
+const historyLoaded = ref(false)
+const historySearch = ref('')
+const fullHistory = computed(() => historyLoaded.value
+  ? historyRows.value : (state.value.observation?.history || []))
+const filteredHistory = computed(() => {
+  const term = historySearch.value.trim().toLowerCase()
+  return term ? fullHistory.value.filter(item =>
+    String(item.round_number || '').includes(term)
+    || String(item.game_id || '').toLowerCase().includes(term)
+    || (item.player_cards || []).some(card =>
+      (card.rank + (suits[card.suit]?.[0] || '')).toLowerCase().includes(term))
+  ) : fullHistory.value
+})
+async function refreshHistory() {
+  try {
+    const response = await fetch(`${api}/api/history?limit=200`)
+    if (!response.ok) return
+    const rows = await response.json()
+    if (!Array.isArray(rows)) return
+    historyRows.value = rows
+    historyLoaded.value = true
+  } catch { /* Live state stays functional even if history API is temporarily unavailable. */ }
+}
 const outcomesById = computed(() => {
   const outcomes = new Map()
   for (const result of cycle18.value.recent || []) outcomes.set(result.target_game_id, result)
@@ -102,18 +141,38 @@ async function command(path, method = 'POST') {
 async function clearHistory() {
   if (!window.confirm('\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0432\u0441\u044e \u0438\u0441\u0442\u043e\u0440\u0438\u044e \u043d\u0430\u0431\u043b\u044e\u0434\u0435\u043d\u0438\u0439, \u043a\u0430\u0440\u0442\u044b, \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u044b \u0438 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u044b WIN/LOSE?')) return
   await command('/api/observations', 'DELETE')
+  historyRows.value = []
+  historyLoaded.value = true
+  await refreshHistory()
 }
 async function clearLogs() {
   await command('/api/logs', 'DELETE')
 }
 let timer
-onMounted(() => { load(); timer = window.setInterval(load, 500) })
-onBeforeUnmount(() => clearInterval(timer))
+let historyTimer
+onMounted(() => {
+  load()
+  refreshHistory()
+  timer = window.setInterval(load, 500)
+  historyTimer = window.setInterval(refreshHistory, 10000)
+})
+onBeforeUnmount(() => {
+  clearInterval(timer)
+  clearInterval(historyTimer)
+})
 </script>
 
 <template>
   <main>
-    <header><p class="eyebrow">УПРАВЛЕНИЕ СЕАНСОМ</p><h1>BAKKARA BOT</h1><p>Ручной вход и чтение карт Игрока со страницы.</p></header>
+    <header class="dashboard-header">
+      <div><p class="eyebrow">BAKKARA / LIVE ANALYTICS</p><h1>Панель наблюдения <span class="header-spark">✦</span></h1><p>Карты Игрока, прогнозы цикла 18 и расчёт виртуального бюджета.</p></div>
+      <nav class="quick-nav" aria-label="Разделы панели">
+        <a href="#observation">Наблюдение</a>
+        <a href="#calculator">Калькулятор</a>
+        <a href="#history">История</a>
+        <a href="#events">События</a>
+      </nav>
+    </header>
     <section class="cards">
       <article><span>Сервер</span><strong :class="badge(state.backend)">{{ label('backend', state.backend) }}</strong></article>
       <article><span>Браузер</span><strong :class="badge(state.browser)">{{ label('browser', state.browser) }}</strong></article>
@@ -121,7 +180,8 @@ onBeforeUnmount(() => clearInterval(timer))
     </section>
     <section class="controls"><button :disabled="busy || running" @click="command('/api/browser/start')">Запустить браузер</button><button class="secondary" :disabled="busy || !running" @click="command('/api/browser/stop')">Остановить браузер</button></section>
     <p class="diagnostic">{{ state.diagnostic }}</p><p v-if="error" class="error">{{ error }}</p>
-    <section class="events observation">
+    <div class="workspace-grid">
+    <section class="events observation" id="observation">
       <div class="section-title"><h2>Текущее наблюдение</h2><strong :class="badge(state.observation?.status)">{{ label('observation', state.observation?.status) }}</strong></div>
       <div class="controls"><button :disabled="busy || !canObserve || observing" @click="command('/api/observation/start')">Начать сканирование</button><button class="secondary" :disabled="busy || !observing" @click="command('/api/observation/stop')">Остановить сканирование</button></div>
       <p class="diagnostic">{{ state.observation?.diagnostic }}</p>
@@ -185,13 +245,26 @@ onBeforeUnmount(() => clearInterval(timer))
           <article><span>Максимум LOSE подряд</span><strong>{{ cycleStats.max_lose_streak ?? 0 }}</strong></article>
           <article><span>Виртуальный следующий шаг</span><strong>{{ cycleStats.next_step ?? 1 }}</strong></article>
         </div>
-        <p v-if="cycle18.ready && cycle18.current">Текущая игра №{{ cycle18.current.target_round_number }}: прогноз {{ suits[cycle18.current.predicted_suit]?.[0] || '—' }} из раздачи №{{ cycle18.current.source_round_number }} · {{ predictionLabels[cycle18.current.result] || cycle18.current.result }}</p>
-        <p v-else-if="cycle18.ready && cycle18.upcoming?.length">
-          <strong>Следующая раздача №{{ cycle18.upcoming[cycle18.upcoming.length - 1].target_round_number }}:</strong>
-          {{ suits[cycle18.upcoming[cycle18.upcoming.length - 1].predicted_suit]?.[0] || '—' }}
-          (из №{{ cycle18.upcoming[cycle18.upcoming.length - 1].source_round_number }})
-        </p>
-        <p v-else>Прогноз появится после завершения 20-й последовательной раздачи и определения следующей игры.</p>
+        <div v-if="cycle18.ready" class="forecast-pair" aria-label="Текущая и следующая раздачи">
+          <article class="forecast-tile" data-testid="forecast-current">
+            <div class="forecast-tile-head"><span>Текущая раздача</span><span class="forecast-round">№{{ currentForecast?.target_round_number || state.observation?.current?.round_number || '—' }}</span></div>
+            <div v-if="currentForecast?.available" class="forecast-suit" :class="isRedSuit(currentForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
+              {{ suits[currentForecast.predicted_suit]?.[0] }} <small>{{ suits[currentForecast.predicted_suit]?.[1] }}</small>
+            </div>
+            <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
+            <p>Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
+          </article>
+          <article class="forecast-tile" data-testid="forecast-next">
+            <div class="forecast-tile-head"><span>Следующая раздача</span><span class="forecast-round">№{{ nextForecast?.target_round_number || '—' }}</span></div>
+            <div v-if="nextForecast?.available" class="forecast-suit" :class="isRedSuit(nextForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
+              {{ suits[nextForecast.predicted_suit]?.[0] }} <small>{{ suits[nextForecast.predicted_suit]?.[1] }}</small>
+            </div>
+            <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
+            <p>Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
+          </article>
+        </div>
+        <p v-if="cycle18.ready && !currentForecast" class="diagnostic">Ожидаем выбора текущей игры с действительным номером; прогнозы нельзя определить без N.</p>
+        <p v-if="!cycle18.ready" class="diagnostic">Прогнозы двух раздач появятся только после подтверждения 20 игр.</p>
         <details v-if="cycle18.ready && Object.keys(cycleStats.wins_by_step || {}).length"><summary>Победы по шагам (виртуально)</summary><p v-for="(count, step) in cycleStats.wins_by_step" :key="step">Шаг {{ step }}: {{ count }} WIN</p></details>
         <details v-if="cycle18.ready && cycle18.recent?.length">
           <summary>История прогнозов цикла 18 ({{ cycle18.recent.length }})</summary>
@@ -209,12 +282,63 @@ onBeforeUnmount(() => clearInterval(timer))
           </div>
         </details>
       </section>
-      <div class="section-title history-heading"><h3>История наблюдений</h3><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div><p v-if="!state.observation?.history?.length">Сохранённых наблюдений пока нет.</p>
-      <div v-else class="history-table-scroll">
+    </section>
+    <aside class="events calculator-panel" id="calculator" aria-label="Калькулятор догона">
+      <div class="section-title"><h2>Калькулятор догона</h2><span class="standalone-label">Без ставок</span></div>
+      <p class="diagnostic">Отдельный расчёт бюджета. Не влияет на цикл 18, статистику WIN/LOSE и действия бота.</p>
+      <div class="calculator-fields">
+        <label class="field">Начальная ставка, ₽
+          <input v-model.number="initialStake" type="number" min="0.01" step="0.01" inputmode="decimal" />
+        </label>
+        <label class="field">Коэффициент
+          <input v-model.number="odds" type="number" min="1.01" step="0.01" inputmode="decimal" />
+        </label>
+        <label class="field">Количество шагов
+          <input v-model.number="steps" type="number" min="1" max="20" step="1" inputmode="numeric" />
+        </label>
+        <label class="field">Расчёт суммы
+          <select v-model="stakeMode">
+            <option value="double">×2 — как в new_bot</option>
+            <option value="recover">Покрытие потерь и прибыли</option>
+          </select>
+        </label>
+      </div>
+      <template v-if="ladder">
+        <div class="bankroll-summary">
+          <span>Бюджет на все {{ ladder.rows.length }} шагов</span>
+          <strong>{{ money(ladder.totalBankroll) }}</strong>
+          <small>Потери, если проиграют все шаги</small>
+        </div>
+        <div class="calculator-meta"><span>Целевая прибыль первого шага</span><strong>{{ money(ladder.targetNetProfit) }}</strong></div>
+        <div class="calculator-meta"><span>Безубыточная доля WIN</span><strong>{{ ladder.breakEvenChance.toFixed(2) }}%</strong></div>
+        <p v-if="stakeMode === 'double'" class="diagnostic">При ×2 коэффициент меняет чистый результат, но не размер следующих ставок.</p>
+        <p v-if="ladder.anyNegativeProfit" class="calculator-warning">При выбранном коэффициенте WIN на некоторых шагах не покрывает предыдущие проигрыши.</p>
+        <div class="history-table-scroll calculator-table-scroll">
+          <table class="history-table calculator-table">
+            <thead><tr><th>Шаг</th><th>Ставка</th><th>Бюджет</th><th>Итог при WIN</th></tr></thead>
+            <tbody><tr v-for="row in ladder.rows" :key="row.step">
+              <td>{{ row.step }}</td><td>{{ money(row.stake) }}</td><td>{{ money(row.bankThroughStep) }}</td>
+              <td :class="row.netIfWin < 0 ? 'lose-text' : 'win-text'">{{ money(row.netIfWin) }}</td>
+            </tr></tbody>
+          </table>
+        </div>
+        <p class="diagnostic">Расчёт предполагает постоянный коэффициент и последовательные LOSE до выигрышного шага. Фактическая вероятность выигрыша не определяется калькулятором.</p>
+      </template>
+      <p v-else class="calculator-warning">Введите ставку больше нуля, коэффициент больше 1 и от 1 до 20 шагов.</p>
+    </aside>
+    </div>
+    <section class="events history-panel" id="history">
+      <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Последние {{ fullHistory.length }} подтверждённых раздач · доступно до 200 записей.</p></div><div class="history-actions"><button class="secondary" @click="refreshHistory">Обновить</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div></div>
+      <label class="field history-search">Поиск по номеру, ID или картам
+        <input v-model="historySearch" type="search" placeholder="Например: 600 или A♥" />
+      </label>
+      <p v-if="!fullHistory.length">Сохранённых наблюдений пока нет.</p>
+      <p v-else-if="!filteredHistory.length" class="diagnostic">По указанному запросу раздач не найдено.</p>
+      <div v-else class="history-table-scroll history-full-scroll">
         <table class="history-table" aria-label="История наблюдений">
           <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th scope="col">Расчётная масть</th><th v-if="cycle18.ready" scope="col">WIN / LOSE (цикл 18)</th></tr></thead>
           <tbody>
-            <tr v-for="item in state.observation.history" :key="item.game_id">
+            <tr v-for="item in filteredHistory" :key="item.game_id">
               <td class="history-time">{{ formatObservedAt(item.observed_at || item.last_scanned_at || item.discovered_at) }}</td>
               <td class="history-round"><strong><a v-if="item.game_url || item.url" :href="item.game_url || item.url" target="_blank" rel="noopener noreferrer" :title="`Открыть игру ${item.game_id}`">{{ item.round_number || '—' }}</a><span v-else>{{ item.round_number || '—' }}</span></strong></td>
               <td><div v-if="item.player_cards?.length" class="history-card-line"><span v-for="(card, index) in item.player_cards" :key="card.position || index" class="history-card" :class="isRedSuit(card.suit) ? 'red-suit' : 'black-suit'">{{ card.rank }}{{ suits[card.suit]?.[0] || '' }}</span></div><span v-else class="prediction-none">—</span></td>
@@ -225,7 +349,7 @@ onBeforeUnmount(() => clearInterval(timer))
         </table>
       </div>
     </section>
-    <section class="events"><div class="section-title"><h2>События</h2><button class="secondary" :disabled="busy" @click="clearLogs">Очистить логи</button></div><p v-if="!state.events.length">Событий пока нет.</p><ol v-else><li v-for="event in state.events" :key="event.at"><time>{{ new Date(event.at).toLocaleTimeString('ru-RU') }}</time><b>{{ label('level', event.level) }}</b> {{ event.message }}</li></ol></section>
+    <section class="events" id="events"><div class="section-title"><h2>События</h2><button class="secondary" :disabled="busy" @click="clearLogs">Очистить логи</button></div><p v-if="!state.events.length">Событий пока нет.</p><ol v-else><li v-for="event in state.events" :key="event.at"><time>{{ new Date(event.at).toLocaleTimeString('ru-RU') }}</time><b>{{ label('level', event.level) }}</b> {{ event.message }}</li></ol></section>
   </main>
 </template>
 
@@ -295,4 +419,33 @@ onBeforeUnmount(() => clearInterval(timer))
 .prediction-pending { color: #d8e1ee; background: #29364b; }
 .prediction-unknown,.prediction-skipped { color: #aeb8c8; background: #303846; }
 .prediction-none { color: #8795a9; }
+.forecast-pair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:16px 0; }
+.forecast-tile { border:1px solid #355072; background:linear-gradient(145deg,#15283d,#101b2d); border-radius:14px; padding:16px; min-width:0; }
+.forecast-tile-head { display:flex; align-items:center; flex-wrap:wrap; justify-content:space-between; gap:8px; color:#aebed4; font-size:.83rem; }
+.forecast-round { font-weight:800; font-size:1.2rem; color:#e8f2ff; }
+.forecast-suit { display:flex; align-items:center; gap:12px; font-size:2.7rem; font-weight:800; margin:12px 0 4px; }
+.forecast-suit small { font-size:1rem; font-weight:600; color:#cad9ee; }
+.forecast-unavailable { margin:15px 0; color:#ffd08d; min-height:48px; font-weight:650; }
+.forecast-tile p { font-size:.8rem; color:#94a9c4; margin:4px 0 0; }
+.calculator-panel { align-self:start; position:sticky; top:20px; }
+.calculator-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:16px 0; }
+.field { display:grid; gap:7px; font-size:.84rem; color:#aebed4; font-weight:600; }
+.field input,.field select { color:#edf4ff; min-width:0; width:100%; border:1px solid #365171; border-radius:9px; padding:10px 11px; background:#101b2c; font:inherit; font-size:.98rem; outline-offset:3px; }
+.field input:focus,.field select:focus { border-color:#64d7ff; outline:2px solid #335776; }
+.calculator-fields .field:last-child { grid-column:1/-1; }
+.bankroll-summary { display:grid; gap:6px; border:1px solid #356f81; border-radius:13px; padding:15px; background:#122b3d; margin-bottom:15px; }
+.bankroll-summary span,.bankroll-summary small { color:#aec2d8; font-size:.83rem; }
+.bankroll-summary strong { font-size:clamp(1.5rem,2.5vw,2rem); letter-spacing:-.04em; color:#78ebc9; }
+.calculator-meta { display:flex; justify-content:space-between; gap:8px; margin:12px 0; color:#bed0e2; font-size:.85rem; }
+.calculator-meta strong { color:#edf4ff; }
+.calculator-warning { padding:10px 12px; border-radius:9px; color:#ffd08d; background:#3d2b20; font-size:.86rem; }
+.calculator-table-scroll { max-height:440px; }
+.calculator-table { min-width:420px; }
+.calculator-table th,.calculator-table td { padding:9px; font-size:.8rem; white-space:nowrap; }
+.history-panel { min-width:0; }
+.history-full-scroll { max-height:78vh; min-height:340px; }
+.history-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.history-search { max-width:450px; margin:14px 0; }
+.standalone-label { font-size:.72rem; font-weight:700; color:#86d7f2; background:#203a51; padding:6px 9px; border-radius:30px; }
+@media(max-width:760px) {.forecast-pair,.calculator-fields { grid-template-columns:1fr; } .calculator-fields .field:last-child { grid-column:auto; } .calculator-panel { position:static; } }
 </style>
