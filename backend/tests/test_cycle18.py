@@ -768,6 +768,7 @@ def test_strategy_can_only_change_between_sessions(tmp_path):
     from app.cycle18 import STRATEGY_VOTE
     import pytest
     path = tmp_path / "choose.sqlite3"
+    ObservationStore(path)
     engine = Cycle18Engine(path)
     with pytest.raises(ValueError):
         engine.save_strategy("unknown")
