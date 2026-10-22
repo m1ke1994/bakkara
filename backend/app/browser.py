@@ -36,6 +36,46 @@ log = logging.getLogger(__name__)
 LEGACY_NEXT_GAME_MODE = False
 
 
+def prefetched_round_urls(games: list[Game]) -> dict[int, Game]:
+    """Cache only unambiguous, already discovered real round URLs.
+
+    Do not guess URL paths or round IDs, and do not use a cached hand
+    if two list entries claim the same physical round number.
+    """
+    result: dict[int, Game] = {}
+    duplicates: set[int] = set()
+    for game in games:
+        value = str(game.round_number or "")
+        if not value.isdecimal():
+            continue
+        round_no = int(value)
+        if not (1 <= round_no <= 1440) or not game.url or not game.game_id:
+            continue
+        if round_no in result:
+            duplicates.add(round_no)
+        else:
+            result[round_no] = game
+    for round_no in duplicates:
+        result.pop(round_no, None)
+    return result
+
+
+def pop_prefetched_successor(
+    candidates: dict[int, Game], last_round: int | None,
+    unavailable_ids: set[str],
+) -> Game | None:
+    """Only the verified next physical round N+1 may bypass list navigation."""
+    if last_round is None or not (1 <= last_round <= 1440):
+        return None
+    next_no = last_round % 1440 + 1
+    game = candidates.pop(next_no, None)
+    if (game is None or game.game_id in unavailable_ids
+            or game.round_number != str(next_no)
+            or not game.url or not game.game_id):
+        return None
+    return game
+
+
 def scan_timeout_budget(game: Game, base_seconds: float) -> float:
     """Keep the observation window open through prestart and card settlement.
 
@@ -472,6 +512,7 @@ class BrowserService:
         # session's last round as its starting position.
         self._last_selected_round_number = None
         self._known_round_numbers = {}
+        self._prefetched_rounds = {}
         try:
             processed_ids = await asyncio.to_thread(self.store.finished_game_ids)
         except Exception as exc:
@@ -1151,9 +1192,29 @@ class BrowserService:
         await self._scan_selected_game(game, previous_cards, processed_ids, retry_after)
 
     async def _observe_iteration(self, processed_ids: set[str], retry_after: dict[str, float]) -> None:
-        """Open every readable round for passive observation, including UNKNOWN rows."""
+        """Observe the immediate next cached round, else refresh the live list."""
         assert self.page is not None
         loop = asyncio.get_running_loop()
+        # The live list already advertises future rounds with concrete IDs and
+        # URLs. After N is saved, open that known N+1 directly instead of
+        # navigating to the list, waiting for hydration, and opening N+1.
+        # A missing, stale, or ambiguous next round falls back to the list.
+        if not LEGACY_NEXT_GAME_MODE:
+            deferred = {gid for gid, due in retry_after.items() if due > loop.time()}
+            next_game = pop_prefetched_successor(
+                getattr(self, "_prefetched_rounds", {}),
+                getattr(self, "_last_selected_round_number", None),
+                set(processed_ids) | deferred,
+            )
+            if next_game is not None:
+                self.event(
+                    "INFO", f"Быстрый переход к раздаче №{next_game.round_number} "
+                    f"по ранее подтверждённому URL (ID {next_game.game_id}); "
+                    "без повторной загрузки списка."
+                )
+                await self._begin_selected_game(next_game, processed_ids, retry_after,
+                                                selected_from_cache=True)
+                return
         # A queue can become stale while the chosen row starts or finishes.
         # Always rebuild from the live list on every selection pass.
         self._queued_games = []
@@ -1218,6 +1279,9 @@ class BrowserService:
                     fresh_games = []
             if fresh_games:
                 all_games = fresh_games
+        # The cache only contains URLs already obtained from the bookmaker's
+        # current list. It is not a manufactured URL or a synthesized round.
+        self._prefetched_rounds = prefetched_round_urls(all_games)
         # Persist *all* numbered/listed games, not only successfully scanned
         # cards. UNKNOWN remains a real round occupying its N-18 position.
         await asyncio.to_thread(self.store.register_discovered_games, all_games)
@@ -1374,6 +1438,14 @@ class BrowserService:
 
         if origin_source_id and origin_source_id != game.game_id:
             self._set_lifecycle_state(origin_source_id, "NEXT_GAME", f"target_game_id={game.game_id}")
+        await self._begin_selected_game(game, processed_ids, retry_after)
+
+
+    async def _begin_selected_game(
+        self, game: Game, processed_ids: set[str], retry_after: dict[str, float],
+        *, selected_from_cache: bool = False,
+    ) -> None:
+        """Initialize exactly the same final-card scanner for slow/fast paths."""
         self._set_lifecycle_state(game.game_id, "SELECTED", f"dom_position={game.position + 1}")
         existing = await asyncio.to_thread(self.store.get, game.game_id)
         previous_cards = [{**card, "position": card.get("position", index + 1)}
@@ -1392,7 +1464,11 @@ class BrowserService:
         self.state_version = getattr(self, "state_version", 0) + 1
         self.observation_status = "WAITING_FOR_GAME"
         self.observation_diagnostic = f"Выбрана раздача № {game.round_number or 'не указана'} (ID {game.game_id})."
-        self.event("INFO", f"Раздача № {game.round_number or '—'} выбрана после повторной проверки непосредственно перед открытием.")
+        self.event("INFO", (
+            f"Раздача № {game.round_number or '—'} выбрана по сохранённому URL без списка."
+            if selected_from_cache else
+            f"Раздача № {game.round_number or '—'} выбрана после повторной проверки перед открытием."
+        ))
         if not game.round_number:
             self.event("WARNING", f"Номер раздачи не найден для game_id={game.game_id}; ID не используется вместо номера.")
         if game.round_number.isdecimal():
