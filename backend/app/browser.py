@@ -751,17 +751,36 @@ class BrowserService:
                   // <span class="... baccarat-panel__caption">Победа</span>
                   // (or Ничья), not "Игра завершена". Only trust a visible
                   // Baccarat result badge in the SAME frame as Player cards.
-                  const outcomeFlag = [...document.querySelectorAll('.baccarat-panel__caption')]
+                  // The site may display "Победа"/"Ничья" for only one
+                  // render frame, between our Playwright polls. Keep the
+                  // observed terminal caption in THIS page until navigation.
+                  // Never synthesize a result from a timer or card count.
+                  const scanOutcome = () => [...document.querySelectorAll('.baccarat-panel__caption')]
                     .find(node => visible(node)
                       && /^(?:победа|ничья)$/i.test(text(node))) || null;
-                  const finished = Boolean(finishFlag || outcomeFlag);
+                  const latch = window.__bakkaraOutcomeLatch || (
+                    window.__bakkaraOutcomeLatch = {text: '', observer: null});
+                  const outcomeFlag = scanOutcome();
+                  if (outcomeFlag) latch.text = text(outcomeFlag);
+                  if (!latch.observer && document.documentElement) {
+                    const captureResult = () => {
+                      const node = scanOutcome();
+                      if (node) latch.text = text(node);
+                    };
+                    latch.observer = new MutationObserver(captureResult);
+                    latch.observer.observe(document.documentElement, {
+                      childList: true, subtree: true, characterData: true,
+                      attributes: true, attributeFilter: ['class', 'style'],
+                    });
+                  }
+                  const outcomeLabel = (outcomeFlag ? text(outcomeFlag) : latch.text) || '';
+                  const finished = Boolean(finishFlag || outcomeLabel);
                   // An expired match can replace the Baccarat widget with an
                   // unavailable-event screen. Distinguish that from a game
                   // whose cards are still loading.
                   const expiredScreen = !playerSide && /событие\s+завершено/i
                     .test(document.body?.innerText || '');
-                  const finishLabel = finishFlag ? text(finishFlag)
-                    : outcomeFlag ? text(outcomeFlag) : '';
+                  const finishLabel = finishFlag ? text(finishFlag) : outcomeLabel;
                   const relevant = playerSide || finishFlag || outcomeFlag ||
                     [...document.querySelectorAll('.scoreboard-header__match-info, .ui-game-timer__label, .scoreboard-status')].find(visible);
                   return {
@@ -782,7 +801,7 @@ class BrowserService:
                     cards, pending_card_slots: pending, status_texts: statusTexts,
                     round_timer_text: timerLabels[0] || '',
                     finished, finish_flag_text: finishLabel,
-                    baccarat_result_visible: Boolean(outcomeFlag),
+                    baccarat_result_visible: Boolean(outcomeLabel),
                     expired_screen: expiredScreen,
                     fragment: relevant ? (relevant.outerHTML || '').slice(0, 3500) : ''
                   };
