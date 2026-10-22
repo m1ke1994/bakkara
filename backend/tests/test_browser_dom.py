@@ -580,7 +580,9 @@ def test_visible_baccarat_victory_caption_is_terminal_only_for_player_widget():
                 assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
                 await page.locator("#outcome").evaluate("el => el.className='baccarat-panel__caption'")
                 await page.locator(".baccarat-player").evaluate("el => el.remove()")
-                assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is False
+                # Outcome caption is still explicit terminal evidence after
+                # the bookmaker removes the Player widget.
+                assert (await service._inspect_game_dom("Игрок", "Банкир"))["finished"] is True
             finally:
                 await browser.close()
     asyncio.run(run())
