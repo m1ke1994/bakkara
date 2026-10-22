@@ -373,6 +373,7 @@ def list_timer_seconds(value: str | None) -> int | None:
 
 def choose_observation_game(
     games: list[Game], handled_ids: set[str],
+    *, after_round: int | None = None,
 ) -> Game | None:
     """Do not lose the next live hand while recovering stale/finished games.
 
@@ -382,6 +383,29 @@ def choose_observation_game(
     prefer refreshing the list until it is closer to its start.
     """
     readable = [g for g in games if g.game_id and g.url and g.game_id not in handled_ids]
+    if after_round is not None:
+        # A finished #400 must lead to #401 (or the earliest available later
+        # physical round), never back to #399 or stale archive recovery.
+        future = []
+        for game in readable:
+            raw = game.round_number.strip()
+            if not raw.isdecimal() or classify_game(game) == "FINISHED":
+                continue
+            distance = (int(raw) - after_round) % 1440
+            if 0 < distance <= 60:
+                future.append((distance, game))
+        if future:
+            distance, expected = min(future, key=lambda pair: pair[0])
+            timer = list_timer_seconds(expected.time)
+            if (classify_game(expected) == "STARTED"
+                    or timer is None or timer <= 60):
+                return expected
+            # Known next round has not approached kickoff. Do not open a
+            # stale round or historical recovery while waiting.
+            return None
+        # No later physical round has appeared yet. Recheck the list instead
+        # of moving backwards to completed games with stale STARTED badges.
+        return None
     active = [g for g in readable if classify_game(g) == "STARTED"]
     if active:
         return min(active, key=lambda g: g.position)
