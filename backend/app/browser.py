@@ -59,6 +59,32 @@ def scan_timeout_budget(game: Game, base_seconds: float) -> float:
     return float(base_seconds)
 
 
+def final_card_wait_budget(
+    baseline_seconds: float,
+    *,
+    first_card_elapsed: float | None = None,
+    result_elapsed: float | None = None,
+    expired_without_player: bool = False,
+) -> float:
+    """Deadline relative to opening, never shortened by a Baccarat result.
+
+    A result banner means that the *cards should be captured next*, not that
+    the observer may leave an empty Player hand after three seconds. In the
+    real run #485 was abandoned at 18.5 seconds with no Player cards, whereas
+    nearby hands exposed their cards around 60 seconds after opening.
+    """
+    maximum = float(baseline_seconds)
+    if first_card_elapsed is not None:
+        maximum = max(maximum, first_card_elapsed + 45.0)
+    if result_elapsed is not None:
+        maximum = max(maximum, result_elapsed + 30.0)
+    # The site can replace an old event with an unrecoverable generic
+    # "Событие завершено" screen. No actual Baccarat/Player DOM exists there.
+    if expired_without_player and result_elapsed is None and first_card_elapsed is None:
+        maximum = min(maximum, 2.5)
+    return maximum
+
+
 def parse_round_timer(value: str | None) -> int | None:
     """Read a valid, visible MM:SS timer without treating other statuses as time."""
     match = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value or "").strip())
@@ -1712,6 +1738,26 @@ class BrowserService:
                         reread["baccarat_result_visible"] = (
                             result_visible or bool(reread.get("baccarat_result_visible")))
                         reread["result_cards_first_read"] = first_read_cards
+                        # Do not throw away REAL cards in the first DOM
+                        # snapshot if Vue removes them for the result overlay
+                        # between the two frame reads. Keep that atomic
+                        # snapshot; never merge partially revealed ranks from
+                        # different physical card sets.
+                        second_cards = reread.get("cards", [])
+                        if len(first_read_cards) > len(second_cards):
+                            retained = {
+                                "cards": first_read_cards,
+                                "counts": diagnostics.get("counts", {}),
+                                "pending_card_slots": diagnostics.get("pending_card_slots", 0),
+                                "cause": diagnostics.get("cause", ""),
+                                "card_slot_evidence": diagnostics.get("card_slot_evidence", []),
+                            }
+                            reread.update(retained)
+                        reread["result_two_independent_reads"] = (
+                            len(first_read_cards) == 2
+                            and first_read_cards == second_cards
+                            and [card.get("position") for card in first_read_cards] == [1, 2]
+                        )
                         diagnostics = reread
                 finish_seen = in_page_finished or list_finished
                 # A confirmed Baccarat result is an explicit end-of-round
@@ -1728,7 +1774,8 @@ class BrowserService:
                     result_end_announced = True
                     self.event("INFO", f"Раздача № {game.round_number or game.game_id}: "
                                f"обнаружено «{diagnostics.get('finish_flag_text') or 'Победа'}» — "
-                               "перепроверяем карты Игрока и переходим к следующей игре.")
+                               "ожидаем и перепроверяем окончательные карты Игрока; "
+                               "к следующей игре перейдём только после проверки.")
                 timer_text = diagnostics.get("round_timer_text", "")
                 timer_seconds = parse_round_timer(timer_text)
                 if timer_seconds is not None:
@@ -1786,6 +1833,10 @@ class BrowserService:
                     last_two_signature = signature
                 elif len(observed_cards) == 3:
                     stable_two_reads = 0
+                if diagnostics.get("result_two_independent_reads") and stable_two_reads < 2:
+                    # The main DOM pass and the independent final reread
+                    # both showed the identical real cards.
+                    stable_two_reads = 2
                 # Two separate DOM snapshots of exactly the same actual
                 # Player cards are required if the end banner outlives the
                 # widget: one isolated screenshot isn't a final hand.
@@ -1967,22 +2018,25 @@ class BrowserService:
                 # observer. Record the incomplete attempt and continue to the
                 # next readable round; this game remains recoverable on a later
                 # list pass and does not contribute WIN/LOSE or warm-up progress.
-                max_wait = (max(3.0, settings.finished_recovery_timeout_seconds)
-                            if list_finished else max(5.0, scan_budget))
-                if first_card_at and not list_finished:
-                    # Never time out an already-revealed Player hand while
-                    # the result animation is still pending. In production
-                    # #468's cards appeared at t=38.8s, the scanner gave up
-                    # at t=59.1s, and the official timer still had 4s left.
-                    max_wait = max(max_wait, max(first_card_at.values()) - started_at + 45)
-                if diagnostics.get("expired_screen") and not player_present:
-                    max_wait = min(max_wait, 2.5)
-                if outcome_first_seen_at is not None:
-                    # The explicit result is already on screen: do not spend
-                    # another 45-120s on an unrecoverable incomplete widget
-                    # while the next numbered live game is being dealt.
-                    max_wait = min(
-                        max_wait, max(0, outcome_first_seen_at - started_at) + 3.0)
+                base_wait = (max(3.0, settings.finished_recovery_timeout_seconds)
+                             if list_finished else max(5.0, scan_budget))
+                # "Победа" / "Ничья" triggers a *post-result card capture*,
+                # not an immediate timeout. Never shorten a live pre-start
+                # countdown or discard the hand when DOM hydration is slow.
+                max_wait = final_card_wait_budget(
+                    base_wait,
+                    first_card_elapsed=(
+                        max(first_card_at.values()) - started_at
+                        if first_card_at and not list_finished else None
+                    ),
+                    result_elapsed=(
+                        outcome_first_seen_at - started_at
+                        if outcome_first_seen_at is not None else None
+                    ),
+                    expired_without_player=(
+                        bool(diagnostics.get("expired_screen")) and not player_present
+                    ),
+                )
                 if loop.time() - started_at >= max_wait:
                     detail = (
                         f"Раздача № {game.round_number or game.game_id}: "
