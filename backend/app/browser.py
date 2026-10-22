@@ -1279,9 +1279,6 @@ class BrowserService:
                     fresh_games = []
             if fresh_games:
                 all_games = fresh_games
-        # The cache only contains URLs already obtained from the bookmaker's
-        # current list. It is not a manufactured URL or a synthesized round.
-        self._prefetched_rounds = prefetched_round_urls(all_games)
         # Persist *all* numbered/listed games, not only successfully scanned
         # cards. UNKNOWN remains a real round occupying its N-18 position.
         await asyncio.to_thread(self.store.register_discovered_games, all_games)
@@ -1381,6 +1378,9 @@ class BrowserService:
                     "Целевая игра изменила состояние до открытия; прогнозная цепочка прервана.",
                 )
         self.event("INFO", f"Проверка кандидата завершена за {(loop.time()-choose_started)*1000:.1f} мс.")
+        # Use the most recent LIST snapshot (including the candidate reread)
+        # for future direct hand-offs; never cache a guessed round or URL.
+        self._prefetched_rounds = prefetched_round_urls(all_games)
         recovering_old_game = False
         if game is None and getattr(self, "_last_selected_round_number", None) is None:
             # Older URLs must never block the physical next round after a
@@ -1660,6 +1660,7 @@ class BrowserService:
                             and completed_record.get("finished_confirmed") else None
                         )
                         self.observation_status = "SAVED"
+                        self._last_finalized_at = loop.time()
                         self.observation_diagnostic = (
                             f"Завершение игры подтверждено точным текстом; запись {game.game_id} сохранена в истории."
                             if scan_result == "CARDS_CONFIRMED" and final_reverified
@@ -1792,6 +1793,11 @@ class BrowserService:
                     raise RuntimeError(f"После перехода открыт неожиданный URL: {self.page.url}")
             page_ready_at = loop.time()
             self._set_lifecycle_state(game.game_id, "OBSERVING")
+            last_finalized = getattr(self, "_last_finalized_at", None)
+            if last_finalized is not None:
+                self.event("INFO", f"Переход от предыдущего подтверждённого набора "
+                    f"до открытия раздачи №{game.round_number}: "
+                    f"{(page_ready_at - last_finalized)*1000:.0f} мс.")
             self.event("INFO", f"Страница раздачи № {game.round_number or game.game_id} открыта за {(page_ready_at-navigation_started)*1000:.0f} мс; начинаем опрос DOM без стартовой паузы.")
 
             while True:
