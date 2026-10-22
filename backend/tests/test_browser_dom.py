@@ -970,13 +970,21 @@ def test_dom_mutation_latches_transient_result_between_browser_polls():
     asyncio.run(run())
 
 
-def test_visible_result_without_readable_cards_does_not_hold_next_round_one_minute(tmp_path, monkeypatch):
-    """An incomplete final DOM must be released promptly for the next hand."""
+def test_visible_result_without_readable_cards_exits_after_bounded_card_wait(tmp_path, monkeypatch):
+    """Only real missing cards may cause a deferred incomplete result.
+
+    The production wait is >=30 seconds after the outcome. Compress the
+    watchdog in this isolated test to avoid sleeping 30 real seconds.
+    """
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings,
             card_poll_seconds=0.1, scan_incomplete_timeout_seconds=90,
         ))
+        monkeypatch.setattr(
+            browser_module, "final_card_wait_budget",
+            lambda *_args, **_kwargs: 4.0,
+        )
         service = object.__new__(BrowserService)
         class Page:
             url = "about:blank"
