@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { shouldApplySnapshot } from './stateVersion.js'
 import { calculateLadder } from './stakeCalculator.js'
 
@@ -30,6 +30,24 @@ const initialStake = ref(10)
 const odds = ref(1.90)
 const steps = ref(6)
 const stakeMode = ref('double')
+const savedCalculatorKey = 'bakkara.calculator.settings.v1'
+function restoreCalculatorSettings() {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(savedCalculatorKey) || 'null')
+    if (!raw || typeof raw !== 'object') return
+    if (Number.isFinite(Number(raw.stake)) && Number(raw.stake) > 0) initialStake.value = Number(raw.stake)
+    if (Number.isFinite(Number(raw.odds)) && Number(raw.odds) > 1) odds.value = Number(raw.odds)
+    if (Number.isInteger(Number(raw.steps)) && Number(raw.steps) >= 1 && Number(raw.steps) <= 20) steps.value = Number(raw.steps)
+    if (['double', 'recover'].includes(raw.mode)) stakeMode.value = raw.mode
+  } catch { /* Private browsing and restricted storage must not break the calculator. */ }
+}
+watch([initialStake, odds, steps, stakeMode], () => {
+  try {
+    window.localStorage.setItem(savedCalculatorKey, JSON.stringify({
+      stake: initialStake.value, odds: odds.value, steps: steps.value, mode: stakeMode.value,
+    }))
+  } catch { /* Storage is optional. */ }
+})
 const ladder = computed(() => calculateLadder({
   stake: initialStake.value, odds: odds.value, steps: steps.value, mode: stakeMode.value,
 }))
@@ -151,6 +169,7 @@ async function clearLogs() {
 let timer
 let historyTimer
 onMounted(() => {
+  restoreCalculatorSettings()
   load()
   refreshHistory()
   timer = window.setInterval(load, 500)
