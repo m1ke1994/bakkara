@@ -405,3 +405,66 @@ def test_next_round_scan_skips_archived_recovery_when_401_not_yet_listed(tmp_pat
         assert service.observation_status == "WAITING_FOR_GAME"
         assert service._last_selected_round_number == 400
     asyncio.run(run())
+
+
+def test_next_round_selected_even_if_timer_is_over_one_minute_or_just_finished():
+    from app.observation import choose_observation_game
+    old = Game("r430", f"{TABLE}/430", "00:00", "430", "Завершена",
+               0, finished=True)
+    next_future = Game("r431", f"{TABLE}/431", "01:43", "431",
+                       "UPCOMING", 1, player_score="0", banker_score="0",
+                       is_countdown_to_start=True)
+    later = Game("r432", f"{TABLE}/432", "00:08", "432",
+                 "UPCOMING", 2, player_score="0", banker_score="0",
+                 is_countdown_to_start=True)
+    choose = choose_observation_game
+    assert choose([old, next_future, later], set(), after_round=430).game_id == "r431"
+    next_future.finished = True
+    next_future.status = "Завершена"
+    # Still attempt the immediate successor if the list has JUST marked it
+    # finished: its Player cards may remain briefly readable.
+    assert choose([old, next_future, later], set(), after_round=430).game_id == "r431"
+    assert choose([old, next_future, later], {"r431"}, after_round=430).game_id == "r432"
+
+
+def test_round_number_survives_transient_site_hydration_for_exact_game_id(tmp_path):
+    async def run():
+        store = ObservationStore(tmp_path / "round-cache.sqlite3")
+        r431 = Game("763888699", f"{TABLE}/763888699-player-banker",
+                    "00:10", "431", "", 0)
+        r432 = Game("763888916", f"{TABLE}/763888916-player-banker",
+                    "00:52", "432", "", 1)
+        store.register_discovered_games([r431, r432])
+        store.update_game_list_metadata([r431, r432])
+        service = _service(store, [])
+        class Page:
+            def __init__(self):
+                self.hydrated = True
+            async def evaluate(self, _script):
+                return [
+                    {"absolute_url": g.url, "game_id": g.game_id,
+                     "round_number": int(g.round_number) if self.hydrated else None,
+                     "timer": g.time, "dom_position": i + 1}
+                    for i, g in enumerate((r431, r432))
+                ] + [
+                    {"absolute_url": f"{TABLE}/763889247-player-banker",
+                     "game_id": "763889247", "round_number": None,
+                     "dom_position": 3}
+                ]
+        page = Page()
+        service.page = page
+        first = await service._read_game_list_snapshot()
+        assert [g.round_number for g in first] == ["431", "432", ""]
+        page.hydrated = False
+        second = await service._read_game_list_snapshot()
+        assert [g.round_number for g in second] == ["431", "432", ""]
+        assert "идентичному game_id" in second[1].round_number_diagnostic
+        # A different game ID never inherits a neighbouring game's number.
+        assert second[2].round_number == ""
+        # Memory may be lost during restart; the physical number survives
+        # by matching the original ID in SQLite.
+        another = _service(store, [])
+        another.page = page
+        assert [g.round_number for g in await another._read_game_list_snapshot()] == [
+            "431", "432", ""]
+    asyncio.run(run())

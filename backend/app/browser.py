@@ -434,6 +434,7 @@ class BrowserService:
         # A new scan is a new physical sequence; never reuse the preceding
         # session's last round as its starting position.
         self._last_selected_round_number = None
+        self._known_round_numbers = {}
         try:
             processed_ids = await asyncio.to_thread(self.store.finished_game_ids)
         except Exception as exc:
@@ -642,7 +643,29 @@ class BrowserService:
                 if previous is not None:
                     game.position = previous.position
                 unique[game.game_id] = game
-        return infer_upcoming_games(sorted(unique.values(), key=lambda game: game.position))
+        games = sorted(unique.values(), key=lambda game: game.position)
+        # Some list re-renders strip every .additional-info round number.
+        # Retain actual, previously observed numbers for the very same ID.
+        # NEVER infer round N from the bookmaker's numeric game_id.
+        remembered = getattr(self, "_known_round_numbers", None)
+        if remembered is None:
+            remembered = self._known_round_numbers = {}
+        missing = [game.game_id for game in games if not game.round_number]
+        saved = {}
+        if missing and getattr(self, "store", None) is not None:
+            saved = await asyncio.to_thread(self.store.known_rounds_for_ids, missing)
+        for game in games:
+            if game.round_number:
+                remembered[game.game_id] = game.round_number
+            else:
+                actual_number = remembered.get(game.game_id) or saved.get(game.game_id)
+                if actual_number:
+                    game.round_number = actual_number
+                    remembered[game.game_id] = actual_number
+                    game.round_number_diagnostic += (
+                        f" Восстановлен ранее прочитанный номер #{actual_number}"
+                        f" по идентичному game_id={game.game_id}.")
+        return infer_upcoming_games(games)
 
     @staticmethod
     def _log_game_list_snapshot(games: list[Game]) -> None:
@@ -728,17 +751,36 @@ class BrowserService:
                   // <span class="... baccarat-panel__caption">Победа</span>
                   // (or Ничья), not "Игра завершена". Only trust a visible
                   // Baccarat result badge in the SAME frame as Player cards.
-                  const outcomeFlag = [...document.querySelectorAll('.baccarat-panel__caption')]
+                  // The site may display "Победа"/"Ничья" for only one
+                  // render frame, between our Playwright polls. Keep the
+                  // observed terminal caption in THIS page until navigation.
+                  // Never synthesize a result from a timer or card count.
+                  const scanOutcome = () => [...document.querySelectorAll('.baccarat-panel__caption')]
                     .find(node => visible(node)
                       && /^(?:победа|ничья)$/i.test(text(node))) || null;
-                  const finished = Boolean(finishFlag || outcomeFlag);
+                  const latch = window.__bakkaraOutcomeLatch || (
+                    window.__bakkaraOutcomeLatch = {text: '', observer: null});
+                  const outcomeFlag = scanOutcome();
+                  if (outcomeFlag) latch.text = text(outcomeFlag);
+                  if (!latch.observer && document.documentElement) {
+                    const captureResult = () => {
+                      const node = scanOutcome();
+                      if (node) latch.text = text(node);
+                    };
+                    latch.observer = new MutationObserver(captureResult);
+                    latch.observer.observe(document.documentElement, {
+                      childList: true, subtree: true, characterData: true,
+                      attributes: true, attributeFilter: ['class', 'style'],
+                    });
+                  }
+                  const outcomeLabel = (outcomeFlag ? text(outcomeFlag) : latch.text) || '';
+                  const finished = Boolean(finishFlag || outcomeLabel);
                   // An expired match can replace the Baccarat widget with an
                   // unavailable-event screen. Distinguish that from a game
                   // whose cards are still loading.
                   const expiredScreen = !playerSide && /событие\s+завершено/i
                     .test(document.body?.innerText || '');
-                  const finishLabel = finishFlag ? text(finishFlag)
-                    : outcomeFlag ? text(outcomeFlag) : '';
+                  const finishLabel = finishFlag ? text(finishFlag) : outcomeLabel;
                   const relevant = playerSide || finishFlag || outcomeFlag ||
                     [...document.querySelectorAll('.scoreboard-header__match-info, .ui-game-timer__label, .scoreboard-status')].find(visible);
                   return {
@@ -759,7 +801,7 @@ class BrowserService:
                     cards, pending_card_slots: pending, status_texts: statusTexts,
                     round_timer_text: timerLabels[0] || '',
                     finished, finish_flag_text: finishLabel,
-                    baccarat_result_visible: Boolean(outcomeFlag),
+                    baccarat_result_visible: Boolean(outcomeLabel),
                     expired_screen: expiredScreen,
                     fragment: relevant ? (relevant.outerHTML || '').slice(0, 3500) : ''
                   };
@@ -1882,6 +1924,12 @@ class BrowserService:
                     max_wait = max(max_wait, max(first_card_at.values()) - started_at + 20)
                 if diagnostics.get("expired_screen") and not player_present:
                     max_wait = min(max_wait, 2.5)
+                if outcome_first_seen_at is not None:
+                    # The explicit result is already on screen: do not spend
+                    # another 45-120s on an unrecoverable incomplete widget
+                    # while the next numbered live game is being dealt.
+                    max_wait = min(
+                        max_wait, max(0, outcome_first_seen_at - started_at) + 3.0)
                 if loop.time() - started_at >= max_wait:
                     detail = (
                         f"Раздача № {game.round_number or game.game_id}: "
