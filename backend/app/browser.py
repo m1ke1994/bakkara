@@ -45,7 +45,18 @@ def scan_timeout_budget(game: Game, base_seconds: float) -> float:
     if game.finished or is_finished_status(game.status) or is_finished_status(game.status_text):
         return float(base_seconds)
     delay = list_timer_seconds(game.time)
-    return max(float(base_seconds), float(min((delay or 0) + 40, 120)))
+    if delay is not None:
+        # The site countdown is to START, not to the result. Leave time
+        # for the following cards, possible third card and end banner.
+        return max(float(base_seconds), float(min(delay + 55, 150)))
+    # During site hydration the same future game often loses its list timer
+    # completely. The old fallback to 45 seconds closed a hand while its
+    # real clock still showed 00:04 (production log #468, 2026-10-22).
+    # Keep explicit small timeouts in isolated tests and old finished games.
+    if not (game.finished or is_finished_status(game.status)
+            or is_finished_status(game.status_text)) and base_seconds >= 30:
+        return max(float(base_seconds), 105.0)
+    return float(base_seconds)
 
 
 def parse_round_timer(value: str | None) -> int | None:
@@ -1705,7 +1716,11 @@ class BrowserService:
                 finish_seen = in_page_finished or list_finished
                 # A confirmed Baccarat result is an explicit end-of-round
                 # signal. It must not wait for the timer to reach zero.
-                if diagnostics.get("baccarat_result_visible") and outcome_first_seen_at is None:
+                if in_page_finished and outcome_first_seen_at is None:
+                    # Both a Baccarat result and an explicit "Игра завершена"
+                    # are reliable terminal evidence. Two-card hands with
+                    # a decorative empty third slot must be allowed to
+                    # finalize after a stable reread.
                     outcome_first_seen_at = loop.time()
                 if outcome_first_seen_at is not None:
                     finish_seen = True
@@ -1809,7 +1824,7 @@ class BrowserService:
                         final_boxes == 2 and final_pending == 0
                     )
                     final_result_two = bool(
-                        result_two and final_read.get("baccarat_result_visible")
+                        result_two and (final_read.get("finished") or in_page_finished)
                         and 2 <= final_boxes <= 3
                         and final_pending == final_boxes - 2
                     )
@@ -1955,9 +1970,11 @@ class BrowserService:
                 max_wait = (max(3.0, settings.finished_recovery_timeout_seconds)
                             if list_finished else max(5.0, scan_budget))
                 if first_card_at and not list_finished:
-                    # Once the first cards are exposed, reserve enough time
-                    # for the site's result animation / possible third card.
-                    max_wait = max(max_wait, max(first_card_at.values()) - started_at + 20)
+                    # Never time out an already-revealed Player hand while
+                    # the result animation is still pending. In production
+                    # #468's cards appeared at t=38.8s, the scanner gave up
+                    # at t=59.1s, and the official timer still had 4s left.
+                    max_wait = max(max_wait, max(first_card_at.values()) - started_at + 45)
                 if diagnostics.get("expired_screen") and not player_present:
                     max_wait = min(max_wait, 2.5)
                 if outcome_first_seen_at is not None:
