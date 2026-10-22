@@ -1,4 +1,4 @@
-"""Cycle 18 never borrows old games and waits for 20 new consecutive hands."""
+"""Cycle 18 uses 20 final hands per session, never shifting physical N-18 sources."""
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -85,7 +85,7 @@ def test_observation_restart_clears_warmup_not_saved_observations(tmp_path):
     assert engine.refresh()["warmup_count"] == 1
 
 
-def test_gap_restarts_warmup_and_duplicate_does_not_increment(tmp_path):
+def test_missing_round_does_not_reset_warmup_and_duplicate_does_not_increment(tmp_path):
     path = tmp_path / "observations.sqlite3"
     store, engine = ObservationStore(path), Cycle18Engine(path)
     engine.start_session()
@@ -93,9 +93,10 @@ def test_gap_restarts_warmup_and_duplicate_does_not_increment(tmp_path):
         add_round(store, number)
     assert engine.refresh()["warmup_count"] == 19
     add_round(store, 21)
-    assert engine.refresh()["warmup_count"] == 1
+    assert engine.refresh()["warmup_count"] == 20
+    assert engine.refresh()["ready"] is True
     add_round(store, 21)
-    assert engine.refresh()["warmup_count"] == 1
+    assert engine.refresh()["warmup_count"] == 20
 
 
 def test_incomplete_hands_do_not_count_or_create_false_losses(tmp_path):
@@ -231,7 +232,7 @@ def test_warmup_shows_captured_two_cards_separately_from_final_hands(tmp_path):
     assert confirmed["ready"] is False
 
 
-def test_warmup_count_does_not_reach_twenty_by_skipping_unreadable_round(tmp_path):
+def test_warmup_counts_other_real_completed_rounds_even_when_one_is_unreadable(tmp_path):
     path = tmp_path / "rounds.sqlite3"
     store, engine = ObservationStore(path), Cycle18Engine(path)
     engine.start_session()
@@ -243,12 +244,13 @@ def test_warmup_count_does_not_reach_twenty_by_skipping_unreadable_round(tmp_pat
     ])
     add_round(store, 21)
     result = engine.refresh()
-    assert result["ready"] is False
-    assert result["warmup_count"] == 1
-    assert result["confirmed_warmup_count"] == 1
-    # The missing real round is retained and no forecast is fabricated.
+    assert result["ready"] is True
+    assert result["warmup_count"] == 20
+    assert result["confirmed_warmup_count"] == 20
+    # The missing physical round retains its own slot; it is never
+    # substituted for a genuine source game N-18.
     assert result["missing_hands"][0]["round_number"] == "20"
-    assert result["upcoming"] == []
+    assert result["statistics"]["checked_count"] == 0
 
 
 
@@ -342,7 +344,7 @@ def test_duplicate_rounds_cannot_be_counted_to_complete_warmup(tmp_path):
     assert result["upcoming"] == []
 
 
-def test_missing_after_nineteen_requires_new_continuous_run(tmp_path):
+def test_missing_after_nineteen_keeps_nineteen_completed_hands(tmp_path):
     path = tmp_path / "missing-20.sqlite3"
     store, engine = ObservationStore(path), Cycle18Engine(path)
     engine.start_session()
@@ -352,8 +354,8 @@ def test_missing_after_nineteen_requires_new_continuous_run(tmp_path):
     store.register_discovered_games([missing])
     add_round(store, 21)
     state = engine.refresh()
-    assert state["warmup_count"] == 1
-    assert state["ready"] is False
+    assert state["warmup_count"] == 20
+    assert state["ready"] is True
     assert state["recent"] == []
     store.upsert(missing, [
         {"position": 1, "rank": "9", "suit": "hearts"},
@@ -492,3 +494,70 @@ def test_prelisted_next_round_is_not_mistaken_for_an_already_finalized_hand():
         "final_snapshot_reverified": None,
     }
     assert is_next(previous, future)
+
+
+def test_screenshot_six_final_hands_are_six_of_twenty_despite_number_gaps(tmp_path):
+    """Actual screenshot: saved 359 360 361 365 366 368, not one of twenty."""
+    path = tmp_path / "snapshot-359-368.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    for n in (359, 360, 361, 365, 366, 368):
+        add_round(store, n)
+    for n in (362, 363, 364, 367):
+        store.register_discovered_games([Game(
+            f"missing-{n}", f"https://example.test/baccarat/{n}",
+            "", str(n), "", n
+        )])
+    for n in (369, 370, 371):
+        store.register_discovered_games([Game(
+            f"future-{n}", f"https://example.test/baccarat/{n}",
+            "00:30", str(n), "", n
+        )])
+    state = engine.refresh()
+    assert state["verified_count"] == 6
+    assert state["warmup_count"] == 6
+    assert state["confirmed_warmup_count"] == 6
+    assert state["captured_count"] == 6
+    assert state["ready"] is False
+    assert state["statistics"]["checked_count"] == 0
+    assert state["recent"] == []
+    # Continue collecting later hands without resetting on the gaps.
+    for n in range(369, 383):
+        # Reuse the discovered future row IDs instead of creating duplicates.
+        if n in (369, 370, 371):
+            game = Game(f"future-{n}", f"https://example.test/baccarat/{n}",
+                        "", str(n), "Завершена", n)
+            store.upsert(game, [
+                {"position": 1, "rank": "9", "suit": "hearts"},
+                {"position": 2, "rank": "3", "suit": "clubs"},
+            ], "CONFIRMED", "final", "CARDS_CONFIRMED",
+                finished_confirmed=True, final_snapshot_reverified=True,
+                player_hand_final=True)
+        else:
+            add_round(store, n)
+    ready = engine.refresh()
+    assert ready["warmup_count"] == 20
+    assert ready["ready"] is True
+    assert len(ready["upcoming"]) == 1
+    assert ready["upcoming"][0]["source_round_number"] == 365
+    assert ready["upcoming"][0]["target_round_number"] == 383
+    assert ready["statistics"]["checked_count"] == 0
+
+
+def test_missing_actual_n_minus_18_source_is_never_replaced_by_saved_neighbor(tmp_path):
+    path = tmp_path / "source-absent.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.start_session()
+    # 20 real hands ending at 382, but no physically numbered #365.
+    for n in (359, 360, 361, *range(366, 383)):
+        add_round(store, n)
+    result = engine.refresh()
+    assert result["ready"] is True
+    assert result["warmup_count"] == 20
+    assert result["upcoming"] == []  # #383 needs #365, which is missing.
+    add_round(store, 383)
+    next_result = engine.refresh()
+    assert any(p["target_round_number"] == 384 and
+               p["source_round_number"] == 366 for p in next_result["upcoming"])
+    assert all(p["target_round_number"] != 383 for p in next_result["recent"])
+    assert next_result["statistics"]["checked_count"] == 0
