@@ -15,10 +15,17 @@ from .stake_plan import PlanConflict, StakePlan, StakePlanStore
 
 cycle18_engine = Cycle18Engine(settings.observation_db)
 stake_plan_store = StakePlanStore(settings.observation_db)
+browser_service.cycle_engine = cycle18_engine
+browser_service.live_plan_store = stake_plan_store
+live_bet_store = browser_service.live_bets
 
 
 class StrategySelection(BaseModel):
     strategy: str
+
+
+class ModeSelection(BaseModel):
+    mode: str
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -60,7 +67,20 @@ async def state():
     snapshot = await asyncio.to_thread(browser_service.snapshot)
     snapshot['cycle18'] = await asyncio.to_thread(cycle18_engine.refresh, snapshot.get('observation', {}).get('current'))
     snapshot['strategy'] = await asyncio.to_thread(cycle18_engine.get_strategy)
+    snapshot['live'] = await asyncio.to_thread(live_bet_store.snapshot)
     return snapshot
+
+
+@app.put("/api/mode")
+async def save_mode(selection: ModeSelection):
+    if browser_service.observation_task and not browser_service.observation_task.done():
+        raise HTTPException(status_code=409, detail="Остановите сканирование перед сменой режима")
+    try:
+        await asyncio.to_thread(live_bet_store.mode, selection.mode.upper())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    browser_service.state_version += 1
+    return await state()
 
 
 @app.get("/api/strategy")

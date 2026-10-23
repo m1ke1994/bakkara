@@ -19,8 +19,11 @@ HOOK = r"""() => {
     try {
       if (this.canvas?.matches('canvas.market-grid-canvas__canvas')) {
         const m = this.getTransform();
+        const metrics = this.measureText(String(text));
         log.push({text:String(text), x:m.a*x+m.c*y+m.e,
-          y:m.b*x+m.d*y+m.f, font:this.font, at:Date.now()});
+          y:m.b*x+m.d*y+m.f, width:Math.abs(m.a)*metrics.width,
+          height:Math.abs(m.d)*(metrics.actualBoundingBoxAscent+metrics.actualBoundingBoxDescent),
+          font:this.font, at:Date.now()});
         if (log.length > 2000) log.splice(0, 500);
       }
     } catch (_) {}
@@ -39,6 +42,8 @@ async def probe_player_suit_market(page: Any) -> dict[str, Any]:
             return {"ok": False, "status": "SEARCH_BUTTON_MISSING", "market": MARKET_QUERY}
         await button.click(timeout=3000)  # Search UI only, never a bet outcome.
     await search.wait_for(state="visible", timeout=3000)
+    await page.evaluate("() => { window.__bakkaraMarketHook.log.length = 0; }")
+    await search.fill("")
     await search.fill(MARKET_QUERY)
     await page.wait_for_timeout(350)
     payload = await page.evaluate(r"""() => {
@@ -51,7 +56,9 @@ async def probe_player_suit_market(page: Any) -> dict[str, Any]:
       const labels = entries.filter(x => suits.includes(x.text.trim().toLowerCase()));
       return {ok:true, status:labels.length ? 'LABELS_OBSERVED' : 'TEXT_NOT_CAPTURED',
         canvas:{width:canvas.width,height:canvas.height,cssWidth:rect.width,
-          cssHeight:rect.height},labels,allText:entries.filter(x=>x.text.trim()).slice(-70),
+          cssHeight:rect.height},labels,
+        marketTitles:entries.filter(x=>x.text.toLowerCase().includes('игрок получит карту')),
+        allText:entries.filter(x=>x.text.trim()).slice(-70),
         captureCount:entries.length,clickReady:false};
     }""")
     payload["market"] = MARKET_QUERY
