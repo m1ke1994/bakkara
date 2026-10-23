@@ -35,6 +35,21 @@ async function changeMode(mode) {
   } catch (exception) { error.value = exception.message || 'Не удалось сменить режим' }
   finally { busy.value = false }
 }
+async function changeCouponTestFilter(enabled) {
+  if (busy.value || observing.value) return
+  busy.value = true
+  try {
+    const response = await fetch(`${api}/api/live/coupon-test-filter`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    const next = await response.json()
+    if (!response.ok) throw new Error(next.detail || 'Не удалось изменить тестовый фильтр')
+    applySnapshot(next)
+    error.value = ''
+  } catch (exception) { error.value = exception.message || 'Не удалось изменить тестовый фильтр' }
+  finally { busy.value = false }
+}
 async function probeCanvasMarket() {
   if (busy.value || observing.value || probingMarket.value) return
   probingMarket.value = true
@@ -274,6 +289,14 @@ onBeforeUnmount(() => {
     <section class="events" id="live-mode-notice" aria-label="Режим работы">
       <div class="section-title"><h2>Режим работы</h2><span class="standalone-label">{{ live.mode }}</span></div>
       <div class="controls"><button type="button" :disabled="busy || observing || live.mode === 'DEMO'" @click="changeMode('DEMO')">ДЕМО</button><button type="button" class="secondary" :disabled="busy || observing || live.mode === 'LIVE'" @click="changeMode('LIVE')">LIVE</button></div>
+      <div class="controls">
+        <label class="diagnostic">
+          <input type="checkbox" :checked="Boolean(live.coupon_test_filter)"
+            :disabled="busy || observing" @change="changeCouponTestFilter($event.target.checked)" />
+          Тест LIVE-купона: сначала коэффициент масти, затем сумма и «Сделать ставку»
+        </label>
+      </div>
+      <p v-if="live.coupon_test_filter" class="diagnostic">Тестовый фильтр включён. Для отправки используется текущий виртуальный RUB-режим БК. Если включена ставка в 1 клик, бот сначала отключает её, затем открывает обычный купон и проверяет введённую сумму.</p>
       <p v-if="live.mode === 'LIVE'" class="diagnostic">Раздача №{{ live.attempt?.round_number || '—' }} · {{ strategyLabel }} · Масть: {{ suits[live.attempt?.suit]?.[1] || '—' }} · Шаг: {{ live.step }} · Сумма: {{ live.attempt?.amount || '—' }} RUB · Купон: {{ live.attempt?.status || 'ожидание' }} · Принятие: {{ live.attempt?.status || '—' }} · Итог: {{ live.attempt?.result || '—' }}</p>
       <div class="controls">
         <button class="secondary" :disabled="busy || !running || observing || probingMarket" @click="probeCanvasMarket">
