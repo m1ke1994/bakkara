@@ -23,7 +23,7 @@ class Settings:
         if item.strip()
     )
     profile_dir: Path = ROOT / "browser_profile"
-    observation_db: Path = ROOT / "observations.sqlite3"
+    observation_db: Path = Path(os.getenv("OBSERVATION_DB", str(ROOT / "observations.sqlite3")))
     game_list_url: str = os.getenv("GAME_LIST_URL", os.getenv("TARGET_URL", ""))
     observation_poll_seconds: float = float(os.getenv("OBSERVATION_POLL_SECONDS", "1"))
     card_poll_seconds: float = float(os.getenv("CARD_POLL_SECONDS", "0.15"))

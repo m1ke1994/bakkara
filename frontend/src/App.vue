@@ -229,6 +229,10 @@ onBeforeUnmount(() => {
         <a href="#events">События</a>
       </nav>
     </header>
+    <section class="events" aria-label="Текущий режим работы">
+      <div class="section-title"><h2>Режим: ДЕМО</h2><span class="standalone-label">Только наблюдение</span></div>
+      <p class="diagnostic">Калькулятор и наблюдение работают без денежных действий. Отправка реальных ставок в этой версии отсутствует.</p>
+    </section>
     <section class="cards">
       <article><span>Сервер</span><strong :class="badge(state.backend)">{{ label('backend', state.backend) }}</strong></article>
       <article><span>Браузер</span><strong :class="badge(state.browser)">{{ label('browser', state.browser) }}</strong></article>
@@ -254,7 +258,7 @@ onBeforeUnmount(() => {
     <StakePlanner />
     <section class="events" id="live-mode-notice" aria-label="Режим работы">
       <div class="section-title"><h2>Режим работы</h2><span class="standalone-label">ДЕМО</span></div>
-      <div class="controls"><button type="button" disabled>ДЕМО — активный режим</button><button type="button" disabled class="secondary">LIVE — требуется калибровка Canvas и купона</button></div>
+      <div class="controls"><button type="button" disabled>ДЕМО — активный режим</button><button type="button" disabled class="secondary">LIVE — не реализован</button></div>
       <div class="controls">
         <button class="secondary" :disabled="busy || !running || observing || probingMarket" @click="probeCanvasMarket">
           {{ probingMarket ? 'Проверяем Canvas…' : 'Проверить рынок «Игрок получит карту»' }}
@@ -266,7 +270,7 @@ onBeforeUnmount(() => {
         <p v-for="(entry,index) in marketProbe.labels || []" :key="index">{{ entry.text }}: x={{ Math.round(entry.x) }}, y={{ Math.round(entry.y) }} (Canvas-пиксели; пока не подтверждённая область клика)</p>
         <p v-if="!marketProbe.labels?.length">Текст мог быть нарисован изображением или до установки обработчика. Координаты автоматически не угадываются.</p>
       </div>
-      <p class="diagnostic">LIVE-подтверждение не включено: однокликовый купон может отправить реальные деньги. Сначала проверяем координаты, сумму и ответ букмекерского сайта.</p>
+      <p class="diagnostic">Диагностика читает рынок. Выбор исхода, подготовка купона и отправка реальных ставок не реализованы.</p>
     </section>
     <section class="events observation" id="observation">
       <div class="section-title"><h2>Текущее наблюдение</h2><strong :class="badge(state.observation?.status)">{{ label('observation', state.observation?.status) }}</strong></div>
