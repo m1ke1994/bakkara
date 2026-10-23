@@ -17,7 +17,7 @@ test('correct signed profit and risk',()=>{
  const result=describeStakes([10,20,40,80,160,320],1.9)
  assert.equal(result.totalBankroll,630)
  assert.equal(result.rows[5].netIfWin,-22)
- assert.deepEqual(result.negativeSteps,[4,5,6])
+ assert.deepEqual(result.negativeSteps,[5,6])
 })
 test('reject out-of-range values',()=>{
  assert.equal(generateStakes(0,2,6),null)
