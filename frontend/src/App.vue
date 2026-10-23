@@ -316,7 +316,7 @@ onBeforeUnmount(() => {
           <input type="checkbox" :checked="Boolean(live.warmup_test)"
             :disabled="busy || observing"
             @change="setFirstRoundTest($event.target.checked, live.test_suit || 'hearts')" />
-          Тест с первой раздачи — без ожидания 18/40 игр
+          Тест с первой раздачи — без прогрева стратегий
         </label>
         <label class="diagnostic">Тестовая масть:
           <select :value="live.test_suit || 'hearts'" :disabled="busy || observing"

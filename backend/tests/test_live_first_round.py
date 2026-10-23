@@ -93,7 +93,7 @@ def test_first_game_bypasses_warmup_and_uses_quick_coupon(tmp_path, monkeypatch)
     assert calls == [("clubs", Decimal("15"))]
     assert attempt["signal_source"] == "MANUAL_TEST"
     assert attempt["status"] == "ACCEPTED"
-    assert any("ожидание 18/40 игр отключено" in msg for _, msg in events)
+    assert any("ожидание подготовки 20/40 рук отключено" in msg for _, msg in events)
     assert not store.reserve("game-1", "601", "clubs", Decimal("15"), "MANUAL_TEST")
 
     fake.store = SimpleNamespace(get=lambda _id: final_hand(suits=("hearts", "diamonds")))

@@ -379,7 +379,7 @@ class BrowserService:
             suit = config["test_suit"]
             signal_source = "MANUAL_TEST"
             self.event("INFO", f"ТЕСТ LIVE №{game.round_number}: "
-                       f"выбрана вручную масть {suit}; ожидание 18/40 игр отключено.")
+                       f"выбрана вручную масть {suit}; ожидание подготовки 20/40 рук отключено.")
         else:
             cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
             forecast = next((p for p in cycle["live_preview"]

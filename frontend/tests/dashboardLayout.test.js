@@ -51,7 +51,7 @@ test('Compact NewBot-style editable calculator replaces the full-page table', ()
 })
 
 test('Early first-round LIVE test is explicit and labelled as manual, not a prediction', () => {
-  assert.ok(template.includes('Тест с первой раздачи — без ожидания 18/40 игр'))
+  assert.ok(template.includes('Тест с первой раздачи — без прогрева стратегий'))
   assert.ok(template.includes('setFirstRoundTest('))
   for (const suit of ['hearts', 'diamonds', 'clubs', 'spades']) {
     assert.ok(template.includes('value="' + suit + '"'))
