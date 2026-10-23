@@ -74,7 +74,7 @@ def test_unknown_status_does_not_skip_manual_live_test(tmp_path, monkeypatch):
         def refresh(self, _):
             raise AssertionError("Manual test must bypass cycle prediction and warmup")
 
-    async def inspect(_self, _player, _banker):
+    async def inspect(_player, _banker):
         return diagnostics()
 
     async def fake_coupon(_page, suit, stake, mark, progress):
