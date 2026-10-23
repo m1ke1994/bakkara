@@ -31,6 +31,11 @@ class ModeSelection(BaseModel):
 class CouponTestFilterSelection(BaseModel):
     enabled: bool
 
+
+class FirstRoundTestSelection(BaseModel):
+    enabled: bool
+    suit: str
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
@@ -92,6 +97,18 @@ async def set_coupon_test_filter(selection: CouponTestFilterSelection):
     if browser_service.observation_task and not browser_service.observation_task.done():
         raise HTTPException(status_code=409, detail="Остановите сканирование для смены тестового фильтра")
     await asyncio.to_thread(live_bet_store.set_coupon_test_filter, selection.enabled)
+    browser_service.state_version += 1
+    return await state()
+
+
+@app.put("/api/live/first-round-test")
+async def set_first_round_test(selection: FirstRoundTestSelection):
+    if browser_service.observation_task and not browser_service.observation_task.done():
+        raise HTTPException(status_code=409, detail="Остановите сканирование для смены тестового фильтра")
+    try:
+        await asyncio.to_thread(live_bet_store.set_warmup_test, selection.enabled, selection.suit)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     browser_service.state_version += 1
     return await state()
 
