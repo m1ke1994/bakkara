@@ -12,7 +12,7 @@ class LiveBets:
         with sqlite3.connect(path) as db:
             db.execute("""CREATE TABLE IF NOT EXISTS live_control (
                 id INTEGER PRIMARY KEY CHECK(id=1), mode TEXT NOT NULL, step INTEGER NOT NULL)""")
-            db.execute("INSERT OR IGNORE INTO live_control VALUES(1,'DEMO',1)")
+            db.execute("INSERT OR IGNORE INTO live_control(id,mode,step) VALUES(1,'DEMO',1)")
             columns = {row[1] for row in db.execute("PRAGMA table_info(live_control)")}
             if "coupon_test_filter" not in columns:
                 db.execute("ALTER TABLE live_control ADD COLUMN coupon_test_filter INTEGER NOT NULL DEFAULT 0")
