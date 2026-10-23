@@ -33,3 +33,17 @@ test('Forecast outcomes remain visible without old virtual stake table', () => {
   assert.ok(!template.includes('История виртуальных результатов'))
   assert.ok(template.includes('WIN / LOSE'))
 })
+
+test('Compact NewBot-style editable calculator replaces the full-page table', () => {
+  const component=readFileSync(new URL('../src/StakePlanner.vue',import.meta.url),'utf8')
+  assert.ok(component.includes('Первоначальная ставка'))
+  assert.ok(component.includes('Множитель следующей ставки'))
+  assert.ok(component.includes('Количество шагов'))
+  assert.ok(component.includes('Рассчитать ряд'))
+  assert.ok(component.includes('Применить настройки'))
+  assert.ok(component.includes('v-for="(v,index) in row"'))
+  assert.ok(component.includes('generateStakes'))
+  assert.ok(component.includes('localStorage.setItem'))
+  assert.ok(!component.includes('<table'))
+  assert.ok(!template.includes('История виртуальных результатов'))
+})
