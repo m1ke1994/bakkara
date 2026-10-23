@@ -63,6 +63,11 @@ async def close_result_dialog(page) -> bool:
         dialogs = page.get_by_role("dialog")
         visible = [dialogs.nth(i) for i in range(await dialogs.count())
                    if await dialogs.nth(i).is_visible()]
+        if not visible:
+            # Baccarat may render Vue modal-container without a dialog role.
+            containers = page.locator(".modal-container")
+            visible = [containers.nth(i) for i in range(await containers.count())
+                       if await containers.nth(i).is_visible()]
         if len(visible) != 1:
             return False
         for title in ("Закрыть", "Продолжить"):
