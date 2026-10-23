@@ -232,3 +232,53 @@ def test_coupon_test_filter_migrates_existing_database(tmp_path):
     store.set_coupon_test_filter(True)
     assert LiveBets(path).snapshot()["coupon_test_filter"] == 1
     assert store.snapshot()["step"] == 3
+
+
+def test_vue_modal_container_can_be_closed_without_dialog_role():
+    from app.live_executor import close_result_dialog
+
+    class Control:
+        def __init__(self):
+            self.clicks = 0
+
+        async def count(self):
+            return 1
+
+        def nth(self, _):
+            return self
+
+        async def is_visible(self):
+            return True
+
+        async def is_disabled(self):
+            return False
+
+        async def click(self, **_):
+            self.clicks += 1
+
+    class Panel(Control):
+        def __init__(self):
+            super().__init__()
+            self.button = Control()
+
+        def get_by_role(self, _kind, name=None, exact=None):
+            return self.button
+
+    class Empty:
+        async def count(self):
+            return 0
+
+    class ModalPage:
+        def __init__(self):
+            self.panel = Panel()
+
+        def get_by_role(self, _kind):
+            return Empty()
+
+        def locator(self, selector):
+            assert selector == ".modal-container"
+            return self.panel
+
+    page = ModalPage()
+    assert asyncio.run(close_result_dialog(page))
+    assert page.panel.button.clicks == 1
