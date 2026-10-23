@@ -100,7 +100,10 @@ async def probe_player_suit_market(page: Any) -> dict[str, Any]:
     for query in (MARKET_QUERY, ALT_MARKET_QUERY):
         await page.evaluate("() => { if (window.__bakkaraMarketHook) window.__bakkaraMarketHook.log.length = 0; }")
         await search.fill("")
-        await search.fill(MARKET_QUERY if query == MARKET_QUERY else query)
+        if query == MARKET_QUERY:
+            await search.fill(MARKET_QUERY)
+        else:
+            await search.fill(query)
         for _ in range(14):
             result = await page.evaluate(SNAPSHOT)
             if not result.get("ok"):
