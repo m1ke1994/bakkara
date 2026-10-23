@@ -35,6 +35,36 @@ async function changeMode(mode) {
   } catch (exception) { error.value = exception.message || 'Не удалось сменить режим' }
   finally { busy.value = false }
 }
+async function changeCouponTestFilter(enabled) {
+  if (busy.value || observing.value) return
+  busy.value = true
+  try {
+    const response = await fetch(`${api}/api/live/coupon-test-filter`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    const next = await response.json()
+    if (!response.ok) throw new Error(next.detail || 'Не удалось изменить тестовый фильтр')
+    applySnapshot(next)
+    error.value = ''
+  } catch (exception) { error.value = exception.message || 'Не удалось изменить тестовый фильтр' }
+  finally { busy.value = false }
+}
+async function setFirstRoundTest(enabled, suit) {
+  if (busy.value || observing.value) return
+  busy.value = true
+  try {
+    const response = await fetch(`${api}/api/live/first-round-test`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled, suit}),
+    })
+    const next = await response.json()
+    if (!response.ok) throw new Error(next.detail || 'Не удалось изменить тестовый режим')
+    applySnapshot(next)
+    error.value = ''
+  } catch (exception) { error.value = exception.message || 'Ошибка тестового режима' }
+  finally { busy.value = false }
+}
 async function probeCanvasMarket() {
   if (busy.value || observing.value || probingMarket.value) return
   probingMarket.value = true
@@ -266,7 +296,7 @@ onBeforeUnmount(() => {
         <span class="diagnostic">{{ observing ? 'Сканирование активно: для смены фильтра сначала остановите его.' : (strategyDirty ? 'Выбор изменён — нажмите «Сохранить стратегию».' : 'Настройка хранится в базе данных бэкенда.') }}</span>
       </div>
       <p v-if="strategyNotice" class="strategy-notice">{{ strategyNotice }}</p>
-      <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. Прогнозы и WIN/LOSE виртуальные; бот не размещает ставки.</p>
+      <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. ДЕМО только наблюдает. В LIVE бот работает с купоном БК; тест с первой раздачи не является прогнозом стратегии.</p>
     </section>
     <section class="controls"><button :disabled="busy || running" @click="command('/api/browser/start')">Запустить браузер</button><button class="secondary" :disabled="busy || !running" @click="command('/api/browser/stop')">Остановить браузер</button></section>
     <p class="diagnostic">{{ state.diagnostic }}</p><p v-if="error" class="error">{{ error }}</p>
@@ -274,7 +304,33 @@ onBeforeUnmount(() => {
     <section class="events" id="live-mode-notice" aria-label="Режим работы">
       <div class="section-title"><h2>Режим работы</h2><span class="standalone-label">{{ live.mode }}</span></div>
       <div class="controls"><button type="button" :disabled="busy || observing || live.mode === 'DEMO'" @click="changeMode('DEMO')">ДЕМО</button><button type="button" class="secondary" :disabled="busy || observing || live.mode === 'LIVE'" @click="changeMode('LIVE')">LIVE</button></div>
-      <p v-if="live.mode === 'LIVE'" class="diagnostic">Раздача №{{ live.attempt?.round_number || '—' }} · {{ strategyLabel }} · Масть: {{ suits[live.attempt?.suit]?.[1] || '—' }} · Шаг: {{ live.step }} · Сумма: {{ live.attempt?.amount || '—' }} RUB · Купон: {{ live.attempt?.status || 'ожидание' }} · Принятие: {{ live.attempt?.status || '—' }} · Итог: {{ live.attempt?.result || '—' }}</p>
+      <div class="controls">
+        <label class="diagnostic">
+          <input type="checkbox" :checked="Boolean(live.coupon_test_filter)"
+            :disabled="busy || observing" @change="changeCouponTestFilter($event.target.checked)" />
+          Тест LIVE-купона: сначала коэффициент масти, затем сумма и «Сделать ставку»
+        </label>
+      </div>
+      <div class="controls">
+        <label class="diagnostic">
+          <input type="checkbox" :checked="Boolean(live.warmup_test)"
+            :disabled="busy || observing"
+            @change="setFirstRoundTest($event.target.checked, live.test_suit || 'hearts')" />
+          Тест с первой раздачи — без прогрева стратегий
+        </label>
+        <label class="diagnostic">Тестовая масть:
+          <select :value="live.test_suit || 'hearts'" :disabled="busy || observing"
+            @change="setFirstRoundTest(Boolean(live.warmup_test), $event.target.value)">
+            <option value="hearts">♥ Черви</option>
+            <option value="diamonds">♦ Бубны</option>
+            <option value="clubs">♣ Трефы</option>
+            <option value="spades">♠ Пики</option>
+          </select>
+        </label>
+      </div>
+      <p v-if="live.warmup_test" class="diagnostic">ТЕСТ: ближайшая предстоящая раздача; масть выбрана вручную, а не рассчитана стратегией. В LIVE бот использует обычный купон: коэффициент → сумма шага → «Сделать ставку». Прогнозы N−18 и N−3/10/24/31/40 продолжат подготовку отдельно.</p>
+      <p v-if="live.coupon_test_filter" class="diagnostic">Тестовый фильтр включён. Для отправки используется текущий виртуальный RUB-режим БК. Если включена ставка в 1 клик, бот сначала отключает её, затем открывает обычный купон и проверяет введённую сумму.</p>
+      <p v-if="live.mode === 'LIVE'" class="diagnostic">Раздача №{{ live.attempt?.round_number || '—' }} · {{ live.attempt?.signal_source === 'MANUAL_TEST' ? 'ТЕСТ (масть вручную)' : strategyLabel }} · Масть: {{ suits[live.attempt?.suit]?.[1] || '—' }} · Шаг: {{ live.step }} · Сумма: {{ live.attempt?.amount || '—' }} RUB · Купон: {{ live.attempt?.status || 'ожидание' }} · Принятие: {{ live.attempt?.status || '—' }} · Итог: {{ live.attempt?.result || '—' }}</p>
       <div class="controls">
         <button class="secondary" :disabled="busy || !running || observing || probingMarket" @click="probeCanvasMarket">
           {{ probingMarket ? 'Проверяем Canvas…' : 'Проверить рынок «Игрок получит карту»' }}

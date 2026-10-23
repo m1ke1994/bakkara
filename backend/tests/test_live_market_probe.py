@@ -27,3 +27,11 @@ def test_canvas_probe_waits_for_component_and_installs_before_navigation():
     browser = (Path(__file__).resolve().parents[1]/"app/browser.py").read_text(encoding="utf-8")
     assert "await self.context.add_init_script(script=INIT_SCRIPT)" in browser
     assert "await self._live_before_cards(game)" in browser
+
+def test_canvas_outcome_is_on_numeric_odds_not_label():
+    from app.live_market_probe import SNAPSHOT, HOOK
+    assert "oddsBySuit" in SNAPSHOT
+    assert "Number(e.text.trim().replace" in SNAPSHOT
+    assert "textAlign:this.textAlign" in HOOK
+    from app.live_executor import outcome_box
+    assert outcome_box.__doc__.find("odds") >= 0
