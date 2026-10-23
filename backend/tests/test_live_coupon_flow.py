@@ -191,6 +191,6 @@ def test_unknown_after_click_is_not_retried(mock_probe, monkeypatch):
     statuses = []
     result = asyncio.run(place_one_click(page, "spades", Decimal("22"), lambda: statuses.append("SUBMITTING")))
     assert result == "UNKNOWN"
-    assert page.canvas.clicks == [{"x": 900.0, "y": 136.0}]
+    assert page.canvas.clicks == [{"x": 900.0, "y": 80.0}]
     assert page.dialog.close.clicked == 0
     assert len(statuses) == 1
