@@ -11,8 +11,10 @@ from .browser import browser_service
 from .config import settings
 from .cycle18 import Cycle18Engine
 from .live_market_probe import probe_player_suit_market
+from .stake_plan import PlanConflict, StakePlan, StakePlanStore
 
 cycle18_engine = Cycle18Engine(settings.observation_db)
+stake_plan_store = StakePlanStore(settings.observation_db)
 
 
 class StrategySelection(BaseModel):
@@ -37,6 +39,20 @@ app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], all
 @app.get("/api/health")
 async def health():
     return {"ok": True}
+
+
+@app.get("/api/stake-plan", response_model=StakePlan)
+async def get_stake_plan():
+    return await asyncio.to_thread(stake_plan_store.load)
+
+
+@app.put("/api/stake-plan", response_model=StakePlan)
+async def save_stake_plan(plan: StakePlan):
+    """Save a calculator worksheet, independent of observation and execution."""
+    try:
+        return await asyncio.to_thread(stake_plan_store.save, plan)
+    except PlanConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/state")
