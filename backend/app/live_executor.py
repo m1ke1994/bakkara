@@ -55,23 +55,26 @@ def _amount(value: str) -> Decimal:
 
 
 async def close_result_dialog(page) -> bool:
-    """Close a visible result dialog after a verified site status, never beforehand.
+    """Dismiss exactly one confirmed result dialog, never an unverified coupon.
 
-    NewBot has no Baccarat-specific modal selectors; use accessibility names
-    only when there is exactly one visible dialog and one matching button.
+    Failure to close is nonfatal: acceptance status has already been determined.
     """
-    dialogs = page.get_by_role("dialog")
-    visible = [dialogs.nth(i) for i in range(await dialogs.count())
-               if await dialogs.nth(i).is_visible()]
-    if len(visible) != 1:
+    try:
+        dialogs = page.get_by_role("dialog")
+        visible = [dialogs.nth(i) for i in range(await dialogs.count())
+                   if await dialogs.nth(i).is_visible()]
+        if len(visible) != 1:
+            return False
+        for title in ("Закрыть", "Продолжить"):
+            buttons = visible[0].get_by_role("button", name=title, exact=True)
+            matches = [buttons.nth(i) for i in range(await buttons.count())
+                       if await buttons.nth(i).is_visible()]
+            if len(matches) == 1 and not await matches[0].is_disabled():
+                await matches[0].click(timeout=3000)
+                return True
+    except Exception:
+        # Modal closure is cosmetic and must not turn an accepted wager UNKNOWN.
         return False
-    for title in ("Закрыть", "Продолжить"):
-        buttons = visible[0].get_by_role("button", name=title, exact=True)
-        matches = [buttons.nth(i) for i in range(await buttons.count())
-                   if await buttons.nth(i).is_visible()]
-        if len(matches) == 1 and not await matches[0].is_disabled():
-            await matches[0].click(timeout=3000)
-            return True
     return False
 
 
