@@ -34,7 +34,11 @@ async def place_test_coupon(page, suit: str, amount: Decimal, mark_submitting, r
 
     stage("Поиск: ожидаем рынок «Игрок получит карту»")
     probe = await probe_player_suit_market(page)
-    box = outcome_box(probe, suit)
+    stage(f"Canvas: {probe.get('diagnostic', probe.get('status'))}")
+    try:
+        box = outcome_box(probe, suit)
+    except PlacementError as exc:
+        raise PlacementError(f"{exc}; диагностика: {probe.get('diagnostic', 'неизвестно')}") from exc
     stage(f"Canvas: {suit}; коэффициент {box['odds']}; координаты найдены")
 
     toggle = page.locator(ONE_CLICK).first

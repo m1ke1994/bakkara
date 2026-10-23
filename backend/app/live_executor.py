@@ -17,8 +17,12 @@ class PlacementError(Exception):
 
 def outcome_box(probe: dict, suit: str) -> dict:
     """Map the target to its numeric *odds* cell, not to the suit's label."""
-    if not probe.get("ok") or suit not in SUITS:
-        raise PlacementError("Рынок Canvas не подтверждён")
+    if suit not in SUITS:
+        raise PlacementError(f"Недопустимая масть для LIVE: {suit}")
+    if not probe.get("ok"):
+        raise PlacementError("Рынок Canvas не подтверждён: " +
+                             str(probe.get("diagnostic") or probe.get("status") or
+                                 "отсутствует Canvas после поиска"))
     titles = probe.get("marketTitles") or []
     if not any("игрок получит карту" in str(x.get("text", "")).casefold() or
                "игрок получит следующую масть" in str(x.get("text", "")).casefold()

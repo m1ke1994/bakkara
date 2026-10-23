@@ -48,9 +48,12 @@ INIT_SCRIPT = "(" + HOOK + ")();"
 
 SNAPSHOT = r"""() => {
   const canvas=document.querySelector('canvas.market-grid-canvas__canvas');
-  if(!canvas) return {ok:false,status:'CANVAS_MISSING',clickReady:false};
+  if(!canvas) return {ok:false,status:'CANVAS_MISSING_AFTER_SEARCH',clickReady:false,
+      captureCount:(window.__bakkaraMarketHook?.log||[]).length};
   const rect=canvas.getBoundingClientRect();
-  const entries=(window.__bakkaraMarketHook?.log||[]).filter(e=>Date.now()-e.at<9000);
+  const captureSince=window.__bakkaraMarketHook?.captureSince||0;
+  const entries=(window.__bakkaraMarketHook?.log||[])
+    .filter(e=>e.at>=captureSince&&Date.now()-e.at<12000);
   const suits=['пики','трефы','бубны','черви'];
   const latest=new Map();
   for(const e of entries){
@@ -91,6 +94,31 @@ SNAPSHOT = r"""() => {
 }"""
 
 
+def market_probe_diagnostic(result: dict[str, Any]) -> str:
+    """Why a mapped Canvas is absent (without inventing a bookmaker rejection)."""
+    status = result.get("status") or "NO_STATUS"
+    if not result.get("ok"):
+        return (f"{status}: после поиска рынок не отрисован. "
+                f"Зафиксировано операций Canvas2D: {result.get('captureCount', 0)}")
+    titles = len(result.get("marketTitles") or [])
+    labels = len(result.get("labels") or [])
+    prices = len(result.get("oddsBySuit") or {})
+    count = result.get("captureCount", 0)
+    if not titles:
+        failure = "не найдена надпись заголовка рынка в Canvas"
+    elif labels != 4:
+        failure = "не распознаны все четыре подписи мастей"
+    elif prices != 4:
+        failure = "не найдены четыре однозначных коэффициента напротив мастей"
+    else:
+        return "Рынок и четыре коэффициента Canvas подтверждены"
+    texts = [str(row.get("text", "")).strip()[:28]
+             for row in (result.get("allText") or [])[-12:]]
+    return (f"{failure}; заголовков={titles}, мастей={labels}, "
+            f"коэффициентов={prices}, операций Canvas2D={count}; "
+            f"последний текст={texts}")
+
+
 class MarketProbeError(RuntimeError):
     """Identifies the exact missing UI stage without claiming a rejected wager."""
 
@@ -118,23 +146,39 @@ async def probe_player_suit_market(page: Any) -> dict[str, Any]:
     except PlaywrightTimeoutError as exc:
         raise MarketProbeError("После кнопки поиска поле «Поиск по рынкам» не появилось") from exc
 
+    # Do not fall back to a *different* market name. In production that second
+    # search removed the correct "Игрок получит карту (масть)" Canvas, leading
+    # to CANVAS_MISSING and the unhelpful "Рынок Canvas не подтверждён".
+    await page.evaluate(
+        "() => { if (window.__bakkaraMarketHook) "
+        "window.__bakkaraMarketHook.captureSince = Date.now() - 100; }"
+    )
+    await search.fill("")
+    await search.fill(MARKET_QUERY)
+    try:
+        # Filtering often remounts the market canvas; the old locator can
+        # become detached. Wait for a fresh visible element after the search.
+        await canvas.wait_for(state="visible", timeout=6_000)
+    except PlaywrightTimeoutError as exc:
+        raise MarketProbeError(
+            f"После запроса «{MARKET_QUERY}» Canvas рынка исчез или не появился"
+        ) from exc
+
     result: dict[str, Any] = {}
-    for query in (MARKET_QUERY, ALT_MARKET_QUERY):
-        await page.evaluate("() => { if (window.__bakkaraMarketHook) window.__bakkaraMarketHook.log.length = 0; }")
-        await search.fill("")
-        if query == MARKET_QUERY:
-            await search.fill(MARKET_QUERY)
-        else:
-            await search.fill(query)
-        for _ in range(14):
-            result = await page.evaluate(SNAPSHOT)
-            if not result.get("ok"):
-                break
-            names = {str(x.get("text", "")).strip().casefold() for x in result.get("labels", [])}
-            if all(suit in names for suit in SUIT_NAMES) and result.get("marketTitles") and len(result.get("oddsBySuit", {})) == 4:
-                result["status"] = "ODDS_MAPPED"
-                result["market"] = query
-                return result
-            await asyncio.sleep(0.25)
-    result["market"] = query
+    for _ in range(24):
+        result = await page.evaluate(SNAPSHOT)
+        if not result.get("ok"):
+            # Vue may detach/recreate Canvas in the same search transaction.
+            await asyncio.sleep(0.2)
+            continue
+        names = {str(x.get("text", "")).strip().casefold()
+                 for x in result.get("labels", [])}
+        if (all(suit in names for suit in SUIT_NAMES)
+                and result.get("marketTitles")
+                and len(result.get("oddsBySuit", {})) == 4):
+            result["status"] = "ODDS_MAPPED"
+            break
+        await asyncio.sleep(0.2)
+    result["market"] = MARKET_QUERY
+    result["diagnostic"] = market_probe_diagnostic(result)
     return result
