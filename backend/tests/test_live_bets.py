@@ -35,13 +35,20 @@ def test_unknown_submission_blocks_new_attempt_after_restart(tmp_path):
     assert not restored.settle("game-1", "LOSE", 3)
 
 
-def test_canvas_requires_market_and_four_unique_suits():
-    labels = [{"text": name, "x": 20, "y": 30 + index * 20,
+def test_canvas_click_maps_to_coefficient_not_suit_label():
+    labels = [{"text": name, "x": 20, "y": 40 + index * 30,
                "width": 40, "height": 12} for index, name in
               enumerate(("трефы", "черви", "бубны", "пики"))]
+    odds = {label["text"]: {"x": 880, "y": label["y"], "width": 22,
+                            "height": 12, "amount": 1.9}
+            for label in labels}
     probe = {"ok": True, "marketTitles": [{"text": "Игрок получит карту", "y": 10}],
-             "labels": labels, "canvas": {"width": 951, "height": 850}}
-    assert outcome_box(probe, "clubs")["y"] == 24
+             "labels": labels, "oddsBySuit": odds,
+             "canvas": {"width": 951, "height": 850}}
+    assert outcome_box(probe, "clubs")["x"] == 880
+    assert outcome_box(probe, "clubs")["odds"] == 1.9
+    with pytest.raises(PlacementError):
+        outcome_box({**probe, "oddsBySuit": {}}, "clubs")
     with pytest.raises(PlacementError):
         outcome_box({**probe, "labels": labels[:-1]}, "clubs")
     with pytest.raises(PlacementError):

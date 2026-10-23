@@ -16,33 +16,35 @@ class PlacementError(Exception):
 
 
 def outcome_box(probe: dict, suit: str) -> dict:
-    """Require one visible label of each suit and the exact market title."""
+    """Map the target to its numeric *odds* cell, not to the suit's label."""
     if not probe.get("ok") or suit not in SUITS:
         raise PlacementError("Рынок Canvas не подтверждён")
-    entries = probe.get("marketTitles") or []
-    if not any("игрок получит карту" in str(x.get("text", "")).casefold() for x in entries):
+    titles = probe.get("marketTitles") or []
+    if not any("игрок получит карту" in str(x.get("text", "")).casefold() or
+               "игрок получит следующую масть" in str(x.get("text", "")).casefold()
+               for x in titles):
         raise PlacementError("Название рынка не найдено в Canvas")
     labels = probe.get("labels") or []
-    matched = {}
-    for label in labels:
-        name = str(label.get("text", "")).strip().casefold()
-        if name in SUITS.values():
-            matched.setdefault(name, []).append(label)
-    if set(matched) != set(SUITS.values()) or any(len(group) != 1 for group in matched.values()):
+    groups = {str(x.get("text", "")).strip().casefold(): x for x in labels}
+    if set(groups) != set(SUITS.values()) or len(labels) != 4:
         raise PlacementError("Не удалось однозначно определить четыре масти")
-    box = matched[SUITS[suit]][0]
-    title_y = max(float(entry.get("y") or 0) for entry in entries)
-    if title_y <= 0 or any(float(group[0].get("y") or 0) <= title_y
-                           for group in matched.values()):
-        raise PlacementError("Масти не привязаны к найденному рынку")
+    odds = probe.get("oddsBySuit") or {}
+    if set(odds) != set(SUITS.values()):
+        raise PlacementError("Не установлены координаты четырёх коэффициентов Canvas")
+    entry = odds[SUITS[suit]]
+    label = groups[SUITS[suit]]
     canvas = probe.get("canvas") or {}
     width, height = float(canvas.get("width") or 0), float(canvas.get("height") or 0)
-    x, y = float(box["x"]), float(box["y"])
-    text_width = float(box.get("width") or 0)
-    if not (width > 0 and height > 0 and text_width > 0 and 0 < x < width and 0 < y < height):
-        raise PlacementError("Координаты исхода недостоверны")
-    return {"x": x + text_width / 2, "y": y - max(float(box.get("height") or 0), 10) / 2,
-            "width": width, "height": height}
+    x, y = float(entry["x"]), float(entry["y"])
+    price = float(entry["amount"])
+    if not (width > 0 and height > 0 and 1.01 <= price <= 100 and
+            0 < x < width and 0 < y < height and
+            x > float(label["x"]) + float(label["width"]) and
+            abs(y-float(label["y"])) < 18):
+        raise PlacementError("Координаты коэффициента не подтверждены")
+    if not all(float(t.get("y") or 0) < y for t in titles):
+        raise PlacementError("Коэффициент не привязан к нужному рынку")
+    return {"x": x, "y": y, "width": width, "height": height, "odds": price}
 
 
 def _amount(value: str) -> Decimal:
@@ -50,6 +52,27 @@ def _amount(value: str) -> Decimal:
         return Decimal(value.replace("\u00a0", "").replace(" ", "").replace(",", "."))
     except InvalidOperation as exc:
         raise PlacementError("Сумма в купоне не распознана") from exc
+
+
+async def close_result_dialog(page) -> bool:
+    """Close a visible result dialog after a verified site status, never beforehand.
+
+    NewBot has no Baccarat-specific modal selectors; use accessibility names
+    only when there is exactly one visible dialog and one matching button.
+    """
+    dialogs = page.get_by_role("dialog")
+    visible = [dialogs.nth(i) for i in range(await dialogs.count())
+               if await dialogs.nth(i).is_visible()]
+    if len(visible) != 1:
+        return False
+    for title in ("Закрыть", "Продолжить"):
+        buttons = visible[0].get_by_role("button", name=title, exact=True)
+        matches = [buttons.nth(i) for i in range(await buttons.count())
+                   if await buttons.nth(i).is_visible()]
+        if len(matches) == 1 and not await matches[0].is_disabled():
+            await matches[0].click(timeout=3000)
+            return True
+    return False
 
 
 async def place_one_click(page, suit: str, amount: Decimal, mark_submitting):
@@ -98,8 +121,10 @@ async def place_one_click(page, suit: str, amount: Decimal, mark_submitting):
     for _ in range(16):
         body = (await page.locator("body").inner_text(timeout=2000)).casefold()
         if any(body.count(p) > before.count(p) for p in accepted_phrases):
+            await close_result_dialog(page)
             return "ACCEPTED"
         if any(body.count(p) > before.count(p) for p in rejected_phrases):
+            await close_result_dialog(page)
             return "REJECTED"
         await asyncio.sleep(0.25)
     return "UNKNOWN"

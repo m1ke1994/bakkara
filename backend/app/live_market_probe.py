@@ -32,6 +32,7 @@ HOOK = r"""() => {
           log.push({text:String(text),
             x:m.a*x + m.c*y + m.e, y:m.b*x + m.d*y + m.f,
             width:Math.hypot(m.a,m.b)*metric.width,
+            textAlign:this.textAlign,
             height:Math.hypot(m.c,m.d)*(ascent+descent),
             at:Date.now()});
           if (log.length > 2000) log.splice(0, 700);
@@ -46,26 +47,47 @@ HOOK = r"""() => {
 INIT_SCRIPT = "(" + HOOK + ")();"
 
 SNAPSHOT = r"""() => {
-  const canvas = document.querySelector('canvas.market-grid-canvas__canvas');
-  if (!canvas) return {ok:false, status:'CANVAS_MISSING', clickReady:false};
-  const rect = canvas.getBoundingClientRect();
-  const entries = (window.__bakkaraMarketHook?.log || []).filter(x=>Date.now()-x.at<9000);
-  const suits = ['пики','трефы','бубны','черви'];
-  const labels=[], titles=[], seen=new Set();
-  for (const e of entries) {
-    const name=e.text.trim().toLowerCase();
-    const isSuit=suits.includes(name), isTitle=name.includes('игрок получит карту') ||
-      name.includes('игрок получит следующую масть');
-    if (!isSuit && !isTitle) continue;
-    const key=name+':'+Math.round(e.x/3)+':'+Math.round(e.y/3);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    (isSuit ? labels : titles).push(e);
+  const canvas=document.querySelector('canvas.market-grid-canvas__canvas');
+  if(!canvas) return {ok:false,status:'CANVAS_MISSING',clickReady:false};
+  const rect=canvas.getBoundingClientRect();
+  const entries=(window.__bakkaraMarketHook?.log||[]).filter(e=>Date.now()-e.at<9000);
+  const suits=['пики','трефы','бубны','черви'];
+  const latest=new Map();
+  for(const e of entries){
+    const key=e.text.trim().toLowerCase()+':'+Math.round(e.x/3)+':'+Math.round(e.y/3);
+    latest.set(key,e);
   }
-  return {ok:true, status:labels.length===4&&titles.length?'LABELS_OBSERVED':'TEXT_NOT_CAPTURED',
+  const items=[...latest.values()],labels=[],titles=[],oddsBySuit={};
+  for(const e of items){
+    const name=e.text.trim().toLowerCase();
+    if(suits.includes(name))labels.push(e);
+    if(name.includes('игрок получит карту')||name.includes('игрок получит следующую масть'))
+      titles.push(e);
+  }
+  for(const suit of suits){
+    const same=labels.filter(e=>e.text.trim().toLowerCase()===suit);
+    if(same.length!==1)continue;
+    const label=same[0];
+    const possible=items.filter(e=>{
+      const n=Number(e.text.trim().replace(',','.'));
+      return Number.isFinite(n)&&n>=1.01&&n<=100&&
+        Math.abs(e.y-label.y)<=Math.max(9,label.height*0.65)&&
+        e.x>label.x+label.width+12;
+    }).sort((a,b)=>b.x-a.x||b.at-a.at);
+    if(possible.length!==1)continue;
+    const e=possible[0];
+    const centerX=e.textAlign==='right'||e.textAlign==='end' ? e.x-e.width/2 :
+      e.textAlign==='center' ? e.x : e.x+e.width/2;
+    oddsBySuit[suit]={text:e.text,x:centerX,y:e.y,width:e.width,
+      height:e.height,amount:Number(e.text.trim().replace(',','.'))};
+  }
+  return {ok:true,
+    status:labels.length===4&&titles.length&&Object.keys(oddsBySuit).length===4?
+      'ODDS_MAPPED':'TEXT_NOT_CAPTURED',
     canvas:{width:canvas.width,height:canvas.height,cssWidth:rect.width,cssHeight:rect.height},
-    labels,marketTitles:titles,allText:entries.filter(x=>x.text.trim()).slice(-60),
-    captureCount:entries.length,clickReady:false};
+    labels,marketTitles:titles,oddsBySuit,
+    allText:entries.filter(x=>x.text.trim()).slice(-75),captureCount:entries.length,
+    clickReady:false};
 }"""
 
 
@@ -109,8 +131,8 @@ async def probe_player_suit_market(page: Any) -> dict[str, Any]:
             if not result.get("ok"):
                 break
             names = {str(x.get("text", "")).strip().casefold() for x in result.get("labels", [])}
-            if all(suit in names for suit in SUIT_NAMES) and result.get("marketTitles"):
-                result["status"] = "LABELS_OBSERVED"
+            if all(suit in names for suit in SUIT_NAMES) and result.get("marketTitles") and len(result.get("oddsBySuit", {})) == 4:
+                result["status"] = "ODDS_MAPPED"
                 result["market"] = query
                 return result
             await asyncio.sleep(0.25)
