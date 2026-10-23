@@ -13,6 +13,9 @@ class LiveBets:
             db.execute("""CREATE TABLE IF NOT EXISTS live_control (
                 id INTEGER PRIMARY KEY CHECK(id=1), mode TEXT NOT NULL, step INTEGER NOT NULL)""")
             db.execute("INSERT OR IGNORE INTO live_control VALUES(1,'DEMO',1)")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(live_control)")}
+            if "coupon_test_filter" not in columns:
+                db.execute("ALTER TABLE live_control ADD COLUMN coupon_test_filter INTEGER NOT NULL DEFAULT 0")
             db.execute("""CREATE TABLE IF NOT EXISTS live_attempts (
                 game_id TEXT PRIMARY KEY, round_number TEXT NOT NULL,
                 suit TEXT NOT NULL, amount TEXT NOT NULL, step INTEGER NOT NULL,
@@ -22,7 +25,7 @@ class LiveBets:
     def snapshot(self):
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
-            control = dict(db.execute("SELECT mode,step FROM live_control WHERE id=1").fetchone())
+            control = dict(db.execute("SELECT mode,step,coupon_test_filter FROM live_control WHERE id=1").fetchone())
             attempt = db.execute("SELECT * FROM live_attempts ORDER BY created_at DESC,rowid DESC LIMIT 1").fetchone()
             control["attempt"] = dict(attempt) if attempt else None
             control["blocked"] = bool(db.execute(
@@ -35,6 +38,11 @@ class LiveBets:
             raise ValueError("Неизвестный режим")
         with sqlite3.connect(self.path) as db:
             db.execute("UPDATE live_control SET mode=? WHERE id=1", (value,))
+
+    def set_coupon_test_filter(self, enabled: bool):
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE live_control SET coupon_test_filter=? WHERE id=1",
+                       (int(enabled),))
 
     def reserve(self, game_id: str, round_number: str, suit: str, amount: Decimal) -> bool:
         with sqlite3.connect(self.path) as db:
