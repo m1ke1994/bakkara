@@ -96,7 +96,7 @@ def test_first_game_bypasses_warmup_and_uses_quick_coupon(tmp_path, monkeypatch)
     assert any("ожидание 18/40 игр отключено" in msg for _, msg in events)
     assert not store.reserve("game-1", "601", "clubs", Decimal("15"), "MANUAL_TEST")
 
-    fake.store = SimpleNamespace(get=lambda _id: final_hand())
+    fake.store = SimpleNamespace(get=lambda _id: final_hand(suits=("hearts", "diamonds")))
     asyncio.run(BrowserService._live_after_cards(fake, game))
     assert store.get_attempt("game-1")["result"] == "LOSE"
     assert store.snapshot()["step"] == 2
