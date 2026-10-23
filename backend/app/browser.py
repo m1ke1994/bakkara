@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError as PlaywrightTimeoutError, async_playwright
 
 from .config import settings
-from .live_bets import LiveBets
+from .live_bets import LiveBets, settle_test_hand
 from .live_executor import PlacementError, place_one_click
 from .live_coupon_test import place_test_coupon
 from .live_market_probe import INIT_SCRIPT
@@ -364,28 +364,44 @@ class BrowserService:
         self.cycle_engine = None  # Assigned by the API after construction.
 
     async def _live_before_cards(self, game: Game) -> None:
-        if not hasattr(self, "live_bets") or self.live_bets.snapshot()["mode"] != "LIVE" or getattr(self, "cycle_engine", None) is None:
+        if not hasattr(self, "live_bets") or getattr(self, "cycle_engine", None) is None:
+            return
+        config = self.live_bets.snapshot()
+        if config["mode"] != "LIVE":
             return
         if classify_game(game) != "UPCOMING" or not game.round_number.isdecimal():
             return
-        cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
-        forecast = next((p for p in cycle["live_preview"]
-                         if p["phase"] == "CURRENT" and p["available"]
-                         and p["target_round_number"] == int(game.round_number)), None)
-        if not cycle["ready"] or forecast is None:
-            return
+
+        first_round_test = bool(config.get("warmup_test"))
+        if first_round_test:
+            # Manual-suit execution check: intentionally does NOT ask for a
+            # prediction and MUST NOT create a cycle18 forecast.
+            suit = config["test_suit"]
+            signal_source = "MANUAL_TEST"
+            self.event("INFO", f"ТЕСТ LIVE №{game.round_number}: "
+                       f"выбрана вручную масть {suit}; ожидание 18/40 игр отключено.")
+        else:
+            cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
+            forecast = next((p for p in cycle["live_preview"]
+                             if p["phase"] == "CURRENT" and p["available"]
+                             and p["target_round_number"] == int(game.round_number)), None)
+            if not cycle["ready"] or forecast is None:
+                return
+            suit = forecast["predicted_suit"]
+            signal_source = "STRATEGY"
         plan = await asyncio.to_thread(self.live_plan_store.load)
         step = self.live_bets.snapshot()["step"]
         if step > len(plan.row):
             self.event("WARNING", "Ряд ставок исчерпан; LIVE ожидает изменения настроек.")
             return
-        suit, amount = forecast["predicted_suit"], plan.row[step - 1]
-        if not self.live_bets.reserve(game.game_id, game.round_number, suit, amount):
+        amount = plan.row[step - 1]
+        if not self.live_bets.reserve(game.game_id, game.round_number, suit, amount,
+                                      signal_source=signal_source):
             return
         self.event("INFO", f"LIVE раздача №{game.round_number}: начинаем поиск рынка, Canvas и суммы {amount} RUB.")
         try:
             async with self.page_lock:
-                if self.live_bets.snapshot()["coupon_test_filter"]:
+                if first_round_test or config["coupon_test_filter"]:
                     status = await place_test_coupon(
                         self.page, suit, amount,
                         lambda: self.live_bets.update(game.game_id, "SUBMITTING"),
@@ -406,6 +422,20 @@ class BrowserService:
 
     async def _live_after_cards(self, game: Game) -> None:
         if getattr(self, "cycle_engine", None) is None:
+            return
+        attempt = await asyncio.to_thread(self.live_bets.get_attempt, game.game_id)
+        if attempt and attempt["signal_source"] == "MANUAL_TEST":
+            # No invented forecast: check only confirmed final cards of THIS game.
+            observed = await asyncio.to_thread(self.store.get, game.game_id)
+            result = settle_test_hand(attempt, observed)
+            if result in ("WIN", "LOSE"):
+                plan = await asyncio.to_thread(self.live_plan_store.load)
+                if self.live_bets.settle(game.game_id, result, len(plan.row)):
+                    self.event("INFO", f"ТЕСТ LIVE №{game.round_number}: {result} "
+                               f"по фактическим картам Игрока; следующий шаг обновлён.")
+            else:
+                self.event("WARNING", f"ТЕСТ LIVE №{game.round_number}: "
+                           "финальный набор карт не подтверждён; шаг не меняем.")
             return
         cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
         result = next((p["result"] for p in cycle["recent"]
