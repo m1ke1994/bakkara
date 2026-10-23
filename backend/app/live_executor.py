@@ -53,44 +53,53 @@ def _amount(value: str) -> Decimal:
 
 
 async def place_one_click(page, suit: str, amount: Decimal, mark_submitting):
-    """Returns ACCEPTED/REJECTED/UNKNOWN. No second submission after a click."""
-    probe = await probe_player_suit_market(page)
+    """Prepare verified one-click wager and confirm site response exactly once.
+
+    Before the potentially submitting click, all errors identify their stage.
+    An ambiguous click result is UNKNOWN, never retried.
+    """
+    from .live_market_probe import MarketProbeError
+    try:
+        probe = await probe_player_suit_market(page)
+    except MarketProbeError as exc:
+        raise PlacementError(f"Поиск рынка: {exc}") from exc
     box = outcome_box(probe, suit)
     field = page.locator(AMOUNT).first
-    await field.wait_for(state="visible", timeout=3000)
+    try:
+        await field.wait_for(state="visible", timeout=8_000)
+    except Exception as exc:
+        raise PlacementError("Поле суммы быстрой ставки не появилось") from exc
     value = format(amount, "f")
-    await field.fill("")
     await field.fill(value)
     if _amount(await field.input_value()) != amount:
         raise PlacementError("Сумма в купоне не совпала с шагом калькулятора")
     one_click = page.locator(ONE_CLICK).first
     if await one_click.count() != 1:
-        raise PlacementError("Переключатель однокликового режима не найден")
+        raise PlacementError("Состояние «Ставка в 1 клик» не определено")
     immediate = await one_click.is_checked()
     canvas = page.locator(CANVAS_SELECTOR).first
     css = await canvas.bounding_box()
     if not css or not css["width"] or not css["height"]:
         raise PlacementError("Canvas не имеет видимой области")
-    # Persist the uncertain state *before* the first potentially submitting click.
     before = (await page.locator("body").inner_text(timeout=2000)).casefold()
     accepted_phrases = ("ставка принята", "ставка успешно")
     rejected_phrases = ("ставка отклонена", "недостаточно средств", "заблокированное событие")
     mark_submitting()
     await canvas.click(position={"x": box["x"] * css["width"] / box["width"],
-                                 "y": box["y"] * css["height"] / box["height"]}, timeout=3000)
+                                 "y": box["y"] * css["height"] / box["height"]}, timeout=5_000)
     if not immediate:
+        # Standard coupon: the familiar NewBot confirmation button.
         confirm = page.get_by_role("button", name="Сделать ставку", exact=True)
-        visible = [confirm.nth(index) for index in range(await confirm.count())
-                   if await confirm.nth(index).is_visible()]
+        visible = [confirm.nth(i) for i in range(await confirm.count())
+                   if await confirm.nth(i).is_visible()]
         if len(visible) != 1 or await visible[0].is_disabled():
             return "UNKNOWN"
-        await visible[0].click(timeout=3000)
-    # A disappearing coupon alone does not prove bookmaker acceptance.
-    for _ in range(12):
+        await visible[0].click(timeout=5000)
+    for _ in range(16):
         body = (await page.locator("body").inner_text(timeout=2000)).casefold()
-        if any(body.count(phrase) > before.count(phrase) for phrase in accepted_phrases):
+        if any(body.count(p) > before.count(p) for p in accepted_phrases):
             return "ACCEPTED"
-        if any(body.count(phrase) > before.count(phrase) for phrase in rejected_phrases):
+        if any(body.count(p) > before.count(p) for p in rejected_phrases):
             return "REJECTED"
         await asyncio.sleep(0.25)
     return "UNKNOWN"
