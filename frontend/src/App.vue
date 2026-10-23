@@ -50,6 +50,21 @@ async function changeCouponTestFilter(enabled) {
   } catch (exception) { error.value = exception.message || 'Не удалось изменить тестовый фильтр' }
   finally { busy.value = false }
 }
+async function setFirstRoundTest(enabled, suit) {
+  if (busy.value || observing.value) return
+  busy.value = true
+  try {
+    const response = await fetch(`${api}/api/live/first-round-test`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled, suit}),
+    })
+    const next = await response.json()
+    if (!response.ok) throw new Error(next.detail || 'Не удалось изменить тестовый режим')
+    applySnapshot(next)
+    error.value = ''
+  } catch (exception) { error.value = exception.message || 'Ошибка тестового режима' }
+  finally { busy.value = false }
+}
 async function probeCanvasMarket() {
   if (busy.value || observing.value || probingMarket.value) return
   probingMarket.value = true
@@ -296,6 +311,24 @@ onBeforeUnmount(() => {
           Тест LIVE-купона: сначала коэффициент масти, затем сумма и «Сделать ставку»
         </label>
       </div>
+      <div class="controls">
+        <label class="diagnostic">
+          <input type="checkbox" :checked="Boolean(live.warmup_test)"
+            :disabled="busy || observing"
+            @change="setFirstRoundTest($event.target.checked, live.test_suit || 'hearts')" />
+          Тест с первой раздачи — без ожидания 18/40 игр
+        </label>
+        <label class="diagnostic">Тестовая масть:
+          <select :value="live.test_suit || 'hearts'" :disabled="busy || observing"
+            @change="setFirstRoundTest(Boolean(live.warmup_test), $event.target.value)">
+            <option value="hearts">♥ Черви</option>
+            <option value="diamonds">♦ Бубны</option>
+            <option value="clubs">♣ Трефы</option>
+            <option value="spades">♠ Пики</option>
+          </select>
+        </label>
+      </div>
+      <p v-if="live.warmup_test" class="diagnostic">ТЕСТ: ближайшая предстоящая раздача; масть выбрана вручную, а не рассчитана стратегией. В LIVE бот использует обычный купон: коэффициент → сумма шага → «Сделать ставку». Прогнозы N−18 и N−3/10/24/31/40 продолжат подготовку отдельно.</p>
       <p v-if="live.coupon_test_filter" class="diagnostic">Тестовый фильтр включён. Для отправки используется текущий виртуальный RUB-режим БК. Если включена ставка в 1 клик, бот сначала отключает её, затем открывает обычный купон и проверяет введённую сумму.</p>
       <p v-if="live.mode === 'LIVE'" class="diagnostic">Раздача №{{ live.attempt?.round_number || '—' }} · {{ strategyLabel }} · Масть: {{ suits[live.attempt?.suit]?.[1] || '—' }} · Шаг: {{ live.step }} · Сумма: {{ live.attempt?.amount || '—' }} RUB · Купон: {{ live.attempt?.status || 'ожидание' }} · Принятие: {{ live.attempt?.status || '—' }} · Итог: {{ live.attempt?.result || '—' }}</p>
       <div class="controls">
