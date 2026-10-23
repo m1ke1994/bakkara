@@ -73,9 +73,9 @@ def test_dashboard_has_two_numbered_suit_forecasts_immediately_above_history():
     history_start = template.index('id="history"')
     assert forecast_start < history_start
     assert template[forecast_start:history_start].count('<section ') == 1
-    assert 'id="calculator"' not in template
+    assert '<StakePlanner />' in template
     assert 'Калькулятор догона' not in template
-    assert 'История виртуальных результатов' in template
+    assert 'История виртуальных результатов' not in template
 
 
 def test_history_supports_search_and_up_to_two_hundred_rows_without_live_poll_bloat():

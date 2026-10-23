@@ -1,4 +1,5 @@
 <script setup>
+import StakePlanner from './StakePlanner.vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { shouldApplySnapshot } from './stateVersion.js'
 
@@ -205,7 +206,7 @@ onBeforeUnmount(() => {
   <main>
     <header class="dashboard-header">
       <div><p class="eyebrow">BAKKARA / LIVE ANALYTICS</p><h1>Панель наблюдения <span class="header-spark">✦</span></h1><p>Карты Игрока, прогнозы выбранной стратегии и история раздач.</p></div>
-      <nav class="quick-nav" aria-label="Разделы панели">
+      <nav class="quick-nav" aria-label="Разделы панели"><a href="#calculator">Калькулятор</a>
         <a href="#observation">Наблюдение</a>
         <a href="#forecasts">Прогнозы</a>
         <a href="#history">История</a>
@@ -234,24 +235,11 @@ onBeforeUnmount(() => {
     </section>
     <section class="controls"><button :disabled="busy || running" @click="command('/api/browser/start')">Запустить браузер</button><button class="secondary" :disabled="busy || !running" @click="command('/api/browser/stop')">Остановить браузер</button></section>
     <p class="diagnostic">{{ state.diagnostic }}</p><p v-if="error" class="error">{{ error }}</p>
-    <section class="events virtual-history" id="virtual-results" aria-label="История виртуальных результатов">
-      <div class="section-title"><div><h2>История виртуальных результатов</h2><p class="diagnostic">Подтверждённые прогнозы · {{ strategyLabel }} · {{ verifiedPredictionRows.length }} результатов</p></div><span class="standalone-label">Без реальных ставок</span></div>
-      <p class="diagnostic">Только WIN/LOSE, шаги и источники по подтверждённым картам Игрока. Финансовые расчёты не выполняются.</p>
-      <p v-if="!cycle18.ready" class="diagnostic">Результаты появятся после подготовки выбранной стратегии.</p>
-      <p v-else-if="!verifiedPredictionRows.length" class="diagnostic">Проверенных результатов пока нет.</p>
-      <div v-else class="history-table-scroll virtual-history-scroll">
-        <table class="history-table" aria-label="История результатов выбранной стратегии">
-          <thead><tr><th>Целевая игра</th><th>Источники ({{ strategyShortLabel }})</th><th>Прогноз</th><th>Шаг</th><th>Результат</th><th>Тип проверки</th></tr></thead>
-          <tbody><tr v-for="item in verifiedPredictionRows" :key="item.target_game_id || item.source_game_id">
-            <td>№{{ item.target_round_number || '—' }}</td>
-            <td>{{ sourceDescription(item) }}</td>
-            <td :class="isRedSuit(item.predicted_suit) ? 'red-suit' : 'black-suit'">{{ suits[item.predicted_suit]?.[0] || '—' }}</td>
-            <td>{{ item.step ?? '—' }}</td>
-            <td><strong :class="item.result === 'WIN' ? 'win-text' : 'lose-text'">{{ item.result }}</strong></td>
-            <td>{{ item.mode === 'BACKFILL' ? 'По истории' : 'Наблюдение' }}</td>
-          </tr></tbody>
-        </table>
-      </div>
+    <StakePlanner />
+    <section class="events" id="live-mode-notice" aria-label="Режим работы">
+      <div class="section-title"><h2>Режим работы</h2><span class="standalone-label">ДЕМО</span></div>
+      <div class="controls"><button type="button" disabled>ДЕМО — активный режим</button><button type="button" disabled class="secondary">LIVE — требуется калибровка Canvas и купона</button></div>
+      <p class="diagnostic">LIVE-подтверждение не включено: однокликовый купон может отправить реальные деньги. Сначала проверяем координаты, сумму и ответ букмекерского сайта.</p>
     </section>
     <section class="events observation" id="observation">
       <div class="section-title"><h2>Текущее наблюдение</h2><strong :class="badge(state.observation?.status)">{{ label('observation', state.observation?.status) }}</strong></div>
