@@ -13,6 +13,7 @@ from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError 
 from .config import settings
 from .live_bets import LiveBets
 from .live_executor import PlacementError, place_one_click
+from .live_coupon_test import place_test_coupon
 from .live_market_probe import INIT_SCRIPT
 from .auth_state import authorization_allows_observation, classify_auth_probe
 from .observation import (
@@ -384,9 +385,15 @@ class BrowserService:
         self.event("INFO", f"LIVE раздача №{game.round_number}: начинаем поиск рынка, Canvas и суммы {amount} RUB.")
         try:
             async with self.page_lock:
-                status = await place_one_click(
-                    self.page, suit, amount,
-                    lambda: self.live_bets.update(game.game_id, "SUBMITTING"))
+                if self.live_bets.snapshot()["coupon_test_filter"]:
+                    status = await place_test_coupon(
+                        self.page, suit, amount,
+                        lambda: self.live_bets.update(game.game_id, "SUBMITTING"),
+                        lambda message: self.event("INFO", f"LIVE №{game.round_number}: {message}"))
+                else:
+                    status = await place_one_click(
+                        self.page, suit, amount,
+                        lambda: self.live_bets.update(game.game_id, "SUBMITTING"))
             self.live_bets.update(game.game_id, status)
             self.event("INFO" if status == "ACCEPTED" else "WARNING",
                        f"LIVE раздача №{game.round_number}: {status}, {suit}, {amount} RUB.")
