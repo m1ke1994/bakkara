@@ -1,6 +1,14 @@
 # BAKKARA BOT
 
-Independent local control panel for a visible Playwright browser session. It opens the configured Baccarat page and lets a person sign in manually. It reads exposed Player-card DOM data and records virtual suit predictions only; it has no real betting, stake entry, or interaction with betting controls.
+Local control panel for a visible Playwright browser session. It opens the configured Baccarat page and lets a person sign in manually. DEMO records virtual suit predictions. LIVE uses the same observer and saved calculator amounts to attempt bets through the visible bookmaker interface.
+
+## LIVE status and local update
+
+Choose **LIVE** before starting observation. The mode can change only while scanning is stopped. LIVE tries only a numbered upcoming game with an available prediction. It saves the game ID, suit, step and amount in SQLite before touching the outcome. A submission with an unknown acceptance status blocks further LIVE submissions, including after a backend restart. The stake step changes only when an accepted attempt has a confirmed final WIN or LOSE. The bookmaker's RUB interface is used as configured in the existing browser session; the bot does not switch wallets.
+
+The Canvas text capture and bookmaker acceptance signals depend on the current site layout. If the exact market, four outcome labels, coordinates, coupon amount or acceptance cannot be confirmed, inspect the LIVE status and bookmaker interface before using it again. The automated tests use an imitation and do not verify a live bookmaker session.
+
+To update an existing Windows checkout, stop `start.bat`, run `git pull` in the project directory, then run `start.bat` again. Keep the local `.env`, `browser_profile` and SQLite database. For manual checks run `cd backend; python -m pytest tests -q` and `cd frontend; npm ci; npm test; npm run build` in separate PowerShell sessions.
 
 ## Layout
 

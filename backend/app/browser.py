@@ -11,6 +11,9 @@ from urllib.parse import urlparse
 from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError as PlaywrightTimeoutError, async_playwright
 
 from .config import settings
+from .live_bets import LiveBets
+from .live_executor import PlacementError, place_one_click
+from .live_market_probe import INIT_SCRIPT
 from .auth_state import authorization_allows_observation, classify_auth_probe
 from .observation import (
     Game,
@@ -356,6 +359,54 @@ class BrowserService:
         self.state_version = 0
         self.state_epoch = uuid.uuid4().hex
         self.store = ObservationStore(settings.observation_db)
+        self.live_bets = LiveBets(settings.observation_db)
+        self.cycle_engine = None  # Assigned by the API after construction.
+
+    async def _live_before_cards(self, game: Game) -> None:
+        if not hasattr(self, "live_bets") or self.live_bets.snapshot()["mode"] != "LIVE" or getattr(self, "cycle_engine", None) is None:
+            return
+        if classify_game(game) != "UPCOMING" or not game.round_number.isdecimal():
+            return
+        cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
+        forecast = next((p for p in cycle["live_preview"]
+                         if p["phase"] == "CURRENT" and p["available"]
+                         and p["target_round_number"] == int(game.round_number)), None)
+        if not cycle["ready"] or forecast is None:
+            return
+        plan = await asyncio.to_thread(self.live_plan_store.load)
+        step = self.live_bets.snapshot()["step"]
+        if step > len(plan.row):
+            self.event("WARNING", "Ряд ставок исчерпан; LIVE ожидает изменения настроек.")
+            return
+        suit, amount = forecast["predicted_suit"], plan.row[step - 1]
+        if not self.live_bets.reserve(game.game_id, game.round_number, suit, amount):
+            return
+        self.event("INFO", f"LIVE раздача №{game.round_number}: начинаем поиск рынка, Canvas и суммы {amount} RUB.")
+        try:
+            async with self.page_lock:
+                status = await place_one_click(
+                    self.page, suit, amount,
+                    lambda: self.live_bets.update(game.game_id, "SUBMITTING"))
+            self.live_bets.update(game.game_id, status)
+            self.event("INFO" if status == "ACCEPTED" else "WARNING",
+                       f"LIVE раздача №{game.round_number}: {status}, {suit}, {amount} RUB.")
+        except Exception as exc:
+            current = self.live_bets.snapshot()["attempt"]
+            status = "UNKNOWN" if current and current["status"] == "SUBMITTING" else "REJECTED"
+            self.live_bets.update(game.game_id, status, type(exc).__name__)
+            detail = str(exc) if isinstance(exc, PlacementError) else type(exc).__name__
+            self.event("WARNING", f"LIVE раздача №{game.round_number}: {status} — {detail}.")
+
+    async def _live_after_cards(self, game: Game) -> None:
+        if getattr(self, "cycle_engine", None) is None:
+            return
+        cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
+        result = next((p["result"] for p in cycle["recent"]
+                       if p["target_game_id"] == game.game_id), None)
+        if result in ("WIN", "LOSE"):
+            plan = await asyncio.to_thread(self.live_plan_store.load)
+            if self.live_bets.settle(game.game_id, result, len(plan.row)):
+                self.event("INFO", f"LIVE раздача №{game.round_number}: {result}; шаг обновлён.")
 
     def event(self, level: str, message: str) -> None:
         # Never include page content, credentials, tokens, or cookies here.
@@ -409,6 +460,8 @@ class BrowserService:
                 self.context = await self.playwright.chromium.launch_persistent_context(
                     user_data_dir=str(settings.profile_dir), headless=False, viewport=None
                 )
+                # Install before navigation so early Canvas2D draw calls are captured.
+                await self.context.add_init_script(script=INIT_SCRIPT)
                 self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
                 await self.page.goto(settings.target_url, wait_until="domcontentloaded", timeout=45_000)
                 self.status = "WAITING_AUTH"
@@ -1800,6 +1853,8 @@ class BrowserService:
                     f"{(page_ready_at - last_finalized)*1000:.0f} мс.")
             self.event("INFO", f"Страница раздачи № {game.round_number or game.game_id} открыта за {(page_ready_at-navigation_started)*1000:.0f} мс; начинаем опрос DOM без стартовой паузы.")
 
+            await self._live_before_cards(game)
+
             while True:
                 if getattr(self, "authorization", "AUTHORIZED") == "AUTH_LOST":
                     self._active_chain_source_id = None
@@ -2078,6 +2133,7 @@ class BrowserService:
                         else:
                             self._active_chain_source_id = None
                         self.observation_status = "SAVED"
+                        await self._live_after_cards(game)
                         self.observation_diagnostic = (
                             f"Окончательные карты раздачи № {game.round_number or game.game_id} сохранены; переходим к следующей игре."
                             if hand_final else f"Игра завершена, но итог карт не подтверждён; запись сохранена без прогноза."
