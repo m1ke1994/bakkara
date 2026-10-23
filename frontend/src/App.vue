@@ -303,7 +303,7 @@ onBeforeUnmount(() => {
     <StakePlanner />
     <section class="events" id="live-mode-notice" aria-label="Режим работы">
       <div class="section-title"><h2>Режим работы</h2><span class="standalone-label">{{ live.mode }}</span></div>
-      <div class="controls"><button type="button" :disabled="busy || observing || live.mode === 'DEMO'" @click="changeMode('DEMO')">ДЕМО</button><button type="button" class="secondary" :disabled="busy || observing || live.mode === 'LIVE'" @click="changeMode('LIVE')">LIVE</button></div>
+      <div class="controls"><button type="button" :class="live.mode === 'DEMO' ? 'active-mode' : 'secondary'" :disabled="busy || observing || live.mode === 'DEMO'" @click="changeMode('DEMO')">ДЕМО</button><button type="button" :class="live.mode === 'LIVE' ? 'active-mode' : 'secondary'" :disabled="busy || observing || live.mode === 'LIVE'" @click="changeMode('LIVE')">LIVE</button></div>
       <div class="controls">
         <label class="diagnostic">
           <input type="checkbox" :checked="Boolean(live.coupon_test_filter)"

@@ -81,6 +81,8 @@ button {
 }
 button:hover:not(:disabled) { filter: brightness(1.08); }
 .secondary { background: #293c59; color: #eaf3ff; }
+.active-mode { background: #146a84; color: #e9feff; border: 1px solid #49c9c3; }
+button.active-mode:disabled { opacity: 1; cursor: default; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .section-title h2 { margin-bottom: 0; }
