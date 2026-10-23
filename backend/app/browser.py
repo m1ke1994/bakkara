@@ -333,6 +333,44 @@ GAME_LIST_BLOCK_SNAPSHOT_SCRIPT = r"""() => {
 }"""
 
 
+def live_test_prestart_evidence(game: Game, diagnostics: dict[str, Any],
+                                actual_url: str) -> tuple[bool, str]:
+    """Read-only proof for a manual-suit first-round test on UNKNOWN list rows.
+
+    The Baccarat list currently omits explicit upcoming status on some skins.
+    This exception is test-only: it never changes game classification or
+    creates strategy forecasts.
+    """
+    expected_path = urlparse(game.url).path.rstrip("/")
+    actual_path = urlparse(actual_url).path.rstrip("/")
+    if not expected_path or expected_path != actual_path:
+        return False, "Открытая страница не соответствует выбранному URL"
+    status = classify_game(game)
+    if status in ("STARTED", "FINISHED"):
+        return False, f"Игра уже {status}; тестовая ставка запрещена"
+    if status != "UNKNOWN":
+        return False, f"Неподходящее состояние списка: {status}"
+    if str(game.player_score).strip() != "0" or str(game.banker_score).strip() != "0":
+        return False, "В списке не подтверждён начальный счёт 0:0"
+    if diagnostics.get("finished") or diagnostics.get("expired_screen"):
+        return False, "Игра уже завершена или недоступна"
+    if diagnostics.get("cards"):
+        return False, "Уже открыты реальные карты Игрока"
+    counts = diagnostics.get("counts") or {}
+    if int(counts.get("player_fields") or 0) < 1 or int(counts.get("player_cards_containers") or 0) < 1:
+        return False, "Игровой компонент ещё не загрузился"
+    if int(counts.get("player_card_boxes") or 0) < 2:
+        return False, "Карточные позиции Игрока ещё не появились"
+    timer_text = str(diagnostics.get("round_timer_text") or "")
+    visible_seconds = parse_round_timer(timer_text)
+    # The visible clock is more up-to-date than a cached list timer.
+    if visible_seconds is None:
+        return False, "Таймер на странице не прочитан"
+    if not 3 <= visible_seconds <= 60:
+        return False, f"Время на странице {timer_text}: нет безопасного окна до раздачи"
+    return True, f"0:0, пустые карты, часы {timer_text}, URL и игровой компонент совпадают"
+
+
 class BrowserService:
     """Owns one visible, persistent Playwright Chromium context."""
 
@@ -368,11 +406,51 @@ class BrowserService:
             return
         config = self.live_bets.snapshot()
         if config["mode"] != "LIVE":
+            if config.get("warmup_test"):
+                self.event("WARNING", "Тест первой раздачи включён, но режим ДЕМО. "
+                           "Для проверки купона выберите LIVE.")
             return
-        if classify_game(game) != "UPCOMING" or not game.round_number.isdecimal():
+        if not game.round_number.isdecimal():
+            self.event("WARNING", f"LIVE пропуск игры {game.game_id}: номер раздачи не подтверждён.")
             return
 
         first_round_test = bool(config.get("warmup_test"))
+        state = classify_game(game)
+        if state != "UPCOMING":
+            if state != "UNKNOWN" or not first_round_test:
+                self.event("WARNING", f"LIVE №{game.round_number}: вход в купон отменён: "
+                           f"статус списка {state}; тест={first_round_test}.")
+                return
+            # The live tournament list can say UNKNOWN even when the game is
+            # visibly in its pre-deal countdown. Check the actual page before
+            # granting this narrow test-only exception.
+            last_reason = "Игровой компонент пока недоступен"
+            for _ in range(12):
+                async with self.page_lock:
+                    active_url = self.page.url if self.page else ""
+                    denied = await self.page.evaluate("""() =>
+                        /доступ\\s+запрещ[её]н|access\\s+denied/i.test(
+                            (document.body?.innerText || '').slice(0,3000))""")
+                    if denied:
+                        last_reason = "Букмекер показывает «Доступ запрещён»"
+                        break
+                    diagnostics = await self._inspect_game_dom(
+                        settings.player_name_text, settings.banker_name_text)
+                allowed, last_reason = live_test_prestart_evidence(game, diagnostics, active_url)
+                if allowed:
+                    self.event("INFO", f"LIVE №{game.round_number}: статус списка UNKNOWN, "
+                               f"но тестовый вход разрешён по DOM: {last_reason}.")
+                    break
+                if ("Уже открыты" in last_reason or "завершена" in last_reason
+                        or "0:0" in last_reason or "не соответствует" in last_reason):
+                    break
+                await asyncio.sleep(0.2)
+            else:
+                allowed = False
+            if not allowed:
+                self.event("WARNING", f"LIVE №{game.round_number}: до купона не дошли. "
+                           f"Статус списка UNKNOWN. Причина: {last_reason}.")
+                return
         if first_round_test:
             # Manual-suit execution check: intentionally does NOT ask for a
             # prediction and MUST NOT create a cycle18 forecast.
@@ -397,6 +475,10 @@ class BrowserService:
         amount = plan.row[step - 1]
         if not self.live_bets.reserve(game.game_id, game.round_number, suit, amount,
                                       signal_source=signal_source):
+            current = self.live_bets.snapshot()
+            self.event("WARNING", f"LIVE №{game.round_number}: новая попытка не создана. "
+                       f"Существующая={current.get('attempt') and current['attempt'].get('status')}, "
+                       f"блокировка={current.get('blocked')}.")
             return
         self.event("INFO", f"LIVE раздача №{game.round_number}: начинаем поиск рынка, Canvas и суммы {amount} RUB.")
         try:
