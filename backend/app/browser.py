@@ -425,6 +425,7 @@ class BrowserService:
             # visibly in its pre-deal countdown. Check the actual page before
             # granting this narrow test-only exception.
             last_reason = "Игровой компонент пока недоступен"
+            allowed = False
             for _ in range(12):
                 async with self.page_lock:
                     active_url = self.page.url if self.page else ""
