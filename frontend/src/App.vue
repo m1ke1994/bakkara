@@ -19,6 +19,22 @@ const scanResultNames = {
 const scanResultName = value => scanResultNames[value] || value || '\u2014'
 const state = ref({ state_epoch: '', state_version: 0, backend: 'CHECKING', browser: 'STOPPED', authorization: 'UNKNOWN', diagnostic: '', events: [], observation: { status: 'STOPPED', current: null, history: [], games: [] } })
 const busy = ref(false)
+const probingMarket = ref(false)
+const marketProbe = ref(null)
+async function probeCanvasMarket() {
+  if (busy.value || observing.value || probingMarket.value) return
+  probingMarket.value = true
+  marketProbe.value = null
+  try {
+    const response = await fetch(api + '/api/market/probe', {method:'POST'})
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || 'Проверка Canvas не удалась')
+    marketProbe.value = data
+    error.value = ''
+  } catch (err) {
+    error.value = err.message || 'Ошибка Canvas'
+  } finally { probingMarket.value = false }
+}
 const error = ref('')
 const cycle18 = computed(() => state.value.cycle18 || {})
 const strategyChoice = ref('n18')
@@ -239,6 +255,17 @@ onBeforeUnmount(() => {
     <section class="events" id="live-mode-notice" aria-label="Режим работы">
       <div class="section-title"><h2>Режим работы</h2><span class="standalone-label">ДЕМО</span></div>
       <div class="controls"><button type="button" disabled>ДЕМО — активный режим</button><button type="button" disabled class="secondary">LIVE — требуется калибровка Canvas и купона</button></div>
+      <div class="controls">
+        <button class="secondary" :disabled="busy || !running || observing || probingMarket" @click="probeCanvasMarket">
+          {{ probingMarket ? 'Проверяем Canvas…' : 'Проверить рынок «Игрок получит карту»' }}
+        </button>
+        <span class="diagnostic">Для проверки вручную откройте ближайшую раздачу баккары и остановите наблюдение.</span>
+      </div>
+      <div v-if="marketProbe" class="diagnostic">
+        <p>Результат: {{ marketProbe.status }} · Текстовых записей: {{ marketProbe.captureCount ?? 0 }} · Найдено мастей: {{ marketProbe.labels?.length ?? 0 }}</p>
+        <p v-for="(entry,index) in marketProbe.labels || []" :key="index">{{ entry.text }}: x={{ Math.round(entry.x) }}, y={{ Math.round(entry.y) }} (Canvas-пиксели; пока не подтверждённая область клика)</p>
+        <p v-if="!marketProbe.labels?.length">Текст мог быть нарисован изображением или до установки обработчика. Координаты автоматически не угадываются.</p>
+      </div>
       <p class="diagnostic">LIVE-подтверждение не включено: однокликовый купон может отправить реальные деньги. Сначала проверяем координаты, сумму и ответ букмекерского сайта.</p>
     </section>
     <section class="events observation" id="observation">

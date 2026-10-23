@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .browser import browser_service
 from .config import settings
 from .cycle18 import Cycle18Engine
+from .live_market_probe import probe_player_suit_market
 
 cycle18_engine = Cycle18Engine(settings.observation_db)
 
@@ -112,6 +113,25 @@ async def clear_observations():
     await asyncio.to_thread(cycle18_engine.clear)
     result['cycle18'] = await asyncio.to_thread(cycle18_engine.refresh)
     return result
+
+
+
+@app.post("/api/market/probe")
+async def probe_market():
+    """Explicit read-only Canvas diagnostic. Does not place real bets."""
+    if browser_service.observation_task and not browser_service.observation_task.done():
+        raise HTTPException(status_code=409, detail="Остановите сканирование перед проверкой Canvas")
+    page = browser_service.page
+    if page is None or page.is_closed():
+        raise HTTPException(status_code=409, detail="Сначала запустите браузер")
+    if "/baccarat/" not in page.url and "/baccara/" not in page.url:
+        raise HTTPException(status_code=409, detail="Откройте конкретную раздачу баккары в Chromium")
+    async with browser_service.page_lock:
+        try:
+            return await probe_player_suit_market(page)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Canvas probe failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=422, detail="Не удалось прочитать Canvas: " + type(exc).__name__) from exc
 
 
 @app.get("/api/history")
