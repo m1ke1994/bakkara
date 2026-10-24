@@ -12,8 +12,8 @@ from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError 
 
 from .config import settings
 from .live_bets import LiveBets, settle_test_hand
-from .live_executor import PlacementError, place_one_click
-from .live_coupon_test import place_test_coupon
+from .live_executor import PlacementError
+from .live_coupon_test import place_regular_coupon
 from .live_market_probe import INIT_SCRIPT
 from .auth_state import authorization_allows_observation, classify_auth_probe
 from .observation import (
@@ -484,23 +484,18 @@ class BrowserService:
         self.event("INFO", f"LIVE раздача №{game.round_number}: начинаем поиск рынка, Canvas и суммы {amount} RUB.")
         try:
             async with self.page_lock:
-                if first_round_test or config["coupon_test_filter"]:
-                    status = await place_test_coupon(
-                        self.page, suit, amount,
-                        lambda: self.live_bets.update(game.game_id, "SUBMITTING"),
-                        lambda message: self.event("INFO", f"LIVE №{game.round_number}: {message}"))
-                else:
-                    status = await place_one_click(
-                        self.page, suit, amount,
-                        lambda: self.live_bets.update(game.game_id, "SUBMITTING"))
+                status = await place_regular_coupon(
+                    self.page, suit, amount,
+                    lambda: self.live_bets.update(game.game_id, "SUBMITTING"),
+                    lambda message: self.event("INFO", f"LIVE №{game.round_number}: {message}"))
             self.live_bets.update(game.game_id, status)
             self.event("INFO" if status == "ACCEPTED" else "WARNING",
                        f"LIVE раздача №{game.round_number}: {status}, {suit}, {amount} RUB.")
         except Exception as exc:
             current = self.live_bets.snapshot()["attempt"]
-            status = "UNKNOWN" if current and current["status"] == "SUBMITTING" else "REJECTED"
-            self.live_bets.update(game.game_id, status, type(exc).__name__)
+            status = "UNKNOWN" if current and current["status"] == "SUBMITTING" else "NOT_SUBMITTED"
             detail = str(exc) if isinstance(exc, PlacementError) else type(exc).__name__
+            self.live_bets.update(game.game_id, status, detail)
             self.event("WARNING", f"LIVE раздача №{game.round_number}: {status} — {detail}.")
 
     async def _live_after_cards(self, game: Game) -> None:

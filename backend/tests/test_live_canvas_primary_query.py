@@ -70,7 +70,7 @@ def test_primary_query_survives_canvas_remount_and_targets_numeric_odds():
                 chosen=outcome_box(probe,"diamonds")
                 assert chosen["odds"]==1.9
                 assert chosen["x"]>800
-                assert chosen["y"]==184
+                assert abs(chosen["y"]-180)<3  # center of the rendered odds glyph
             finally:
                 await browser.close()
     asyncio.run(run())

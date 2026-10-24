@@ -83,7 +83,7 @@ def test_unknown_status_does_not_skip_manual_live_test(tmp_path, monkeypatch):
         mark()
         return "ACCEPTED"
 
-    monkeypatch.setattr(module, "place_test_coupon", fake_coupon)
+    monkeypatch.setattr(module, "place_regular_coupon", fake_coupon)
     fake = SimpleNamespace(
         live_bets=store,
         cycle_engine=NoForecast(),
@@ -117,7 +117,7 @@ def test_access_denied_aborts_before_any_coupon(tmp_path, monkeypatch):
     async def forbidden_coupon(*args, **kwargs):
         raise AssertionError("Never click the bookmaker if access denied")
 
-    monkeypatch.setattr(module, "place_test_coupon", forbidden_coupon)
+    monkeypatch.setattr(module, "place_regular_coupon", forbidden_coupon)
     fake = SimpleNamespace(
         live_bets=store, cycle_engine=object(), page=Page(), page_lock=asyncio.Lock(),
         event=lambda level, msg: recorded.append(msg),

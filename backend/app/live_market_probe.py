@@ -18,29 +18,72 @@ HOOK = r"""() => {
   if (window.__bakkaraMarketHook) return;
   const original = {};
   const log = [];
-  window.__bakkaraMarketHook = {log};
+  const draws = [];
+  const generations = new WeakMap();
+  const generation = canvas => generations.get(canvas) || 0;
+  const tracked = canvas => canvas?.matches?.(
+    'canvas.market-grid-canvas__canvas, canvas.market-grid-canvas__offscreen-canvas');
+  window.__bakkaraMarketHook = {log, draws, generation, captureSince:0};
   const proto = CanvasRenderingContext2D.prototype;
   for (const method of ['fillText', 'strokeText']) {
     original[method] = proto[method];
     proto[method] = function(text, x, y) {
       try {
-        if (this.canvas?.matches('canvas.market-grid-canvas__canvas')) {
+        if (tracked(this.canvas)) {
           const m = this.getTransform();
           const metric = this.measureText(String(text));
-          const ascent = metric.actualBoundingBoxAscent || 12;
-          const descent = metric.actualBoundingBoxDescent || 2;
-          log.push({text:String(text),
-            x:m.a*x + m.c*y + m.e, y:m.b*x + m.d*y + m.f,
-            width:Math.hypot(m.a,m.b)*metric.width,
-            textAlign:this.textAlign,
-            height:Math.hypot(m.c,m.d)*(ascent+descent),
+          const font=Number(/([\d.]+)px/.exec(this.font)?.[1]) || 14;
+          const left=Number.isFinite(metric.actualBoundingBoxLeft) ?
+            metric.actualBoundingBoxLeft : 0;
+          const right=Number.isFinite(metric.actualBoundingBoxRight) ?
+            metric.actualBoundingBoxRight : metric.width;
+          const ascent=metric.actualBoundingBoxAscent || font*0.8;
+          const descent=metric.actualBoundingBoxDescent || font*0.2;
+          const corners=[[-left,-ascent],[right,-ascent],[right,descent],[-left,descent]]
+            .map(([dx,dy])=>({x:m.a*(x+dx)+m.c*(y+dy)+m.e,
+                              y:m.b*(x+dx)+m.d*(y+dy)+m.f}));
+          const xs=corners.map(p=>p.x), ys=corners.map(p=>p.y);
+          const minX=Math.min(...xs), minY=Math.min(...ys);
+          log.push({text:String(text),canvas:this.canvas,textAlign:this.textAlign,
+            generation:generation(this.canvas), x:minX, y:minY,
+            width:Math.max(...xs)-minX,height:Math.max(...ys)-minY,
             at:Date.now()});
-          if (log.length > 2000) log.splice(0, 700);
+          if (log.length > 4000) log.splice(0, 1400);
         }
       } catch (_) {}
       return original[method].apply(this, arguments);
     };
   }
+  original.clearRect=proto.clearRect;
+  proto.clearRect=function(x,y,width,height) {
+    try {
+      if (tracked(this.canvas) && x<=0 && y<=0 &&
+          width>=this.canvas.width && height>=this.canvas.height)
+        generations.set(this.canvas,generation(this.canvas)+1);
+    } catch (_) {}
+    return original.clearRect.apply(this,arguments);
+  };
+  original.drawImage=proto.drawImage;
+  proto.drawImage=function(source,...args) {
+    try {
+      if (this.canvas?.matches?.('canvas.market-grid-canvas__canvas') && tracked(source)) {
+        let sx=0,sy=0,sw=source.width,sh=source.height,dx,dy,dw,dh;
+        if(args.length===8) [sx,sy,sw,sh,dx,dy,dw,dh]=args;
+        else if(args.length===4) [dx,dy,dw,dh]=args;
+        else if(args.length===2) { [dx,dy]=args; dw=sw; dh=sh; }
+        if(sw>0&&sh>0&&dw>0&&dh>0) {
+          const m=this.getTransform();
+          draws.push({source,target:this.canvas,sourceGeneration:generation(source),
+            targetGeneration:generation(this.canvas),sx,sy,sw,sh,
+            dx:m.a*dx+m.c*dy+m.e,dy:m.b*dx+m.d*dy+m.f,
+            dw:Math.hypot(m.a,m.b)*dw,dh:Math.hypot(m.c,m.d)*dh,
+            at:Date.now()});
+          if(draws.length>300) draws.splice(0,100);
+        }
+      }
+    } catch (_) {}
+    return original.drawImage.apply(this,arguments);
+  };
 }"""
 
 # Capture hook must be present before the Canvas draws its labels.
@@ -51,45 +94,77 @@ SNAPSHOT = r"""() => {
   if(!canvas) return {ok:false,status:'CANVAS_MISSING_AFTER_SEARCH',clickReady:false,
       captureCount:(window.__bakkaraMarketHook?.log||[]).length};
   const rect=canvas.getBoundingClientRect();
-  const captureSince=window.__bakkaraMarketHook?.captureSince||0;
-  const entries=(window.__bakkaraMarketHook?.log||[])
-    .filter(e=>e.at>=captureSince&&Date.now()-e.at<12000);
+  const hook=window.__bakkaraMarketHook||{};
+  const captureSince=hook.captureSince||0;
+  const currentGeneration=c=>hook.generation?.(c) || 0;
+  const direct=(hook.log||[]).filter(e=>e.canvas===canvas&&
+    e.generation===currentGeneration(canvas)&&e.at>=captureSince&&Date.now()-e.at<30000);
+  const mapped=[];
+  for(const d of (hook.draws||[]).filter(d=>d.target===canvas&&
+      d.targetGeneration===currentGeneration(canvas)&&
+      d.at>=captureSince&&Date.now()-d.at<30000).slice(-8)) {
+    for(const e of (hook.log||[])) {
+      if(e.canvas!==d.source||e.generation!==d.sourceGeneration||
+          Date.now()-e.at>30000) continue;
+      const cx=e.x+e.width/2, cy=e.y+e.height/2;
+      if(cx<d.sx||cx>d.sx+d.sw||cy<d.sy||cy>d.sy+d.sh) continue;
+      mapped.push({...e,source:'offscreen',
+        x:d.dx+(e.x-d.sx)*d.dw/d.sw,y:d.dy+(e.y-d.sy)*d.dh/d.sh,
+        width:e.width*d.dw/d.sw,height:e.height*d.dh/d.sh});
+    }
+  }
+  const entries=direct.length?direct:mapped;
   const suits=['пики','трефы','бубны','черви'];
-  const latest=new Map();
+  const normalize=text=>text.trim().toLowerCase().replace('червы','черви');
+  const items=[];
   for(const e of entries){
-    const key=e.text.trim().toLowerCase()+':'+Math.round(e.x/3)+':'+Math.round(e.y/3);
-    latest.set(key,e);
+    const index=items.findIndex(old=>old.text===e.text&&
+      Math.abs(old.x-e.x)<4&&Math.abs(old.y-e.y)<4);
+    if(index>=0) items[index]=e;
+    else items.push(e);
   }
-  const items=[...latest.values()],labels=[],titles=[],oddsBySuit={};
+  const labels=[],titles=[],oddsBySuit={},candidateCounts={};
   for(const e of items){
-    const name=e.text.trim().toLowerCase();
-    if(suits.includes(name))labels.push(e);
+    const name=normalize(e.text);
+    if(suits.includes(name))labels.push({text:name,rawText:e.text,x:e.x,y:e.y,
+      width:e.width,height:e.height,source:e.source||'visible'});
     if(name.includes('игрок получит карту')||name.includes('игрок получит следующую масть'))
-      titles.push(e);
+      titles.push({text:e.text,x:e.x,y:e.y,width:e.width,height:e.height,
+        source:e.source||'visible'});
   }
+  if(!titles.length && /игрок получит карту\s*\(масть\)/i.test(document.body?.innerText||''))
+    titles.push({text:'Игрок получит карту (масть)',source:'DOM',y:-1});
   for(const suit of suits){
-    const same=labels.filter(e=>e.text.trim().toLowerCase()===suit);
+    const same=labels.filter(e=>e.text===suit);
     if(same.length!==1)continue;
     const label=same[0];
     const possible=items.filter(e=>{
-      const n=Number(e.text.trim().replace(',','.'));
-      return Number.isFinite(n)&&n>=1.01&&n<=100&&
-        Math.abs(e.y-label.y)<=Math.max(9,label.height*0.65)&&
-        e.x>label.x+label.width+12;
-    }).sort((a,b)=>b.x-a.x||b.at-a.at);
+      const raw=e.text.trim();
+      const n=Number(raw.replace(',','.'));
+      return /^\d{1,2}(?:[.,]\d{1,3})?$/.test(raw)&&
+        Number.isFinite(n)&&n>=1.01&&n<=100&&
+        Math.abs((e.y+e.height/2)-(label.y+label.height/2))<=
+          Math.max(10,label.height*0.75)&&
+        e.x>label.x+label.width+8;
+    });
+    candidateCounts[suit]=possible.length;
     if(possible.length!==1)continue;
     const e=possible[0];
-    const centerX=e.textAlign==='right'||e.textAlign==='end' ? e.x-e.width/2 :
-      e.textAlign==='center' ? e.x : e.x+e.width/2;
-    oddsBySuit[suit]={text:e.text,x:centerX,y:e.y,width:e.width,
-      height:e.height,amount:Number(e.text.trim().replace(',','.'))};
+    oddsBySuit[suit]={text:e.text,x:e.x+e.width/2,y:e.y+e.height/2,
+      width:e.width,height:e.height,amount:Number(e.text.trim().replace(',','.')),
+      source:e.source||'visible'};
   }
   return {ok:true,
     status:labels.length===4&&titles.length&&Object.keys(oddsBySuit).length===4?
       'ODDS_MAPPED':'TEXT_NOT_CAPTURED',
     canvas:{width:canvas.width,height:canvas.height,cssWidth:rect.width,cssHeight:rect.height},
     labels,marketTitles:titles,oddsBySuit,
-    allText:entries.filter(x=>x.text.trim()).slice(-75),captureCount:entries.length,
+    allText:entries.filter(x=>x.text.trim()).slice(-75).map(e=>
+      ({text:e.text,x:e.x,y:e.y,source:e.source||'visible'})),
+    captureCount:entries.length,
+    captureSource:direct.length?'visible':mapped.length?'offscreen':'none',
+    drawCount:(hook.draws||[]).length,
+    candidateCounts,
     clickReady:false};
 }"""
 
@@ -128,17 +203,18 @@ async def probe_player_suit_market(page: Any) -> dict[str, Any]:
     await page.evaluate(HOOK)
     canvas = page.locator(CANVAS_SELECTOR).first
     try:
-        # The game component can appear several seconds after DOMContentLoaded.
-        await canvas.wait_for(state="visible", timeout=12_000)
-    except PlaywrightTimeoutError as exc:
-        raise MarketProbeError("Canvas игры не появился за 12 секунд") from exc
-
+        # The market toolbar and Canvas are mounted together. Waiting here
+        # avoids clicking an early search control just as Vue opens its input.
+        await canvas.wait_for(state="visible", timeout=8_000)
+    except PlaywrightTimeoutError:
+        pass  # Some games mount the Canvas only after the filter is applied.
     search = page.locator(SEARCH_INPUT).first
     if not await search.is_visible():
         button = page.locator(SEARCH_BUTTON).first
         try:
             await button.wait_for(state="visible", timeout=8_000)
-            await button.click(timeout=5_000)
+            if not await search.is_visible():
+                await button.click(timeout=5_000)
         except PlaywrightTimeoutError as exc:
             raise MarketProbeError("Кнопка поиска рынков не найдена или недоступна") from exc
     try:
@@ -156,16 +232,15 @@ async def probe_player_suit_market(page: Any) -> dict[str, Any]:
     await search.fill("")
     await search.fill(MARKET_QUERY)
     try:
-        # Filtering often remounts the market canvas; the old locator can
-        # become detached. Wait for a fresh visible element after the search.
-        await canvas.wait_for(state="visible", timeout=6_000)
+        # Filtering can mount or replace the market component only after search.
+        await canvas.wait_for(state="visible", timeout=12_000)
     except PlaywrightTimeoutError as exc:
         raise MarketProbeError(
             f"После запроса «{MARKET_QUERY}» Canvas рынка исчез или не появился"
         ) from exc
 
     result: dict[str, Any] = {}
-    for _ in range(24):
+    for _ in range(60):
         result = await page.evaluate(SNAPSHOT)
         if not result.get("ok"):
             # Vue may detach/recreate Canvas in the same search transaction.

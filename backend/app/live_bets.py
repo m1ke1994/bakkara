@@ -89,7 +89,7 @@ class LiveBets:
             return True
 
     def update(self, game_id: str, status: str, detail: str = ""):
-        if status not in ("PREPARING", "SUBMITTING", "ACCEPTED", "REJECTED", "UNKNOWN"):
+        if status not in ("PREPARING", "SUBMITTING", "ACCEPTED", "REJECTED", "UNKNOWN", "NOT_SUBMITTED"):
             raise ValueError(status)
         with sqlite3.connect(self.path) as db:
             db.execute("UPDATE live_attempts SET status=?,detail=? WHERE game_id=?", (status,detail,game_id))
