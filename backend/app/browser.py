@@ -699,6 +699,14 @@ class BrowserService:
                 return
             if self.observation_task and not self.observation_task.done():
                 return
+            # Manual authorization may have opened auxiliary tabs after
+            # start(). Close them before scanning: only the primary Page is
+            # allowed to navigate between Baccarat rounds.
+            if self.context is not None:
+                for extra in list(self.context.pages):
+                    if extra is not self.page and not extra.is_closed():
+                        await extra.close()
+                        self.event("INFO", "Перед наблюдением закрыта дополнительная вкладка Chromium.")
             # A new scan session never inherits a forecast chain from history.
             self._active_chain_source_id = None
             self._queued_games.clear()
