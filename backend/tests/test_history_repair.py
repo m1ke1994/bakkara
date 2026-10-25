@@ -148,3 +148,37 @@ def test_late_third_card_after_old_timer_deadline_is_captured(tmp_path):
         assert service.store.get("1164")["calculated_suit"] == "diamonds"
         assert processed == {"1164"}
     asyncio.run(run())
+
+
+def test_missing_banker_cards_never_complete_low_player_hand(tmp_path):
+    async def run():
+        service = object.__new__(BrowserService)
+        class Page:
+            url = "about:blank"
+            async def goto(self, url, **kwargs):
+                self.url = url
+        service.page = Page()
+        service.page_lock = asyncio.Lock()
+        service.store = ObservationStore(tmp_path / "missing-banker.sqlite3")
+        service.events = deque(maxlen=100)
+        service.current_observation = None
+        async def auth():
+            return True
+        service._probe_observation_auth_locked = auth
+        async def inspect(*args):
+            return {"cards": TWO, "finished": False, "pending_card_slots": 0,
+                    "banker_initial_ranks": [], "round_timer_text": "00:00",
+                    "counts": {"player_fields": 1, "player_cards_containers": 1,
+                               "player_card_boxes": 2}}
+        service._inspect_game_dom = inspect
+        processed = set()
+        try:
+            await asyncio.wait_for(service._scan_selected_game(game(1164), [], processed, {}), .5)
+        except asyncio.TimeoutError:
+            pass
+        saved = service.store.get("1164")
+        assert processed == set()
+        assert saved["cards"] == TWO
+        assert saved["calculation_status"] != "complete"
+        assert saved["player_hand_final"] is False
+    asyncio.run(run())

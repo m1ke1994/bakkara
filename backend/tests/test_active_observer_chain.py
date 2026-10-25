@@ -421,9 +421,8 @@ def test_next_round_selected_even_if_timer_is_over_one_minute_or_just_finished()
     assert choose([old, next_future, later], set(), after_round=430).game_id == "r431"
     next_future.finished = True
     next_future.status = "Завершена"
-    # Still attempt the immediate successor if the list has JUST marked it
-    # finished: its Player cards may remain briefly readable.
-    assert choose([old, next_future, later], set(), after_round=430).game_id == "r431"
+    # Finished rounds are recovered by the background history reader.
+    assert choose([old, next_future, later], set(), after_round=430).game_id == "r432"
     assert choose([old, next_future, later], {"r431"}, after_round=430).game_id == "r432"
 
 
@@ -525,7 +524,8 @@ def test_fast_handoff_cache_rejects_ambiguous_and_missing_round_urls():
     from app.browser import prefetched_round_urls, pop_prefetched_successor
     games = [
         Game("g1440", f"{TABLE}/1440", "", "1440", "Идёт", 0),
-        Game("g1", f"{TABLE}/1", "", "1", "Ожидается", 1),
+        Game("g1", f"{TABLE}/1", "00:19", "1", "Ожидается", 1,
+             player_score="0", banker_score="0", is_countdown_to_start=True),
         Game("g1-duplicate", f"{TABLE}/1-copy", "", "1", "Ожидается", 2),
         Game("unknown", f"{TABLE}/missing", "", "", "Ожидается", 3),
     ]

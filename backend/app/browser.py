@@ -4,13 +4,14 @@ import logging
 import re
 import uuid
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError as PlaywrightTimeoutError, async_playwright
 
 from .draw_rules import player_card_count
+from .cycle18 import moment
 from .config import settings
 from .live_bets import LiveBets, settle_test_hand
 from .live_executor import PlacementError
@@ -39,6 +40,16 @@ log = logging.getLogger(__name__)
 # All user-visible results now come from Cycle18Engine; historical legacy
 # records remain readable for migrations and old test fixtures.
 LEGACY_NEXT_GAME_MODE = False
+
+
+def forecast_precedes_attempt(forecast_created: str, attempt_created: str) -> bool:
+    """Old SQLite attempts have second precision; new ones have microseconds."""
+    forecast_at, attempt_at = moment(forecast_created), moment(attempt_created)
+    if forecast_at is None or attempt_at is None:
+        return False
+    end = (attempt_at + timedelta(seconds=1) if "T" not in attempt_created
+           else attempt_at)
+    return forecast_at <= end
 
 
 def prefetched_round_urls(games: list[Game]) -> dict[int, Game]:
@@ -76,7 +87,8 @@ def pop_prefetched_successor(
     game = candidates.pop(next_no, None)
     if (game is None or game.game_id in unavailable_ids
             or game.round_number != str(next_no)
-            or not game.url or not game.game_id):
+            or not game.url or not game.game_id
+            or classify_game(game) != "UPCOMING"):
         return None
     return game
 
@@ -403,6 +415,10 @@ class BrowserService:
         self.cycle_engine = None  # Assigned by the API after construction.
 
     async def _live_before_cards(self, game: Game) -> None:
+        settlement = getattr(self, "_pending_live_settlement", None)
+        if settlement is not None:
+            self._pending_live_settlement = None
+            await settlement
         if not hasattr(self, "live_bets") or getattr(self, "cycle_engine", None) is None:
             return
         config = self.live_bets.snapshot()
@@ -461,14 +477,32 @@ class BrowserService:
             self.event("INFO", f"ТЕСТ LIVE №{game.round_number}: "
                        f"выбрана вручную масть {suit}; ожидание подготовки 20/40 рук отключено.")
         else:
+            forecast_started = asyncio.get_running_loop().time()
             cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
             forecast = next((p for p in cycle["live_preview"]
                              if p["phase"] == "CURRENT" and p["available"]
                              and p["target_round_number"] == int(game.round_number)), None)
             if not cycle["ready"] or forecast is None:
+                missing = next((p for p in cycle.get("live_preview", [])
+                                if p["phase"] == "CURRENT"
+                                and p["target_round_number"] == int(game.round_number)), None)
+                reason = (f"подготовлено {cycle.get('warmup_count', 'неизвестно')}/{cycle.get('warmup_required', 'неизвестно')} рук"
+                          if not cycle["ready"] else
+                          f"нет подтверждённых источников {missing.get('source_round_numbers', [])}"
+                          if missing else "прогноз не связан с текущей раздачей")
+                self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
+                           f"прогноз пропущен — {reason}.")
                 return
             suit = forecast["predicted_suit"]
             signal_source = "STRATEGY"
+            remaining = list_timer_seconds(getattr(game, "time", ""))
+            timer_seen_at = getattr(self, "_game_timer_observed_at", None)
+            if remaining is not None and timer_seen_at is not None:
+                remaining = max(0, remaining - int(asyncio.get_running_loop().time()-timer_seen_at))
+            self.event("INFO", f"Раздача №{game.round_number}, ID {game.game_id}: "
+                       f"прогноз {suit} готов за {(asyncio.get_running_loop().time()-forecast_started)*1000:.0f} мс; "
+                       f"оценка оставшегося окна ставок по таймеру списка "
+                       f"{remaining if remaining is not None else 'неизвестна'} с.")
         plan = await asyncio.to_thread(self.live_plan_store.load)
         step = self.live_bets.snapshot()["step"]
         if step > len(plan.row):
@@ -492,12 +526,18 @@ class BrowserService:
             self.live_bets.update(game.game_id, status)
             self.event("INFO" if status == "ACCEPTED" else "WARNING",
                        f"LIVE раздача №{game.round_number}: {status}, {suit}, {amount} RUB.")
+            if status == "UNKNOWN":
+                self.event("WARNING", f"LIVE раздача №{game.round_number}, ID {game.game_id}: "
+                           "подтверждение не получено; новые отправки заблокированы до сверки истории ставок БК.")
         except Exception as exc:
             current = self.live_bets.snapshot()["attempt"]
             status = "UNKNOWN" if current and current["status"] == "SUBMITTING" else "NOT_SUBMITTED"
             detail = str(exc) if isinstance(exc, PlacementError) else type(exc).__name__
             self.live_bets.update(game.game_id, status, detail)
             self.event("WARNING", f"LIVE раздача №{game.round_number}: {status} — {detail}.")
+            if status == "UNKNOWN":
+                self.event("WARNING", f"LIVE раздача №{game.round_number}, ID {game.game_id}: "
+                           "новые отправки заблокированы до сверки истории ставок БК.")
 
     async def _live_after_cards(self, game: Game) -> None:
         if getattr(self, "cycle_engine", None) is None:
@@ -518,7 +558,11 @@ class BrowserService:
             return
         cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
         result = next((p["result"] for p in cycle["recent"]
-                       if p["target_game_id"] == game.game_id), None)
+                       if attempt and attempt["status"] == "ACCEPTED"
+                       and p["target_game_id"] == game.game_id
+                       and p["target_round_number"] == int(attempt["round_number"])
+                       and p["predicted_suit"] == attempt["suit"]
+                       and forecast_precedes_attempt(p["created_at"], attempt["created_at"])), None)
         if result in ("WIN", "LOSE"):
             plan = await asyncio.to_thread(self.live_plan_store.load)
             if self.live_bets.settle(game.game_id, result, len(plan.row)):
@@ -622,6 +666,12 @@ class BrowserService:
         if task and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        settlement, self._pending_live_settlement = getattr(self, "_pending_live_settlement", None), None
+        if settlement is not None:
+            try:
+                await settlement
+            except Exception as exc:
+                self.event("ERROR", f"Сверка принятой ставки при остановке не завершена: {type(exc).__name__}.")
         source_id, self._active_chain_source_id = getattr(self, "_active_chain_source_id", None), None
         if source_id:
             self.store.record_unresolved_transition(
@@ -1452,7 +1502,17 @@ class BrowserService:
                 getattr(self, "_last_selected_round_number", None),
                 set(processed_ids) | deferred,
             )
+            if (next_game is not None and hasattr(self, "live_bets")
+                    and self.live_bets.snapshot()["mode"] == "LIVE"):
+                remaining = list_timer_seconds(next_game.time)
+                cached_at = getattr(self, "_prefetched_at", None)
+                if (remaining is not None and cached_at is not None
+                        and loop.time() - cached_at >= remaining):
+                    self.event("INFO", f"Раздача №{next_game.round_number}, ID {next_game.game_id}: "
+                               "таймер сохранённого списка истёк; перечитываем открытые окна ставок.")
+                    next_game = None
             if next_game is not None:
+                self._game_timer_observed_at = getattr(self, "_prefetched_at", None)
                 self.event(
                     "INFO", f"Быстрый переход к раздаче №{next_game.round_number} "
                     f"по ранее подтверждённому URL (ID {next_game.game_id}); "
@@ -1488,13 +1548,6 @@ class BrowserService:
             if current_path != wanted_path:
                 await self.page.goto(settings.game_list_url, wait_until="domcontentloaded", timeout=30_000)
             await self.page.locator("li.dashboard-champ-body").first.wait_for(timeout=6_000)
-            try:
-                await self.page.wait_for_function(
-                    "() => document.querySelectorAll('.dashboard-game-block__link[href]').length > 0",
-                    timeout=2_000,
-                )
-            except PlaywrightTimeoutError:
-                pass
             try:
                 await self.page.wait_for_function(
                     """() => {
@@ -1598,7 +1651,9 @@ class BrowserService:
         while True:
             candidate = choose_observation_game(
                 all_games, excluded_ids | invalidated_ids,
-                after_round=getattr(self, "_last_selected_round_number", None))
+                after_round=getattr(self, "_last_selected_round_number", None),
+                prefer_betting_window=(hasattr(self, "live_bets")
+                                       and self.live_bets.snapshot()["mode"] == "LIVE"))
             if candidate is None:
                 break
             async with self.page_lock:
@@ -1628,6 +1683,7 @@ class BrowserService:
         # Use the most recent LIST snapshot (including the candidate reread)
         # for future direct hand-offs; never cache a guessed round or URL.
         self._prefetched_rounds = prefetched_round_urls(all_games)
+        self._prefetched_at = loop.time()
         recovering_old_game = False
         if game is None and getattr(self, "_last_selected_round_number", None) is None:
             # Older URLs must never block the physical next round after a
@@ -1685,6 +1741,7 @@ class BrowserService:
 
         if origin_source_id and origin_source_id != game.game_id:
             self._set_lifecycle_state(origin_source_id, "NEXT_GAME", f"target_game_id={game.game_id}")
+        self._game_timer_observed_at = loop.time()
         await self._begin_selected_game(game, processed_ids, retry_after)
 
 
@@ -2014,8 +2071,6 @@ class BrowserService:
         countdown_zero_announced = False
         result_end_announced = False
         outcome_first_seen_at: float | None = None
-        last_two_signature: tuple[Any, ...] | None = None
-        stable_two_reads = 0
         list_finished = game.status == "Завершена" or is_finished_status(game.status_text)
         # The outer list timer represents time UNTIL kickoff. The old fixed
         # 45-second deadline started on page opening and expired a few seconds
@@ -2045,10 +2100,10 @@ class BrowserService:
             self._set_lifecycle_state(game.game_id, "OBSERVING")
             last_finalized = getattr(self, "_last_finalized_at", None)
             if last_finalized is not None:
-                self.event("INFO", f"Переход от предыдущего подтверждённого набора "
-                    f"до открытия раздачи №{game.round_number}: "
+                self.event("INFO", f"Переход от ID {getattr(self, '_last_finalized_game_id', 'неизвестен')} "
+                    f"до открытия раздачи №{game.round_number}, ID {game.game_id}: "
                     f"{(page_ready_at - last_finalized)*1000:.0f} мс.")
-            self.event("INFO", f"Страница раздачи № {game.round_number or game.game_id} открыта за {(page_ready_at-navigation_started)*1000:.0f} мс; начинаем опрос DOM без стартовой паузы.")
+            self.event("INFO", f"Раздача №{game.round_number or game.game_id}, ID {game.game_id}: следующая игра открыта за {(page_ready_at-navigation_started)*1000:.0f} мс; начинаем опрос DOM без стартовой паузы.")
 
             await self._live_before_cards(game)
 
@@ -2087,11 +2142,6 @@ class BrowserService:
                                 "card_slot_evidence": diagnostics.get("card_slot_evidence", []),
                             }
                             reread.update(retained)
-                        reread["result_two_independent_reads"] = (
-                            len(first_read_cards) == 2
-                            and first_read_cards == second_cards
-                            and [card.get("position") for card in first_read_cards] == [1, 2]
-                        )
                         diagnostics = reread
                 finish_seen = in_page_finished or list_finished
                 # A confirmed Baccarat result is an explicit end-of-round
@@ -2159,66 +2209,33 @@ class BrowserService:
                         labels = {1: "Первая", 2: "Вторая", 3: "Третья"}
                         self.event("INFO", f"{labels[position]} карта обнаружена через {(first_card_at[position]-page_ready_at)*1000:.0f} мс после загрузки страницы.")
 
-                if (len(observed_cards) == 2
-                        and [item.get("position") for item in observed_cards] == [1, 2]):
-                    signature = tuple((c.get("position"), c.get("rank"), c.get("suit"))
-                                      for c in observed_cards)
-                    stable_two_reads = (stable_two_reads + 1 if signature == last_two_signature else 1)
-                    last_two_signature = signature
-                elif len(observed_cards) == 3:
-                    stable_two_reads = 0
-                if diagnostics.get("result_two_independent_reads") and stable_two_reads < 2:
-                    # The main DOM pass and the independent final reread
-                    # both showed the identical real cards.
-                    stable_two_reads = 2
-                # Two separate DOM snapshots of exactly the same actual
-                # Player cards are required if the end banner outlives the
-                # widget: one isolated screenshot isn't a final hand.
-                exact_two = (len(observed_cards) == 2 and box_count == 2 and pending == 0
-                             and [item.get("position") for item in observed_cards] == [1, 2])
                 exact_three = (len(observed_cards) == 3 and box_count == 3 and pending == 0
                                and [item.get("position") for item in observed_cards] == [1, 2, 3])
                 confirmed_three = exact_three
                 confirmed_two = False
-                # Baccarat always has two Player cards, with an optional third.
-                # Some skins keep an EMPTY third card-box as a visible
-                # placeholder even after the result is announced.
-                # "Победа"/"Ничья" is terminal, but wait a short rendering
-                # grace period before choosing a true two-card final hand.
-                terminal_seen_at = outcome_first_seen_at if outcome_first_seen_at is not None else (
-                    started_at if list_finished else None)
-                result_two = bool(
-                    terminal_seen_at is not None
-                    and loop.time() - terminal_seen_at >= 2.0
-                    and stable_two_reads >= 2
-                    and player_card_count(cards, diagnostics.get("banker_initial_ranks", [])) != 3
-                    and len(cards) == 2
-                    and [item.get("position") for item in cards] == [1, 2]
-                    and (box_count == 0 or 2 <= box_count <= 3)
-                    and (box_count == 0 or pending == box_count - 2)
+                # The draw rule, using real initial ranks, determines whether
+                # two Player cards are final. An empty third slot is only a
+                # placeholder. Neither a result animation nor a timer is
+                # needed; re-read the live DOM before persisting the hand.
+                required_count = player_card_count(
+                    observed_cards, diagnostics.get("banker_initial_ranks", []))
+                rule_two = bool(
+                    required_count == 2 and len(cards) == 2
+                    and len(observed_cards) == 2
+                    and [item.get("position") for item in observed_cards] == [1, 2]
+                    and 2 <= box_count <= 3 and pending == box_count - 2
                 )
-                # A countdown is not evidence that dealing has ended.
-                timer_end_two = False
-                if result_two:
-                    # Independent second DOM read: never finalize the two-card
-                    # hand if a real third card appeared in the meantime.
+                if rule_two:
                     async with self.page_lock:
                         final_read = await self._inspect_game_dom(settings.player_name_text, settings.banker_name_text)
                     final_boxes = int(final_read.get("counts", {}).get("player_card_boxes", 0))
                     final_pending = int(final_read.get("pending_card_slots", 0))
-                    final_exact_two = (
-                        final_boxes == 2 and final_pending == 0
-                    )
-                    final_result_two = bool(
-                        result_two and (final_read.get("finished") or in_page_finished)
+                    confirmed_two = (
+                        player_card_count(final_read.get("cards", []),
+                                          final_read.get("banker_initial_ranks", [])) == 2
                         and 2 <= final_boxes <= 3
                         and final_pending == final_boxes - 2
-                    )
-                    confirmed_two = (
-                        player_card_count(cards, final_read.get("banker_initial_ranks", [])) != 3
-                        and len(cards) == 2 and len(observed_cards) == 2
                         and final_read.get("cards", []) == observed_cards
-                        and (final_exact_two or final_result_two)
                     )
                     # Preserve a third card seen in this final read immediately.
                     # It may disappear before the next regular poll.
@@ -2234,7 +2251,7 @@ class BrowserService:
                 # A terminal blank slot is not an unconfirmed *card*. Once
                 # two real positions were reverified, ignore only the empty
                 # third placeholder in calculating the final Player hand.
-                settled_pending = 0 if confirmed_two and result_two else pending
+                settled_pending = 0 if confirmed_two else pending
                 if confirmed_two and not player_present:
                     # An ended screen hides the original Player component;
                     # confirmation relied on repeated actual card snapshots.
@@ -2256,12 +2273,7 @@ class BrowserService:
                 if confirmed_three:
                     reason = f"В одном атомарном DOM-снимке прочитаны три полные позиции Игрока; ждать завершения игры не требуется. {cause}"
                 elif confirmed_two:
-                    signal = ("показана итоговая надпись «Победа»/«Ничья»"
-                              if diagnostics.get("baccarat_result_visible") else
-                              "убывающий таймер достиг 00:00, третья карта не появилась"
-                              if timer_end_two and not finish_seen else
-                              "явный сигнал завершения раздачи")
-                    reason = f"Подтверждены две окончательные карты: {signal}; набор перечитан. {cause}"
+                    reason = f"Правило добора подтверждает две карты Игрока; набор независимо перечитан. {cause}"
                 elif finish_seen and cards:
                     reason = f"Игра завершена, но окончательный набор карт не подтверждён; сохранён последний достоверный снимок. {cause}"
                 elif finish_seen:
@@ -2320,7 +2332,7 @@ class BrowserService:
                     )
                     if saved:
                         last_saved_signature = save_signature
-                    self.event("INFO", f"Снимок раздачи сохранён за {(loop.time()-persist_started)*1000:.0f} мс.")
+                    self.event("INFO", f"Раздача №{game.round_number or game.game_id}, ID {game.game_id}: сохранение заняло {(loop.time()-persist_started)*1000:.0f} мс.")
 
                 if hand_final:
                     if saved:
@@ -2336,7 +2348,10 @@ class BrowserService:
                         else:
                             self._active_chain_source_id = None
                         self.observation_status = "SAVED"
-                        await self._live_after_cards(game)
+                        # Let the already known next URL open while the
+                        # result and bet ledger settle in the background.
+                        self._pending_live_settlement = asyncio.create_task(
+                            self._live_after_cards(game))
                         self.observation_diagnostic = (
                             f"Окончательные карты раздачи № {game.round_number or game.game_id} сохранены; переходим к следующей игре."
                             if hand_final else f"Игра завершена, но итог карт не подтверждён; запись сохранена без прогноза."
@@ -2346,7 +2361,9 @@ class BrowserService:
                             self.event("INFO", f"Набор Игрока в раздаче № {game.round_number or game.game_id} подтверждён за {(loop.time()-last_card_time)*1000:.0f} мс после последней карты; общий этап занял {(loop.time()-started_at)*1000:.0f} мс.")
                         else:
                             self.event("WARNING", f"Раздача № {game.round_number or game.game_id} завершилась без достоверного финального набора; WIN/LOSE не выводится.")
-                        self.event("INFO", f"Следующий переход подготовлен за {(loop.time()-started_at)*1000:.0f} мс после начала чтения.")
+                        self._last_finalized_at = loop.time()
+                        self._last_finalized_game_id = game.game_id
+                        self.event("INFO", f"Раздача №{game.round_number or game.game_id}, ID {game.game_id}: переход начат через {(loop.time()-started_at)*1000:.0f} мс после начала чтения; от полного набора до перехода {(loop.time()-last_card_time)*1000:.0f} мс.")
                     else:
                         self._active_chain_source_id = None
                         retry_after[game.game_id] = loop.time() + max(settings.incomplete_retry_seconds, 5)

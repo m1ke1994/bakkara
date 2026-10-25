@@ -374,7 +374,7 @@ def list_timer_seconds(value: str | None) -> int | None:
 
 def choose_observation_game(
     games: list[Game], handled_ids: set[str],
-    *, after_round: int | None = None,
+    *, after_round: int | None = None, prefer_betting_window: bool = False,
 ) -> Game | None:
     """Do not lose the next live hand while recovering stale/finished games.
 
@@ -384,6 +384,17 @@ def choose_observation_game(
     prefer refreshing the list until it is closer to its start.
     """
     readable = [g for g in games if g.game_id and g.url and g.game_id not in handled_ids]
+    if prefer_betting_window:
+        open_games = [g for g in readable if classify_game(g) == "UPCOMING"
+                      and ((seconds := list_timer_seconds(g.time)) is None or seconds > 0)]
+        if after_round is not None:
+            open_games = [g for g in open_games if g.round_number.isdecimal()
+                          and 0 < (int(g.round_number) - after_round) % 1440 <= 60]
+            if open_games:
+                return min(open_games, key=lambda g: ((int(g.round_number)-after_round) % 1440,
+                                                      list_timer_seconds(g.time) or 10000, g.position))
+        elif open_games:
+            return min(open_games, key=lambda g: (list_timer_seconds(g.time) or 10000, g.position))
     if after_round is not None:
         # A finished #400 must lead to #401 (or the earliest available later
         # physical round), never back to #399 or stale archive recovery.
@@ -393,11 +404,10 @@ def choose_observation_game(
             if not raw.isdecimal():
                 continue
             distance = (int(raw) - after_round) % 1440
-            # A just-ended immediate next game may still contain the real
-            # cards for a moment. Give #N+1 one short chance to be captured,
-            # but never chase older finished games from a live sequence.
+            # Finished hands are recovered on the isolated history page.
+            # Opening them in the live sequence consumes the next betting window.
             state = classify_game(game)
-            if 0 < distance <= 60 and (state != "FINISHED" or distance == 1):
+            if 0 < distance <= 60 and state != "FINISHED":
                 future.append((distance, game))
         if future:
             # Following a numbered sequence takes precedence over guessed

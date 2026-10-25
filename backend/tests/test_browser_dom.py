@@ -161,7 +161,7 @@ def test_observer_confirms_stable_third_card_and_saves_without_waiting_for_game_
     asyncio.run(run())
 
 
-def test_two_cards_are_final_only_after_explicit_finished_list_status(tmp_path, monkeypatch):
+def test_two_cards_finish_immediately_when_banker_has_natural(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, game_page_wait_seconds=30, game_finish_timeout_seconds=2,
@@ -189,6 +189,7 @@ def test_two_cards_are_final_only_after_explicit_finished_list_status(tmp_path, 
                 "url": "about:blank", "counts": {"player_fields": 1, "player_cards_containers": 1,
                     "player_card_boxes": 2}, "cards": cards, "pending_card_slots": 0,
                 "finished": False, "status_text": "", "cause": "fixture", "dom_fragment": "",
+                "banker_initial_ranks": ["9", "K"],
             }
 
         service._inspect_game_dom = inspect
@@ -200,8 +201,8 @@ def test_two_cards_are_final_only_after_explicit_finished_list_status(tmp_path, 
         elapsed = asyncio.get_running_loop().time() - started
 
         saved = service.store.get("two-final")
-        assert reads >= 3  # terminal evidence gets a rendering grace period
-        assert 2 <= elapsed < 5  # stable final reread, not the old 30-second page delay
+        assert reads >= 2  # two independent card snapshots
+        assert elapsed < 1  # no result banner or rendering grace period
         assert processed == {"two-final"}
         assert saved["player_hand_final"] is True
         assert saved["finished_confirmed"] is True
@@ -623,6 +624,7 @@ def test_victory_with_two_cards_finalizes_without_waiting_45_seconds(tmp_path, m
             final = calls >= 2
             return {
                 "cards": cards,
+                "banker_initial_ranks": ["9", "K"],
                 "round_timer_text": "00:17",
                 "counts": {"player_fields": 1, "player_cards_containers": 1,
                            "player_card_boxes": 2},
@@ -646,11 +648,10 @@ def test_victory_with_two_cards_finalizes_without_waiting_45_seconds(tmp_path, m
         assert saved["player_hand_final"] is True
         assert saved["final_snapshot_reverified"] is True
         assert saved["calculation_status"] == "complete"
-        assert saved["finished_confirmed"] is True
-        assert "Победа" in saved["reason"]
+        assert saved["finished_confirmed"] is False
+        assert "Правило добора" in saved["reason"]
         assert service.observation_status == "SAVED"
-        assert any("обнаружено «Победа»" in e["message"] for e in service.events)
-        assert calls >= 3
+        assert calls >= 2
     asyncio.run(run())
 
 
@@ -743,6 +744,7 @@ def test_victory_two_cards_with_empty_third_placeholder_is_final(tmp_path, monke
             reads += 1
             return {
                 "cards": cards,
+                "banker_initial_ranks": ["9", "K"],
                 "round_timer_text": "00:01",
                 "counts": {"player_fields": 1, "player_cards_containers": 1,
                            "player_card_boxes": 3},
@@ -768,7 +770,7 @@ def test_victory_two_cards_with_empty_third_placeholder_is_final(tmp_path, monke
         assert service.current_observation["raw_pending_card_slots"] == 1
         assert service.current_observation["pending_card_slots"] == 0
         assert service.observation_status == "SAVED"
-        assert reads >= 3
+        assert reads >= 2
     asyncio.run(run())
 
 
@@ -885,7 +887,7 @@ def test_transient_result_without_final_card_reread_keeps_hand_unconfirmed(tmp_p
         service._probe_observation_auth_locked = authorized
         cards = [
             {"position": 1, "rank": "K", "suit": "clubs"},
-            {"position": 2, "rank": "7", "suit": "diamonds"},
+            {"position": 2, "rank": "5", "suit": "diamonds"},
         ]
         count = 0
         async def inspect(_player, _banker):
@@ -1189,6 +1191,7 @@ def test_round_485_waits_for_player_cards_after_result_for_more_than_three_secon
             has_cards = asyncio.get_running_loop().time() - begin >= 3.7
             return {
                 "cards": cards if has_cards else [],
+                "banker_initial_ranks": ["9", "K"],
                 "round_timer_text": "",
                 "counts": {
                     "player_fields": 1,

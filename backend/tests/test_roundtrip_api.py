@@ -10,6 +10,7 @@ from playwright.async_api import async_playwright
 import app.browser as browser_module
 import app.main as main_module
 from app.browser import BrowserService
+from app.cycle18 import Cycle18Engine
 from app.observation import Game, ObservationStore
 
 
@@ -123,6 +124,7 @@ def test_two_to_three_card_dom_update_reaches_history_state_api_and_prediction(t
         assert service.current_observation["round_number"] == "784"
 
         monkeypatch.setattr(main_module, "browser_service", service)
+        monkeypatch.setattr(main_module, "cycle18_engine", Cycle18Engine(tmp_path / "ui-cycle.sqlite3"))
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=main_module.app), base_url="http://test"
         ) as client:
@@ -162,7 +164,8 @@ def test_two_to_three_card_dom_update_reaches_history_state_api_and_prediction(t
 
             await page.route("http://127.0.0.1:8010/api/state", serve_api)
             await page.goto("http://127.0.0.1:5174/", wait_until="domcontentloaded")
-            row_cells = page.locator("tbody tr").first.locator("td")
+            history_table = page.get_by_role("table", name="История наблюдений")
+            row_cells = history_table.locator("tbody tr").first.locator("td")
             await row_cells.first.wait_for(timeout=5_000)
             assert await row_cells.nth(1).inner_text() == "784"
             player_cards = row_cells.nth(2).locator(".history-card")
@@ -170,8 +173,8 @@ def test_two_to_three_card_dom_update_reaches_history_state_api_and_prediction(t
             card_lines = [await card.bounding_box() for card in await player_cards.all()]
             assert max(line["y"] for line in card_lines) - min(line["y"] for line in card_lines) < 1
             assert await row_cells.nth(3).inner_text() == "♣"
-            assert await row_cells.nth(4).locator(".prediction-none").count() == 1
-            assert await page.locator("tbody tr").count() == 1
+            assert await row_cells.count() == 4  # Legacy links are not cycle18 forecasts.
+            assert await history_table.locator("tbody tr").count() == 1
             await chromium.close()
 
     async def _resolved_true():
@@ -227,6 +230,7 @@ def test_a_b_c_prediction_chain_reaches_api_and_rendered_history(tmp_path, monke
         service.state_version = 1
         service.state_epoch = "a-b-c-test"
         monkeypatch.setattr(main_module, "browser_service", service)
+        monkeypatch.setattr(main_module, "cycle18_engine", Cycle18Engine(tmp_path / "ui-cycle.sqlite3"))
 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=main_module.app), base_url="http://test"
@@ -265,7 +269,8 @@ def test_a_b_c_prediction_chain_reaches_api_and_rendered_history(tmp_path, monke
 
             await page.route("http://127.0.0.1:8010/api/state", serve_api)
             await page.goto("http://127.0.0.1:5174/", wait_until="domcontentloaded")
-            b_row = page.locator("tbody tr").filter(has=page.locator('a[href*="screen-b"]'))
+            history_table = page.get_by_role("table", name="История наблюдений")
+            b_row = history_table.locator("tbody tr").filter(has=page.locator('a[href*="screen-b"]'))
             await b_row.wait_for(timeout=5_000)
             cards = b_row.locator(".history-card")
             assert await cards.count() == 2
@@ -273,8 +278,8 @@ def test_a_b_c_prediction_chain_reaches_api_and_rendered_history(tmp_path, monke
             assert (await cards.nth(1).inner_text()).startswith("10")
             cells = b_row.locator("td")
             assert await cells.nth(3).locator(".calculated-suit").count() == 1
-            assert await cells.nth(4).locator(".prediction-win").inner_text() == "WIN"
-            assert await page.locator("tbody tr").count() == 2
+            assert await cells.count() == 4  # The legacy WIN is API history, not an executed cycle18 signal.
+            assert await history_table.locator("tbody tr").count() == 2
             await chromium.close()
 
     asyncio.run(run())

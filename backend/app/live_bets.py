@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,6 +24,8 @@ class LiveBets:
                 db.execute("ALTER TABLE live_control ADD COLUMN warmup_test INTEGER NOT NULL DEFAULT 0")
             if "test_suit" not in columns:
                 db.execute("ALTER TABLE live_control ADD COLUMN test_suit TEXT NOT NULL DEFAULT 'hearts'")
+            if "single_test_run_id" not in columns:
+                db.execute("ALTER TABLE live_control ADD COLUMN single_test_run_id TEXT")
             db.execute("""CREATE TABLE IF NOT EXISTS live_attempts (
                 game_id TEXT PRIMARY KEY, round_number TEXT NOT NULL,
                 suit TEXT NOT NULL, amount TEXT NOT NULL, step INTEGER NOT NULL,
@@ -30,16 +34,36 @@ class LiveBets:
             attempt_columns = {row[1] for row in db.execute("PRAGMA table_info(live_attempts)")}
             if "signal_source" not in attempt_columns:
                 db.execute("ALTER TABLE live_attempts ADD COLUMN signal_source TEXT NOT NULL DEFAULT 'STRATEGY'")
+            if "single_test_run_id" not in attempt_columns:
+                db.execute("ALTER TABLE live_attempts ADD COLUMN single_test_run_id TEXT")
+
+    def begin_single_stake_test(self) -> str:
+        """Persist a one-attempt, 10 RUB test gate across process restarts."""
+        with sqlite3.connect(self.path) as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT single_test_run_id FROM live_control WHERE id=1").fetchone()[0]
+            if current:
+                return current
+            run_id = uuid.uuid4().hex
+            db.execute("UPDATE live_control SET single_test_run_id=? WHERE id=1", (run_id,))
+            return run_id
+
+    def end_single_stake_test(self) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("UPDATE live_control SET single_test_run_id=NULL WHERE id=1")
 
     def snapshot(self):
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
-            control = dict(db.execute("SELECT mode,step,coupon_test_filter,warmup_test,test_suit FROM live_control WHERE id=1").fetchone())
+            control = dict(db.execute("SELECT mode,step,coupon_test_filter,warmup_test,test_suit,single_test_run_id FROM live_control WHERE id=1").fetchone())
             attempt = db.execute("SELECT * FROM live_attempts ORDER BY created_at DESC,rowid DESC LIMIT 1").fetchone()
             control["attempt"] = dict(attempt) if attempt else None
             control["blocked"] = bool(db.execute(
                 "SELECT 1 FROM live_attempts WHERE status IN ('PREPARING','SUBMITTING','UNKNOWN','ACCEPTED') "
-                "AND result IS NULL LIMIT 1").fetchone())
+                "AND result IS NULL LIMIT 1").fetchone()
+                or (control["single_test_run_id"] and db.execute(
+                    "SELECT 1 FROM live_attempts WHERE single_test_run_id=? LIMIT 1",
+                    (control["single_test_run_id"],)).fetchone()))
             return control
 
     def mode(self, value: str):
@@ -77,15 +101,22 @@ class LiveBets:
             raise ValueError("Недопустимый источник сигнала")
         with sqlite3.connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
+            run_id, step = db.execute("SELECT single_test_run_id,step FROM live_control WHERE id=1").fetchone()
+            if run_id:
+                if amount != Decimal("10") or step != 1:
+                    return False
+                if db.execute("SELECT 1 FROM live_attempts WHERE single_test_run_id=? LIMIT 1",
+                              (run_id,)).fetchone():
+                    return False
             if db.execute("SELECT 1 FROM live_attempts WHERE game_id=?", (game_id,)).fetchone():
                 return False
             if db.execute("SELECT 1 FROM live_attempts WHERE status IN ('PREPARING','SUBMITTING','UNKNOWN','ACCEPTED') "
                           "AND result IS NULL LIMIT 1").fetchone():
                 return False
-            step = db.execute("SELECT step FROM live_control WHERE id=1").fetchone()[0]
-            db.execute("INSERT INTO live_attempts(game_id,round_number,suit,amount,step,status,signal_source) "
-                       "VALUES(?,?,?,?,?,'PREPARING',?)",
-                       (game_id,round_number,suit,str(amount),step,signal_source))
+            db.execute("INSERT INTO live_attempts(game_id,round_number,suit,amount,step,status,signal_source,single_test_run_id,created_at) "
+                       "VALUES(?,?,?,?,?,'PREPARING',?,?,?)",
+                       (game_id,round_number,suit,str(amount),step,signal_source,run_id,
+                        datetime.now(timezone.utc).isoformat()))
             return True
 
     def update(self, game_id: str, status: str, detail: str = ""):

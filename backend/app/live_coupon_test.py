@@ -131,7 +131,7 @@ async def _submission_result(page, before: str, balance_before: Decimal | None,
 
 
 async def place_regular_coupon(page, suit: str, amount: Decimal, mark_submitting,
-                               report=None) -> str:
+                               report=None, *, submit: bool = True) -> str:
     """Search Canvas, select odds, verify coupon, fill step, submit exactly once."""
     def stage(message: str) -> None:
         if report:
@@ -206,6 +206,9 @@ async def place_regular_coupon(page, suit: str, amount: Decimal, mark_submitting
     await _selected_card(page, suit, box["odds"])
     if _amount(await amount_field.input_value()) != amount:
         raise PlacementError("Сумма ставки изменилась перед подтверждением")
+    if not submit:
+        stage("Купон готов: исход, сумма и кнопка подтверждены; отправка отключена")
+        return "READY"
     balance_before = await _read_balance(page)
     before = (await page.locator("body").first.inner_text(timeout=2_000)).casefold()
     stage("Купон: нажимаем «Сделать ставку» один раз")

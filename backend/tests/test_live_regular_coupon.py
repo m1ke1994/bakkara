@@ -1,5 +1,6 @@
 """Browser level coupon regression using the bookmaker's regular DOM shape."""
 import asyncio
+from collections import deque
 from decimal import Decimal
 from urllib.parse import quote
 
@@ -10,6 +11,9 @@ from app.live_bets import LiveBets
 from app.live_coupon_test import place_regular_coupon
 from app.live_executor import PlacementError, place_one_click
 from app.live_market_probe import INIT_SCRIPT, SNAPSHOT
+from app.browser import BrowserService
+from app.cycle18 import Cycle18Engine
+from app.observation import Game, ObservationStore
 
 
 HTML = r"""<!doctype html><html lang="ru"><meta charset="utf-8"><body>
@@ -57,6 +61,9 @@ visible.addEventListener('click',e=>{
     '<input class="ui-number-input__field" value="99" inputmode="decimal">';
   document.querySelector('.coupon-buttons').innerHTML=
     '<button onclick="submitBet()">Сделать ставку</button>';
+  if(window.testMode==='closed')
+    document.querySelector('.coupon-bets__bet').insertAdjacentHTML(
+      'beforeend','<span class="coupon-bet-lock__text">Рынок закрыт</span>');
 });
 visible.addEventListener('mousemove',e=>{
   visible.style.cursor=e.offsetX>=810?'pointer':'default';
@@ -116,6 +123,112 @@ def test_regular_coupon_full_browser_flow_and_compatibility(submit):
             assert any("координаты" in event for event in reports)
             assert any("слой=offscreen" in event for event in reports)
 
+    asyncio.run(_with_page(run))
+
+
+def test_one_accepted_test_stake_then_next_coupon_ready_without_submission(tmp_path):
+    async def run(page):
+        path = tmp_path / "single-run.sqlite3"
+        bets = LiveBets(path)
+        bets.begin_single_stake_test()
+        assert bets.reserve("first", "601", "diamonds", Decimal("10"))
+        status = await place_regular_coupon(
+            page, "diamonds", Decimal("10"),
+            lambda: bets.update("first", "SUBMITTING"))
+        bets.update("first", status)
+        assert status == "ACCEPTED"
+        assert await page.evaluate("window.submissions") == 1
+        assert bets.settle("first", "WIN", 2)
+        assert not LiveBets(path).reserve("second", "602", "hearts", Decimal("10"))
+        await page.goto("data:text/html," + quote(HTML), wait_until="domcontentloaded")
+        ready = await place_regular_coupon(
+            page, "hearts", Decimal("10"),
+            lambda: pytest.fail("Second bet must not be submitted"), submit=False)
+        assert ready == "READY"
+        assert await page.evaluate("window.submissions") == 0
+        assert await page.locator(".coupon-amount input").input_value() == "10"
+    asyncio.run(_with_page(run))
+
+
+def test_market_closes_after_selection_before_confirmation():
+    async def run(page):
+        await page.evaluate("window.testMode='closed'")
+        with pytest.raises(PlacementError, match="заблокировал"):
+            await place_regular_coupon(page, "diamonds", Decimal("10"),
+                                       lambda: pytest.fail("Closed market submitted"))
+        assert await page.evaluate("window.submissions") == 0
+    asyncio.run(_with_page(run))
+
+
+@pytest.mark.parametrize("outcome", ["WIN", "LOSE"])
+def test_observer_prediction_coupon_result_and_next_ready_on_local_bookmaker(tmp_path, outcome):
+    async def run(page):
+        async def bookmaker_page(route):
+            await route.fulfill(body=HTML, content_type="text/html")
+        await page.route("https://example.test/**", bookmaker_page)
+        path = tmp_path / "cycle.sqlite3"
+        store, engine, bets = ObservationStore(path), Cycle18Engine(path), LiveBets(path)
+        engine.start_session()
+        bets.mode("LIVE")
+        bets.begin_single_stake_test()
+        source_cards = [{"position": 1, "rank": "A", "suit": "hearts"},
+                        {"position": 2, "rank": "7", "suit": "hearts"}]
+        for number in range(601, 620):
+            source = Game(f"r{number}", f"https://example.test/{number}", "", str(number), "Завершена", 0)
+            store.upsert(source, source_cards, "CONFIRMED", "стенд", "CARDS_CONFIRMED",
+                         player_hand_final=True, final_snapshot_reverified=True)
+        rounds = [Game(f"r{number}", f"https://example.test/{number}", "00:15",
+                       str(number), "Ожидается", number-620,
+                       player_score="0", banker_score="0", is_countdown_to_start=True)
+                  for number in (620, 621, 622)]
+        store.register_discovered_games(rounds)
+        service = object.__new__(BrowserService)
+        service.page, service.page_lock = page, asyncio.Lock()
+        service.store, service.cycle_engine, service.live_bets = store, engine, bets
+        service.live_plan_store = type("Plan", (), {"load": lambda _self: type("Row", (), {"row": [Decimal("10")]})()})()
+        service.events = deque(maxlen=200)
+        service.current_observation = None
+        service.observation_status = "WAITING_FOR_GAME"
+        service.observation_diagnostic = ""
+        async def authorized():
+            return True
+        service._probe_observation_auth_locked = authorized
+        cards_for_round = {620: source_cards}
+        async def inspect(*_args):
+            number = int(page.url.rsplit("/", 1)[-1])
+            cards = cards_for_round[number]
+            return {"cards": cards, "banker_initial_ranks": [],
+                    "counts": {"player_fields": 1, "player_cards_containers": 1,
+                               "player_card_boxes": len(cards)},
+                    "pending_card_slots": 0, "finished": False,
+                    "status_text": "", "cause": "локальный стенд"}
+        service._inspect_game_dom = inspect
+        processed = set()
+        await service._scan_selected_game(rounds[0], [], processed, {})
+        assert processed == {"r620"}
+        forecast = engine.refresh({"game_id": "r621", "round_number": "621"})
+        preview = next(p for p in forecast["live_preview"] if p["phase"] == "CURRENT")
+        assert preview["available"]
+        suit = preview["predicted_suit"]
+        actual_suit = suit if outcome == "WIN" else next(
+            item for item in ("hearts", "diamonds", "clubs", "spades") if item != suit)
+        cards_for_round[621] = [{"position": 1, "rank": "A", "suit": actual_suit},
+                                {"position": 2, "rank": "8", "suit": actual_suit}]
+        service.current_observation = {"game_id": "r621", "round_number": "621"}
+        await service._scan_selected_game(rounds[1], [], processed, {})
+        await service._pending_live_settlement
+        assert bets.get_attempt("r621")["status"] == "ACCEPTED"
+        assert bets.get_attempt("r621")["result"] == outcome
+        assert await page.evaluate("window.submissions") == 1
+        assert not LiveBets(path).reserve("r622", "622", suit, Decimal("10"))
+        next_preview = engine.refresh({"game_id": "r622", "round_number": "622"})
+        next_suit = next(p["predicted_suit"] for p in next_preview["live_preview"]
+                         if p["phase"] == "CURRENT")
+        await page.goto("https://example.test/622")
+        ready = await place_regular_coupon(page, next_suit, Decimal("10"),
+                                           lambda: pytest.fail("Second submission"), submit=False)
+        assert ready == "READY"
+        assert await page.evaluate("window.submissions") == 0
     asyncio.run(_with_page(run))
 
 
