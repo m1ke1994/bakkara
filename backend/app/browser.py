@@ -850,6 +850,20 @@ class BrowserService:
                         await asyncio.to_thread(self.store.mark_recovery_attempt, game.game_id)
                     await page.close()
 
+    async def _enforce_single_observer_page(self) -> None:
+        """Close leftover pages before navigating the next round.
+
+        The event callback handles newly opened popups; this also catches
+        tabs left open before observation started or while it was paused.
+        Only the primary page may navigate between game URLs.
+        """
+        if self.context is None or self.page is None:
+            return
+        for extra in list(self.context.pages):
+            if extra is self.page or extra.is_closed():
+                continue
+            await self._close_unexpected_page(extra)
+
     async def _observe_live(self) -> None:
         """Run one game at a time until its final Player hand is observed."""
         # A new scan is a new physical sequence; never reuse the preceding
@@ -893,6 +907,7 @@ class BrowserService:
                 await asyncio.sleep(max(settings.auth_poll_seconds, 0.5))
                 continue
             try:
+                await self._enforce_single_observer_page()
                 await self._observe_iteration(processed_ids, retry_after)
             except asyncio.CancelledError:
                 raise
