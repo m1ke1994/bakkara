@@ -385,6 +385,27 @@ def live_test_prestart_evidence(game: Game, diagnostics: dict[str, Any],
     return True, f"0:0, пустые карты, часы {timer_text}, URL и игровой компонент совпадают"
 
 
+async def keep_single_browser_page(context: BrowserContext, preferred_url: str) -> Page:
+    """Reuse one persisted tab, closing surplus tabs restored by Chromium.
+
+    The observer and LIVE coupon must share the same Page. Historical
+    snapshots remain in SQLite; background recovery must not open a new tab.
+    """
+    pages = [page for page in context.pages if not page.is_closed()]
+    preferred_path = urlparse(preferred_url).path.rstrip("/")
+    main = next(
+        (page for page in pages
+         if preferred_path and urlparse(page.url).path.rstrip("/") == preferred_path),
+        pages[0] if pages else None,
+    )
+    if main is None:
+        main = await context.new_page()
+    for extra in pages:
+        if extra is not main:
+            await extra.close()
+    return main
+
+
 class BrowserService:
     """Owns one visible, persistent Playwright Chromium context."""
 
@@ -627,8 +648,13 @@ class BrowserService:
                 )
                 # Install before navigation so early Canvas2D draw calls are captured.
                 await self.context.add_init_script(script=INIT_SCRIPT)
-                self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+                self.page = await keep_single_browser_page(self.context, settings.target_url)
+                # The bookmaker may open a popup. During scanning a second
+                # Playwright page would steal focus and CPU from the timed
+                # handoff, so close it without touching the primary page.
+                self.context.on("page", self._on_context_page)
                 await self.page.goto(settings.target_url, wait_until="domcontentloaded", timeout=45_000)
+                self.event("INFO", "Один браузерный таб: история не открывается параллельно LIVE.")
                 self.status = "WAITING_AUTH"
                 self.authorization = "UNCONFIRMED"
                 self.diagnostic = "Страница открыта. Войдите вручную в окне Chromium."
@@ -640,6 +666,21 @@ class BrowserService:
                 self.diagnostic = "Не удалось запустить браузер. Подробности записаны в технический журнал."
                 self.event("ERROR", self.diagnostic)
                 log.exception("Не удалось запустить браузер (%s).", type(exc).__name__)
+
+    def _on_context_page(self, page: Page) -> None:
+        """Ignore sign-in popups before scanning; close extra tabs during it."""
+        observer = self.observation_task
+        if page is self.page or observer is None or observer.done():
+            return
+        asyncio.create_task(self._close_unexpected_page(page))
+
+    async def _close_unexpected_page(self, page: Page) -> None:
+        try:
+            if page is not self.page and not page.is_closed():
+                await page.close()
+                self.event("WARNING", "Закрыта лишняя вкладка. LIVE остаётся на основной странице.")
+        except Exception as exc:
+            self.event("WARNING", f"Не удалось закрыть лишнюю вкладку: {type(exc).__name__}.")
 
     async def stop(self) -> None:
         async with self.lock:
@@ -731,15 +772,21 @@ class BrowserService:
         self.playwright = None
 
     async def _observe(self) -> None:
-        recovery = asyncio.create_task(self._recover_history())
-        try:
-            await self._observe_live()
-        finally:
-            recovery.cancel()
-            await asyncio.gather(recovery, return_exceptions=True)
+        """One visible tab and one active game throughout scanning.
+
+        Previously the asynchronous history-recovery worker opened a second
+        tab and repeatedly navigated it, competing with LIVE odds capture.
+        Keep incomplete rows recoverable in SQLite, but never launch another
+        page while the timed observer is running.
+        """
+        await self._observe_live()
 
     async def _recover_history(self) -> None:
-        """Revisit saved URLs on an isolated read-only page, without delaying live capture."""
+        """Optional historical repair routine, not launched during live observation.
+
+        The active observer deliberately skips this browser-level task:
+        opening a history tab in parallel is incompatible with one-tab mode.
+        """
         while self.context is not None and self.page is not None:
             page = None
             game = None
