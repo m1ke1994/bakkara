@@ -89,3 +89,19 @@ def test_unexpected_page_closes_only_when_scanning_active():
             active.cancel()
             await asyncio.gather(active, return_exceptions=True)
     asyncio.run(run())
+
+
+def test_observer_closes_tabs_left_open_before_scan():
+    async def run():
+        service = object.__new__(BrowserService)
+        main = DummyPage("https://example.test/baccarat/current")
+        extra = DummyPage("https://example.test/baccarat/old")
+        service.page = main
+        service.context = DummyContext([main, extra])
+        service.events = deque(maxlen=10)
+        service.state_version = 0
+        await service._enforce_single_observer_page()
+        assert extra.closed
+        assert not main.closed
+        assert service.context.created == []
+    asyncio.run(run())
