@@ -77,7 +77,7 @@ def predict_target(number: int, sources: dict[int, dict[str, Any]],
     return {
         "predicted_suit": predicted,
         "source_round_number": votes[0]["round_number"],
-        "source_round_numbers": [vote["round_number"] for vote in votes],
+        "source_round_numbers": [((number - offset - 1) % ROUND_MAX) + 1 for offset in offsets],
         "votes": votes,
         "vote_counts": counts,
         "vote_count": len(votes),
