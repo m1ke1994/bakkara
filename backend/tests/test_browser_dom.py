@@ -200,8 +200,8 @@ def test_two_cards_are_final_only_after_explicit_finished_list_status(tmp_path, 
         elapsed = asyncio.get_running_loop().time() - started
 
         saved = service.store.get("two-final")
-        assert reads == 2  # one read plus a final stable reread, no timeout wait
-        assert elapsed < 0.75  # GAME_PAGE_WAIT_SECONDS=30 is no longer a per-round delay
+        assert reads >= 3  # terminal evidence gets a rendering grace period
+        assert 2 <= elapsed < 5  # stable final reread, not the old 30-second page delay
         assert processed == {"two-final"}
         assert saved["player_hand_final"] is True
         assert saved["finished_confirmed"] is True
@@ -432,7 +432,7 @@ def test_baccarat_round_timer_is_read_from_visible_dom_and_not_status():
     asyncio.run(run())
 
 
-def test_two_card_round_countdown_zero_is_verified_and_saved(tmp_path, monkeypatch):
+def test_countdown_zero_alone_never_confirms_two_cards(tmp_path, monkeypatch):
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
             browser_module.settings, card_poll_seconds=0.1,
@@ -473,18 +473,17 @@ def test_two_card_round_countdown_zero_is_verified_and_saved(tmp_path, monkeypat
         game = Game("two-timer", "https://example.test/two-timer", "",
                     "915", "Идёт", 0)
         processed = set()
-        await asyncio.wait_for(
-            service._scan_selected_game(game, [], processed, {}), timeout=6
-        )
-        assert processed == {"two-timer"}
+        try:
+            await asyncio.wait_for(
+                service._scan_selected_game(game, [], processed, {}), timeout=2.5)
+        except asyncio.TimeoutError:
+            pass
         saved = service.store.get("two-timer")
+        assert processed == set()
         assert saved["cards"] == cards
-        assert saved["player_hand_final"] is True
-        assert saved["final_snapshot_reverified"] is True
-        assert saved["finished_confirmed"] is False
-        assert saved["calculation_status"] == "complete"
+        assert not saved["player_hand_final"]
+        assert saved["calculation_status"] != "complete"
         assert reads >= 4
-        assert "таймер" in saved["reason"]
     asyncio.run(run())
 
 
@@ -862,7 +861,7 @@ def test_expired_screen_does_not_block_observer_45_seconds(tmp_path, monkeypatch
     asyncio.run(run())
 
 
-def test_transient_victory_badge_survives_reread_and_two_cached_cards_finish(tmp_path, monkeypatch):
+def test_transient_result_without_final_card_reread_keeps_hand_unconfirmed(tmp_path, monkeypatch):
     """Real failure: result appears for one frame and Player DOM vanishes."""
     async def run():
         monkeypatch.setattr(browser_module, "settings", replace(
@@ -918,18 +917,18 @@ def test_transient_victory_badge_survives_reread_and_two_cached_cards_finish(tmp
         game = Game("transient-405", "https://example.test/transient-405",
                     "", "405", "Идёт", 0)
         processed, retry = set(), {}
-        await asyncio.wait_for(
-            service._scan_selected_game(game, [], processed, retry), timeout=4
-        )
+        try:
+            await asyncio.wait_for(
+                service._scan_selected_game(game, [], processed, retry), timeout=2.5)
+        except asyncio.TimeoutError:
+            pass
         saved = service.store.get("transient-405")
-        assert processed == {"transient-405"}
+        assert processed == set()
         assert saved["cards"] == cards
-        assert saved["calculation_status"] == "complete"
-        assert saved["player_hand_final"] is True
+        assert saved["calculation_status"] != "complete"
+        assert saved["player_hand_final"] is False
         assert saved["finished_confirmed"] is True
-        assert saved["final_snapshot_reverified"] is True
-        assert saved["scan_result"] == "CARDS_CONFIRMED"
-        assert service.observation_status == "SAVED"
+        assert not saved["final_snapshot_reverified"]
         assert count >= 5
     asyncio.run(run())
 
@@ -1284,3 +1283,4 @@ def test_first_atomic_result_snapshot_is_not_erased_by_empty_dom_reread(
         assert saved["player_hand_final"] is True
         assert saved["scan_result"] == "CARDS_CONFIRMED"
     asyncio.run(run())
+

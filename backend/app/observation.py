@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
+from .draw_rules import card_points
 from .suit_calculator import (
     SUIT_SYMBOL_TO_NAME,
     calculate_cards_suit,
@@ -615,6 +616,39 @@ class ObservationStore:
                 db.execute("DROP TABLE predictions_v1")
                 db.execute("DROP INDEX IF EXISTS idx_predictions_target")
             db.execute("CREATE INDEX IF NOT EXISTS idx_predictions_target ON predictions(target_game_id)")
+            db.execute("""CREATE TABLE IF NOT EXISTS observation_recovery (
+                game_id TEXT PRIMARY KEY, checked_at TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS observation_migrations (
+                name TEXT PRIMARY KEY)""")
+            if not db.execute("SELECT 1 FROM observation_migrations WHERE name='timer_two_v1'").fetchone():
+                # Old timer-only conclusions are not proof of a final hand.
+                db.execute("""UPDATE observations SET final_snapshot_reverified=0,
+                    player_hand_final=0,calculated_suit=NULL,calculation_status='incomplete',
+                    prediction_for_next_round=NULL,completeness='PARTIAL',
+                    reason=COALESCE(reason,'') || ' Требуется повторная проверка: таймер не подтверждает конец раздачи.'
+                    WHERE finished_at IS NULL AND player_hand_final=1
+                    AND reason LIKE '%таймер%'""")
+                db.execute("INSERT INTO observation_migrations VALUES('timer_two_v1')")
+            if not db.execute("SELECT 1 FROM observation_migrations WHERE name='draw_rule_v1'").fetchone():
+                for game_id, raw, banker_score in db.execute(
+                        "SELECT game_id,cards_json,banker_score FROM observations").fetchall():
+                    try:
+                        cards = json.loads(raw)
+                        if not isinstance(cards, list) or any(not isinstance(c, dict) for c in cards):
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    points = [card_points(c.get("rank")) for c in cards]
+                    # A final Banker score below 8 rules out a natural 8/9.
+                    # A low two-card Player total therefore requires a third.
+                    if (len(cards) == 2 and None not in points and sum(points) % 10 <= 5
+                            and str(banker_score).isdigit() and int(banker_score) < 8):
+                        db.execute("""UPDATE observations SET final_snapshot_reverified=0,
+                            player_hand_final=0,calculated_suit=NULL,calculation_status='incomplete',
+                            prediction_for_next_round=NULL,completeness='PARTIAL',
+                            reason='По правилам добора не хватает третьей карты; требуется повторная проверка.'
+                            WHERE game_id=?""", (game_id,))
+                db.execute("INSERT INTO observation_migrations VALUES('draw_rule_v1')")
             self._backfill_legacy_calculations(db)
             db.execute("CREATE INDEX IF NOT EXISTS idx_observations_observed_at ON observations(observed_at)")
 
@@ -623,6 +657,7 @@ class ObservationStore:
         with sqlite3.connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("DELETE FROM predictions")
+            db.execute("DELETE FROM observation_recovery")
             db.execute("DELETE FROM observations")
 
     def record_unresolved_transition(self, source_game_id: str, reason: str) -> dict[str, Any] | None:
@@ -795,25 +830,31 @@ class ObservationStore:
         Only timed-out/failed observations are eligible. The active observer
         decides when to attempt an old URL so fresh live games have priority.
         """
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=within_minutes)).isoformat()
         discovery_wait = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+        retry_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute("""
-                SELECT game_id,url,game_time,round_number,site_status,list_position,
-                       player_score,banker_score
-                FROM observations
-                WHERE calculation_status!='complete' AND discovered_at>=?
-                  AND scan_result IN ('SCAN_TIMEOUT','NAVIGATION_ERROR','CARDS_UNCONFIRMED','DISCOVERED')
-                  AND (scan_result!='DISCOVERED' OR discovered_at<=?)
-                  AND url!=''
-                ORDER BY discovered_at, list_position LIMIT 40
-            """, (cutoff, discovery_wait)).fetchall()
+                SELECT o.game_id,o.url,o.game_time,o.round_number,o.site_status,o.list_position,
+                       o.player_score,o.banker_score
+                FROM observations o LEFT JOIN observation_recovery r ON r.game_id=o.game_id
+                WHERE o.url!='' AND o.discovered_at<=?
+                  AND (r.checked_at IS NULL OR r.checked_at<=?)
+                  AND (o.calculation_status!='complete'
+                       OR (json_array_length(o.cards_json)=2 AND r.checked_at IS NULL))
+                ORDER BY r.checked_at IS NOT NULL,o.discovered_at DESC LIMIT 40
+            """, (discovery_wait, retry_cutoff)).fetchall()
         return [Game(row["game_id"], row["url"], row["game_time"] or "",
                      row["round_number"] or "", row["site_status"],
                      row["list_position"], player_score=row["player_score"] or "",
                      banker_score=row["banker_score"] or "")
                 for row in rows]
+
+    def mark_recovery_attempt(self, game_id: str) -> None:
+        with sqlite3.connect(self.path) as db:
+            db.execute("""INSERT INTO observation_recovery VALUES(?,?)
+                ON CONFLICT(game_id) DO UPDATE SET checked_at=excluded.checked_at""",
+                (game_id, datetime.now(timezone.utc).isoformat()))
 
     def known_rounds_for_ids(self, game_ids: list[str]) -> dict[str, str]:
         """Recover only identities previously read for the EXACT same game_id.
@@ -874,6 +915,9 @@ class ObservationStore:
             stored_hand_final = bool(player_hand_final or (row and row["player_hand_final"]))
             saved_reverified = row["final_snapshot_reverified"] if row else None
             reverified = final_snapshot_reverified if final_snapshot_reverified is not None else saved_reverified
+            if merged_cards != previous_cards and row:
+                reverified = bool(final_snapshot_reverified)
+                stored_hand_final = bool(player_hand_final)
             calculated, calculation_status = calculate_final_result(
                 merged_cards,
                 finished=stored_finished,
@@ -881,11 +925,11 @@ class ObservationStore:
                 pending_card_slots=pending_card_slots,
                 player_hand_final=stored_hand_final,
             )
+            if (calculation_status == "complete" and
+                    (not row or row["calculation_status"] != "complete" or merged_cards != previous_cards)):
+                db.execute("DELETE FROM observation_recovery WHERE game_id=?", (game.game_id,))
             old_calculation_status = row["calculation_status"] if row else None
             old_calculated = row["calculated_suit"] if row else None
-            if old_calculation_status == "complete" and old_calculated and calculation_status != "complete":
-                calculated = old_calculated
-                calculation_status = "complete"
             prediction = calculated if calculation_status == "complete" else None
             prediction_checked = row["prediction_checked"] if row else None
             prediction_hit = row["prediction_hit"] if row else None
@@ -927,7 +971,7 @@ class ObservationStore:
                 calculation_status=excluded.calculation_status,prediction_for_next_round=excluded.prediction_for_next_round,
                 prediction_checked=COALESCE(excluded.prediction_checked,observations.prediction_checked),
                 prediction_hit=COALESCE(excluded.prediction_hit,observations.prediction_hit),
-                player_hand_final=MAX(observations.player_hand_final,excluded.player_hand_final)""",
+                player_hand_final=excluded.player_hand_final""",
                 (game.game_id, game.url, canonical_round or None, now, finished_at,
                  cards_json, completeness, reason,
                  game.position, game.status, game.player_score, game.banker_score, scan_result, now,
@@ -991,9 +1035,10 @@ class ObservationStore:
         """IDs with a confirmed final Player hand; incomplete finished rows are recoverable."""
         with sqlite3.connect(self.path) as db:
             rows = db.execute(
-                """SELECT game_id FROM observations WHERE player_hand_final=1
-                OR (finished_at IS NOT NULL AND final_snapshot_reverified=1
-                    AND completeness='CONFIRMED' AND cards_json<>'[]')"""
+                """SELECT game_id FROM observations
+                WHERE (player_hand_final=1 OR finished_at IS NOT NULL)
+                AND final_snapshot_reverified=1 AND calculation_status='complete'
+                AND completeness='CONFIRMED' AND cards_json<>'[]' """
             ).fetchall()
         return {row[0] for row in rows}
 
@@ -1004,7 +1049,7 @@ class ObservationStore:
             db.row_factory = sqlite3.Row
             rows = db.execute("""SELECT game_id,url,game_time,round_number,site_status,list_position,
                 player_score,banker_score FROM observations
-                WHERE round_number=? AND finished_at IS NULL AND player_hand_final=0
+                WHERE round_number=? AND calculation_status!='complete'
                 ORDER BY list_position""", (round_number,)).fetchall()
         row = next((item for item in rows if item["game_id"] not in excluded_ids and item["url"]), None)
         if not row:
@@ -1141,3 +1186,4 @@ def merge_card_snapshots(previous: list[dict[str, Any]], current: list[dict[str,
     for index, card in enumerate(current, start=1):
         by_position[int(card.get("position", index))] = card
     return [by_position[position] for position in sorted(by_position)]
+
