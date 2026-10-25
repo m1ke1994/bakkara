@@ -525,8 +525,15 @@ class BrowserService:
                 return
             suit = forecast["predicted_suit"]
             signal_source = "STRATEGY"
-            self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
-                       f"ID {game.game_id}: все источники {forecast.get('source_round_numbers', [])} подтверждены.")
+            if forecast.get("partial_vote"):
+                self.event("WARNING", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: частичное голосование "
+                           f"{forecast.get('vote_count', 0)}/5; подтверждены "
+                           f"{forecast.get('source_round_numbers', [])}, "
+                           f"недоступны {forecast.get('missing_sources', [])}.")
+            else:
+                self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: все источники {forecast.get('source_round_numbers', [])} подтверждены.")
             remaining = list_timer_seconds(getattr(game, "time", ""))
             timer_seen_at = getattr(self, "_game_timer_observed_at", None)
             if remaining is not None and timer_seen_at is not None:
