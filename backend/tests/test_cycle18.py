@@ -828,9 +828,9 @@ def test_voting_missing_target_does_not_reset_loss_step(tmp_path):
     # A four-voter majority can produce a partial forecast for #43.
     # Results must still come from confirmed target cards only.
     assert result["statistics"]["checked_count"] == 3
-    assert result["statistics"]["losses"] == 1
-    assert result["statistics"]["wins"] == 2
-    assert result["statistics"]["wins_by_step"] == {"2": 1, "1": 1}
+    assert result["statistics"]["losses"] == 2
+    assert result["statistics"]["wins"] == 1
+    assert result["statistics"]["wins_by_step"] == {"3": 1}
     assert any(item["target_round_number"] == 43 for item in result["recent"])
 
 
