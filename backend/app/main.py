@@ -153,7 +153,7 @@ async def start_observation():
     # first round. Otherwise the first records have discovered_at < started_at
     # and are silently excluded from the 20-round preparation.
     if not was_running:
-        await asyncio.to_thread(cycle18_engine.start_session)
+        await asyncio.to_thread(cycle18_engine.start_session, resume=True)
     try:
         await browser_service.start_observation()
     except Exception:
