@@ -46,26 +46,41 @@ def predict_target(number: int, sources: dict[int, dict[str, Any]],
 
     Majority uses the unmodified ordered 2/3-card suit table. Ties use
     hearts, diamonds, clubs, spades, fixed before observing the target.
-    If any required source is absent, there is no signal at all.
+    A missing source never gets replaced with a neighbouring round.
+    Voting requires at least three verified sources and a strict majority
+    of the available votes; fewer/ambiguous votes produce no signal.
     """
     if not 1 <= number <= ROUND_MAX:
         return None
     votes = []
-    for offset in strategy_offsets(strategy):
+    missing = []
+    offsets = strategy_offsets(strategy)
+    for offset in offsets:
         source_number = ((number - offset - 1) % ROUND_MAX) + 1
         source = sources.get(source_number)
         suit = verified_suit(source) if source else None
         if suit is None:
-            return None
+            missing.append({"offset": offset, "round_number": source_number})
+            continue
         votes.append({"offset": offset, "round_number": source_number, "suit": suit})
+    if strategy == STRATEGY_N18:
+        if len(votes) != 1:
+            return None
+    elif len(votes) < 3:
+        return None
     counts = {suit: sum(vote["suit"] == suit for vote in votes) for suit in SUIT_PRIORITY}
     predicted = max(SUIT_PRIORITY, key=lambda suit: counts[suit])
+    if strategy == STRATEGY_VOTE and counts[predicted] <= len(votes) // 2:
+        return None
     return {
         "predicted_suit": predicted,
         "source_round_number": votes[0]["round_number"],
         "source_round_numbers": [vote["round_number"] for vote in votes],
         "votes": votes,
         "vote_counts": counts,
+        "vote_count": len(votes),
+        "partial_vote": bool(missing),
+        "missing_source_round_numbers": [item["round_number"] for item in missing],
     }
 
 
@@ -220,6 +235,8 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             "predicted_suit": forecast["predicted_suit"] if forecast else None,
             "votes": forecast["votes"] if forecast else [],
             "available": forecast is not None,
+            "partial_vote": bool(forecast and forecast["partial_vote"]),
+            "vote_count": len(forecast["votes"]) if forecast else 0,
             "missing_sources": missing_sources,
         })
     return previews
@@ -392,8 +409,8 @@ class Cycle18Engine:
                 target_number = following(hand_number)
                 forecast = predict_target(target_number, valid_hands, strategy)
                 if forecast is None:
-                    # An absent N−18 source, or ANY of the five voter sources,
-                    # suppresses the signal instead of shifting to a neighbour.
+                    # Never invent an absent source: strict N−18 or at least
+                    # three verified voter sources with a real majority.
                     continue
                 source_number = forecast["source_round_number"]
                 source = valid_hands[source_number]
