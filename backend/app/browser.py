@@ -5,6 +5,7 @@ import re
 import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 from urllib.parse import urlparse
 
@@ -509,6 +510,10 @@ class BrowserService:
             self.event("WARNING", "Ряд ставок исчерпан; LIVE ожидает изменения настроек.")
             return
         amount = plan.row[step - 1]
+        if first_round_test and config.get("single_test_run_id"):
+            amount = Decimal("10")
+            self.event("INFO", f"ТЕСТ LIVE №{game.round_number}, ID {game.game_id}: "
+                       "разовая сумма 10 RUB; сохранённый шаг стратегии не меняем.")
         if not self.live_bets.reserve(game.game_id, game.round_number, suit, amount,
                                       signal_source=signal_source):
             current = self.live_bets.snapshot()

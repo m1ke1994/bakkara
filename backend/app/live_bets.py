@@ -103,7 +103,7 @@ class LiveBets:
             db.execute("BEGIN IMMEDIATE")
             run_id, step = db.execute("SELECT single_test_run_id,step FROM live_control WHERE id=1").fetchone()
             if run_id:
-                if amount != Decimal("10") or step != 1:
+                if amount != Decimal("10"):
                     return False
                 if db.execute("SELECT 1 FROM live_attempts WHERE single_test_run_id=? LIMIT 1",
                               (run_id,)).fetchone():
@@ -130,12 +130,15 @@ class LiveBets:
             return False
         with sqlite3.connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
-            attempt = db.execute("SELECT status,result,step FROM live_attempts WHERE game_id=?", (game_id,)).fetchone()
+            attempt = db.execute("SELECT status,result,step,signal_source,single_test_run_id FROM live_attempts WHERE game_id=?", (game_id,)).fetchone()
             if not attempt or attempt[0] != "ACCEPTED" or attempt[1] is not None:
                 return False
             db.execute("UPDATE live_attempts SET result=? WHERE game_id=?", (result,game_id))
-            next_step = 1 if result == "WIN" else min(attempt[2]+1,row_length+1)
-            db.execute("UPDATE live_control SET step=? WHERE id=1", (next_step,))
+            # A one-off 10 RUB coupon check is separate from the selected
+            # strategy and must not advance its saved staking step.
+            if not attempt[4]:
+                next_step = 1 if result == "WIN" else min(attempt[2]+1,row_length+1)
+                db.execute("UPDATE live_control SET step=? WHERE id=1", (next_step,))
             return True
 
 
