@@ -311,12 +311,26 @@ class Cycle18Engine:
             db.execute("UPDATE bot_strategy_settings SET strategy=? WHERE id=1", (strategy,))
         return self.get_strategy()
 
-    def start_session(self) -> int:
-        now = datetime.now(timezone.utc).isoformat()
+    def start_session(self, *, resume: bool = False) -> int:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
         with sqlite3.connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             selected = db.execute("SELECT strategy FROM bot_strategy_settings WHERE id=1").fetchone()
             strategy = selected[0] if selected else STRATEGY_N18
+            if resume:
+                last = db.execute(
+                    "SELECT id,strategy,stopped_at,started_at FROM cycle18_sessions "
+                    "ORDER BY id DESC LIMIT 1").fetchone()
+                if last and last[1] == strategy:
+                    ended = moment(last[2])
+                    # Reopening an existing session preserves its 40-hand
+                    # preparation and forecasts without forging card data.
+                    # Do not resume a session after a long gap.
+                    if ended and 0 <= (now_dt - ended).total_seconds() <= STALE_SECONDS:
+                        db.execute("UPDATE cycle18_sessions SET stopped_at=NULL WHERE id=?",
+                                   (last[0],))
+                        return int(last[0])
             db.execute("UPDATE cycle18_sessions SET stopped_at=? WHERE stopped_at IS NULL", (now,))
             cursor = db.execute("INSERT INTO cycle18_sessions(started_at,strategy) VALUES(?,?)",
                                 (now, strategy))
