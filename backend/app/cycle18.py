@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .history_audit import audit_history
 from .observation import evaluate_prediction, valid_card_rank
 from .suit_calculator import SUIT_SYMBOL_TO_NAME, calculate_cards_suit, normalize_suit
 
@@ -172,6 +173,8 @@ def verified_suit(row: dict[str, Any]) -> str | None:
         cards = json.loads(row["cards_json"] or "[]")
     except (TypeError, ValueError):
         return None
+    if not captured_cards(row):
+        return None
     symbol = calculate_cards_suit(cards)
     return SUIT_SYMBOL_TO_NAME.get(symbol) if symbol else None
 
@@ -287,6 +290,8 @@ class Cycle18Engine:
 
     def clear(self) -> None:
         with sqlite3.connect(self.path) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='cycle18_history_audit'").fetchone():
+                db.execute("DELETE FROM cycle18_history_audit")
             db.execute("DELETE FROM cycle18_forecasts")
             db.execute("DELETE FROM cycle18_sessions")
 
@@ -532,6 +537,13 @@ class Cycle18Engine:
         previews = preview_two_rounds(current_number, valid_hands, strategy) if warmup_complete and not stopped_at else []
         active = next((row for row in forecasts if current and row["target_game_id"] == current.get("game_id")), None)
         pending_upcoming = [row for row in forecasts if row["result"] == "PENDING" and not row["target_game_id"]]
+        audit_signature = (sid, strategy,
+            tuple((row["game_id"], row["round_number"], row["cards_json"], row["calculation_status"],
+                   row["final_snapshot_reverified"], row["player_hand_final"], row["finished_at"]) for row in rows),
+            tuple((row["target_game_id"], row["predicted_suit"], row["result"]) for row in forecasts))
+        if audit_signature != getattr(self, "_audit_signature", None):
+            self._historical_audit = audit_history(self.path, sid, rows, strategy)
+            self._audit_signature = audit_signature
         return {
             "cycle": CYCLE if strategy == STRATEGY_N18 else None,
             "strategy": strategy,
@@ -556,6 +568,7 @@ class Cycle18Engine:
             "current": self._public(active) if active else None,
             "live_preview": previews,
             "upcoming": [self._public(row) for row in pending_upcoming[-max(strategy_offsets(strategy)):][::-1]],
+            "historical_audit": self._historical_audit,
             "recent": [self._public(row) for row in forecasts if row["target_game_id"]][-200:][::-1],
         }
 
@@ -603,3 +616,4 @@ class Cycle18Engine:
                 "wins_by_step": {}, "live_checked": 0, "backfill_checked": 0,
             }, "current": None, "live_preview": [], "upcoming": [], "recent": [],
         }
+

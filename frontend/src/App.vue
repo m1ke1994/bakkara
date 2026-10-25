@@ -409,6 +409,22 @@ onBeforeUnmount(() => {
           <article><span>Виртуальный следующий шаг</span><strong>{{ cycleStats.next_step ?? 1 }}</strong></article>
         </div>
         <details v-if="cycle18.ready && Object.keys(cycleStats.wins_by_step || {}).length"><summary>Победы по шагам (виртуально)</summary><p v-for="(count, step) in cycleStats.wins_by_step" :key="step">Шаг {{ step }}: {{ count }} WIN</p></details>
+        <details v-if="cycle18.historical_audit?.length">
+          <summary>Пересчёт по исправленной истории</summary>
+          <p class="diagnostic">Расчёт по текущим подтверждённым картам. Исходные прогнозы и исполненные ставки сохраняются. Пересчёт не означает, что сигнал был известен до начала игры.</p>
+          <div class="history-table-scroll">
+            <table class="history-table" aria-label="Исторический пересчёт">
+              <thead><tr><th>Раздача</th><th>Голоса</th><th>Пересчёт</th><th>Исходный прогноз</th><th>Причина</th></tr></thead>
+              <tbody><tr v-for="audit in cycle18.historical_audit" :key="audit.target_game_id">
+                <td>№{{ audit.target_round_number }}</td>
+                <td>{{ votesDescription(audit) || '—' }}</td>
+                <td>{{ suits[audit.predicted_suit]?.[0] || '—' }} · {{ predictionLabels[audit.result] || audit.result }}</td>
+                <td>{{ suits[audit.original_suit]?.[0] || '—' }} · {{ predictionLabels[audit.original_result] || audit.original_result || 'Не записан' }}</td>
+                <td>{{ audit.reason }}{{ audit.changed ? ' · Есть расхождение' : '' }}</td>
+              </tr></tbody>
+            </table>
+          </div>
+        </details>
         <details v-if="cycle18.ready && cycle18.recent?.length">
           <summary>История прогнозов — {{ strategyLabel }} ({{ cycle18.recent.length }})</summary>
           <div class="history-table-scroll">
@@ -629,3 +645,4 @@ onBeforeUnmount(() => {
   .forecast-tile + .forecast-tile { padding-left: 0; border-bottom: 0; }
 }
 </style>
+
