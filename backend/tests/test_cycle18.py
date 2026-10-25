@@ -850,7 +850,7 @@ def test_voting_partial_quorum_and_strict_majority():
     assert result is not None
     assert result["vote_count"] == 3
     assert result["partial_vote"]
-    assert result["source_round_numbers"] == [97, 90, 76]
+    assert result["source_round_numbers"] == [97, 90, 76, 69, 60]
     # Less than three verified sources cannot produce a forecast.
     assert predict_target(100, {97: verified("clubs"), 90: verified("clubs")},
                           STRATEGY_VOTE) is None
