@@ -378,9 +378,9 @@ onBeforeUnmount(() => {
           <h3>{{ strategyLabel }} · прогноз масти Игрока</h3>
           <strong>{{ cycle18.ready ? 'Готов к прогнозированию' : 'Сбор истории' }}</strong>
         </div>
-        <p class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. LIVE-ставка возможна только по подтверждённому прогнозу и открытому рынку.</p>
+        <p class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. Для голосования достаточно 3–4 проверенных источников только при строгом большинстве; при 5/5 действует прежнее правило равенства. Неполное голосование помечается отдельно. LIVE-ставка возможна только по подтверждённому прогнозу и открытому рынку.</p>
         <div class="warmup">
-          <div class="section-title"><strong>Подтверждено за запуск: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? strategyLabel + ' активен' : 'Только сбор карт' }}</span></div>
+          <div class="section-title"><strong>Подтверждено в сохранённой сессии: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? strategyLabel + ' активен' : 'Только сбор карт' }}</span></div>
           <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
           <p v-if="!cycle18.ready" class="diagnostic">Подготовка: первые {{ cycle18.warmup_required ?? 20 }} финально подтверждённых раздач. До её завершения WIN/LOSE не рассчитываем. Если источник отсутствует, сигнал пропускается.</p>
           <p v-else class="diagnostic">Подготовка завершена. Прогнозы строятся только по реальным номерам завершённых источников: {{ strategyLabel }}.</p>
@@ -456,6 +456,7 @@ onBeforeUnmount(() => {
             </div>
             <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
             <p v-if="currentForecast && !currentForecast.available" class="diagnostic">{{ missingSourcesDescription(currentForecast) }}</p>
+            <p v-if="currentForecast?.available && currentForecast.partial_vote" class="diagnostic">Частичное голосование: {{ currentForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(currentForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
             <p v-if="currentForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(currentForecast) }}</p>
@@ -467,13 +468,14 @@ onBeforeUnmount(() => {
             </div>
             <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
             <p v-if="nextForecast && !nextForecast.available" class="diagnostic">{{ missingSourcesDescription(nextForecast) }}</p>
+            <p v-if="nextForecast?.available && nextForecast.partial_vote" class="diagnostic">Частичное голосование: {{ nextForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(nextForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
             <p v-if="nextForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(nextForecast) }}</p>
           </article>
         </div>
         <p v-if="cycle18.ready && !currentForecast" class="diagnostic">Ожидаем выбора текущей игры с действительным номером; прогнозы нельзя определить без N.</p>
-        <p v-if="!cycle18.ready" class="diagnostic">Прогнозы появятся после {{ cycle18.warmup_required ?? 20 }} подтверждённых игр в этом запуске.</p>
+        <p v-if="!cycle18.ready" class="diagnostic">Прогнозы появятся после {{ cycle18.warmup_required ?? 20 }} подтверждённых игр в сохранённой сессии.</p>
     </section>
     <section class="events history-panel" id="history">
       <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Последние {{ fullHistory.length }} подтверждённых раздач · доступно до 200 записей.</p></div><div class="history-actions"><button class="secondary" @click="refreshHistory">Обновить</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div></div>
