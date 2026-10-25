@@ -508,15 +508,25 @@ class BrowserService:
                 missing = next((p for p in cycle.get("live_preview", [])
                                 if p["phase"] == "CURRENT"
                                 and p["target_round_number"] == int(game.round_number)), None)
-                reason = (f"подготовлено {cycle.get('warmup_count', 'неизвестно')}/{cycle.get('warmup_required', 'неизвестно')} рук"
-                          if not cycle["ready"] else
-                          f"нет подтверждённых источников {missing.get('source_round_numbers', [])}"
-                          if missing else "прогноз не связан с текущей раздачей")
+                absent = missing.get("missing_sources", []) if missing else []
+                if not cycle["ready"]:
+                    reason = (f"подготовлено {cycle.get('warmup_count', 'неизвестно')}/"
+                              f"{cycle.get('warmup_required', 'неизвестно')} рук")
+                elif absent:
+                    reason = "; ".join(
+                        f"источник N−{item['offset']} = №{item['round_number']} "
+                        f"{item['reason']}" for item in absent)
+                else:
+                    reason = "прогноз не связан с текущей раздачей"
+                self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: {reason}.")
                 self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
                            f"прогноз пропущен — {reason}.")
                 return
             suit = forecast["predicted_suit"]
             signal_source = "STRATEGY"
+            self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
+                       f"ID {game.game_id}: все источники {forecast.get('source_round_numbers', [])} подтверждены.")
             remaining = list_timer_seconds(getattr(game, "time", ""))
             timer_seen_at = getattr(self, "_game_timer_observed_at", None)
             if remaining is not None and timer_seen_at is not None:
@@ -525,6 +535,8 @@ class BrowserService:
                        f"прогноз {suit} готов за {(asyncio.get_running_loop().time()-forecast_started)*1000:.0f} мс; "
                        f"оценка оставшегося окна ставок по таймеру списка "
                        f"{remaining if remaining is not None else 'неизвестна'} с.")
+            self.event("INFO", f"PREDICTION_READY Раздача №{game.round_number}, "
+                       f"ID {game.game_id}: {suit}.")
         plan = await asyncio.to_thread(self.live_plan_store.load)
         step = self.live_bets.snapshot()["step"]
         if step > len(plan.row):
@@ -544,12 +556,24 @@ class BrowserService:
             return
         self.event("INFO", f"LIVE раздача №{game.round_number}: начинаем поиск рынка, Canvas и суммы {amount} RUB.")
         try:
+            def coupon_stage(message: str) -> None:
+                self.event("INFO", f"LIVE №{game.round_number}: {message}")
+                if message.startswith("Canvas: выбран исход"):
+                    self.event("INFO", f"LIVE_MARKET_FOUND Раздача №{game.round_number}, "
+                               f"ID {game.game_id}: {message}.")
+                elif message == "Купон готов: исход, сумма и кнопка подтверждены":
+                    self.event("INFO", f"LIVE_BET_PREPARED Раздача №{game.round_number}, "
+                               f"ID {game.game_id}: {suit}, {amount} RUB.")
             async with self.page_lock:
                 status = await place_regular_coupon(
                     self.page, suit, amount,
                     lambda: self.live_bets.update(game.game_id, "SUBMITTING"),
-                    lambda message: self.event("INFO", f"LIVE №{game.round_number}: {message}"))
+                    coupon_stage)
             self.live_bets.update(game.game_id, status)
+            if status in ("ACCEPTED", "REJECTED"):
+                self.event("INFO" if status == "ACCEPTED" else "WARNING",
+                           f"LIVE_BET_{status} Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: {suit}, {amount} RUB.")
             self.event("INFO" if status == "ACCEPTED" else "WARNING",
                        f"LIVE раздача №{game.round_number}: {status}, {suit}, {amount} RUB.")
             if status == "UNKNOWN":
@@ -576,8 +600,10 @@ class BrowserService:
             if result in ("WIN", "LOSE"):
                 plan = await asyncio.to_thread(self.live_plan_store.load)
                 if self.live_bets.settle(game.game_id, result, len(plan.row)):
-                    self.event("INFO", f"ТЕСТ LIVE №{game.round_number}: {result} "
-                               f"по фактическим картам Игрока; следующий шаг обновлён.")
+                    self.event("INFO", f"LIVE_RESULT_CONFIRMED ТЕСТ LIVE №{game.round_number}, "
+                               f"ID {game.game_id}: {result} по фактическим картам Игрока; "
+                               + ("сохранённый шаг стратегии не меняем."
+                                  if attempt.get("single_test_run_id") else "следующий шаг обновлён."))
             else:
                 self.event("WARNING", f"ТЕСТ LIVE №{game.round_number}: "
                            "финальный набор карт не подтверждён; шаг не меняем.")
@@ -592,7 +618,8 @@ class BrowserService:
         if result in ("WIN", "LOSE"):
             plan = await asyncio.to_thread(self.live_plan_store.load)
             if self.live_bets.settle(game.game_id, result, len(plan.row)):
-                self.event("INFO", f"LIVE раздача №{game.round_number}: {result}; шаг обновлён.")
+                self.event("INFO", f"LIVE_RESULT_CONFIRMED Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: {result}; шаг обновлён.")
 
     def event(self, level: str, message: str) -> None:
         # Never include page content, credentials, tokens, or cookies here.
@@ -1826,6 +1853,8 @@ class BrowserService:
     ) -> None:
         """Initialize exactly the same final-card scanner for slow/fast paths."""
         self._set_lifecycle_state(game.game_id, "SELECTED", f"dom_position={game.position + 1}")
+        self.event("INFO", f"ROUND_SELECTED Раздача №{game.round_number or 'неизвестна'}, "
+                   f"ID {game.game_id}: позиция {game.position + 1} в списке.")
         existing = await asyncio.to_thread(self.store.get, game.game_id)
         previous_cards = [{**card, "position": card.get("position", index + 1)}
                           for index, card in enumerate((existing or {}).get("cards", []))]
@@ -2179,6 +2208,8 @@ class BrowserService:
                     f"до открытия раздачи №{game.round_number}, ID {game.game_id}: "
                     f"{(page_ready_at - last_finalized)*1000:.0f} мс.")
             self.event("INFO", f"Раздача №{game.round_number or game.game_id}, ID {game.game_id}: следующая игра открыта за {(page_ready_at-navigation_started)*1000:.0f} мс; начинаем опрос DOM без стартовой паузы.")
+            self.event("INFO", f"NEXT_ROUND_OPENED Раздача №{game.round_number or game.game_id}, "
+                       f"ID {game.game_id}: открыта за {(page_ready_at-navigation_started)*1000:.0f} мс.")
 
             await self._live_before_cards(game)
 
@@ -2414,6 +2445,8 @@ class BrowserService:
                         processed_ids.add(game.game_id)
                         retry_after.pop(game.game_id, None)
                         self._set_lifecycle_state(game.game_id, "FINALIZED")
+                        self.event("INFO", f"PLAYER_CARDS_FINAL Раздача №{game.round_number or game.game_id}, "
+                                   f"ID {game.game_id}: {len(cards)} карты Игрока подтверждены и сохранены.")
                         if LEGACY_NEXT_GAME_MODE:
                             completed_record = await asyncio.to_thread(self.store.get, game.game_id) or {}
                             self._active_chain_source_id = (

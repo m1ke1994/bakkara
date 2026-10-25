@@ -180,7 +180,8 @@ def verified_suit(row: dict[str, Any]) -> str | None:
 
 
 def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, Any]],
-                       strategy: str = STRATEGY_N18) -> list[dict[str, Any]]:
+                       strategy: str = STRATEGY_N18,
+                       observed: dict[int, list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
     """Preview physical N and N+1 strictly from verified N-18 sources.
 
     This is presentation ONLY. It must not insert a forecast, announce
@@ -193,6 +194,24 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
         source_numbers = [((number - offset - 1) % ROUND_MAX) + 1
                           for offset in strategy_offsets(strategy)]
         forecast = predict_target(number, sources, strategy)
+        missing_sources = []
+        for offset, source_number in zip(strategy_offsets(strategy), source_numbers):
+            if source_number in sources:
+                continue
+            records = (observed or {}).get(source_number, [])
+            if not records:
+                detail = "отсутствует в истории"
+            elif len(records) > 1:
+                detail = "неоднозначен: несколько игр с этим номером"
+            else:
+                record = records[0]
+                detail = ("финальная рука Игрока не подтверждена"
+                          if not verified_suit(record) else "источник недоступен")
+                reason = str(record.get("reason") or "").strip()
+                if reason:
+                    detail += f" ({reason})"
+            missing_sources.append({"offset": offset, "round_number": source_number,
+                                    "reason": detail})
         previews.append({
             "phase": phase,
             "target_round_number": number,
@@ -201,6 +220,7 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             "predicted_suit": forecast["predicted_suit"] if forecast else None,
             "votes": forecast["votes"] if forecast else [],
             "available": forecast is not None,
+            "missing_sources": missing_sources,
         })
     return previews
 
@@ -325,10 +345,12 @@ class Cycle18Engine:
             # Duplicate round identities in one session are ambiguous, so
             # neither copy can advance the warm-up or create a forecast.
             physical_counts: dict[int, int] = {}
+            observed_by_number: dict[int, list[dict[str, Any]]] = {}
             for row in rows:
                 number = round_number(row.get("round_number"))
                 if number is not None:
                     physical_counts[number] = physical_counts.get(number, 0) + 1
+                    observed_by_number.setdefault(number, []).append(row)
             # A skipped physical round remains in the database, but must not
             # erase confirmed observations already collected during warm-up.
             # Still require true, unique, FINAL Player hands for 20/20.
@@ -534,7 +556,9 @@ class Cycle18Engine:
                 losing = 0
             previous = row
         current_number = round_number(current.get("round_number")) if current else None
-        previews = preview_two_rounds(current_number, valid_hands, strategy) if warmup_complete and not stopped_at else []
+        previews = (preview_two_rounds(current_number, valid_hands, strategy,
+                                       observed_by_number)
+                    if warmup_complete and not stopped_at else [])
         active = next((row for row in forecasts if current and row["target_game_id"] == current.get("game_id")), None)
         pending_upcoming = [row for row in forecasts if row["result"] == "PENDING" and not row["target_game_id"]]
         audit_signature = (sid, strategy,

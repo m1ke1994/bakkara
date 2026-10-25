@@ -162,7 +162,15 @@ def test_two_to_three_card_dom_update_reaches_history_state_api_and_prediction(t
                     body=json.dumps(payload, ensure_ascii=False),
                 )
 
+            async def serve_history(route):
+                await route.fulfill(
+                    status=200, content_type="application/json",
+                    headers={"access-control-allow-origin": "*"},
+                    body=json.dumps(payload["observation"]["history"], ensure_ascii=False),
+                )
+
             await page.route("http://127.0.0.1:8010/api/state", serve_api)
+            await page.route("http://127.0.0.1:8010/api/history?limit=200", serve_history)
             await page.goto("http://127.0.0.1:5174/", wait_until="domcontentloaded")
             history_table = page.get_by_role("table", name="История наблюдений")
             row_cells = history_table.locator("tbody tr").first.locator("td")
@@ -267,7 +275,15 @@ def test_a_b_c_prediction_chain_reaches_api_and_rendered_history(tmp_path, monke
                     body=json.dumps(payload, ensure_ascii=False),
                 )
 
+            async def serve_history(route):
+                await route.fulfill(
+                    status=200, content_type="application/json",
+                    headers={"access-control-allow-origin": "*"},
+                    body=json.dumps(payload["observation"]["history"], ensure_ascii=False),
+                )
+
             await page.route("http://127.0.0.1:8010/api/state", serve_api)
+            await page.route("http://127.0.0.1:8010/api/history?limit=200", serve_history)
             await page.goto("http://127.0.0.1:5174/", wait_until="domcontentloaded")
             history_table = page.get_by_role("table", name="История наблюдений")
             b_row = history_table.locator("tbody tr").filter(has=page.locator('a[href*="screen-b"]'))

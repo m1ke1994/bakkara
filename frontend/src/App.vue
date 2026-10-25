@@ -99,6 +99,9 @@ const sourceDescription = forecast => (forecast?.source_round_numbers || [foreca
   .filter(Boolean).map(number => '№' + number).join(', ') || '—'
 const votesDescription = forecast => (forecast?.votes || [])
   .map(vote => 'N−' + vote.offset + ': ' + (suits[vote.suit]?.[0] || '—')).join(' · ')
+const missingSourcesDescription = forecast => (forecast?.missing_sources || [])
+  .map(source => `N−${source.offset} = №${source.round_number}: ${source.reason}`)
+  .join('; ') || 'Нужная раздача ещё не подтверждена'
 
 const cycleStats = computed(() => cycle18.value.statistics || {})
 const currentForecast = computed(() => cycle18.value.ready
@@ -375,7 +378,7 @@ onBeforeUnmount(() => {
           <h3>{{ strategyLabel }} · прогноз масти Игрока</h3>
           <strong>{{ cycle18.ready ? 'Готов к прогнозированию' : 'Сбор истории' }}</strong>
         </div>
-        <p class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. Реальные ставки бот не делает.</p>
+        <p class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. LIVE-ставка возможна только по подтверждённому прогнозу и открытому рынку.</p>
         <div class="warmup">
           <div class="section-title"><strong>Подтверждено за запуск: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? strategyLabel + ' активен' : 'Только сбор карт' }}</span></div>
           <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
@@ -452,6 +455,7 @@ onBeforeUnmount(() => {
               {{ suits[currentForecast.predicted_suit]?.[0] }} <small>{{ suits[currentForecast.predicted_suit]?.[1] }}</small>
             </div>
             <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
+            <p v-if="currentForecast && !currentForecast.available" class="diagnostic">{{ missingSourcesDescription(currentForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
             <p v-if="currentForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(currentForecast) }}</p>
@@ -462,6 +466,7 @@ onBeforeUnmount(() => {
               {{ suits[nextForecast.predicted_suit]?.[0] }} <small>{{ suits[nextForecast.predicted_suit]?.[1] }}</small>
             </div>
             <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
+            <p v-if="nextForecast && !nextForecast.available" class="diagnostic">{{ missingSourcesDescription(nextForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
             <p v-if="nextForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(nextForecast) }}</p>

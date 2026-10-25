@@ -761,7 +761,26 @@ def test_voting_missing_one_exact_source_never_uses_neighbour(tmp_path):
     # 43-40 = 3 (missing), whereas #4 exists. This must NOT be shifted.
     assert result["live_preview"][0]["source_round_numbers"] == [40, 33, 19, 12, 3]
     assert result["live_preview"][0]["available"] is False
+    assert result["live_preview"][0]["missing_sources"] == [
+        {"offset": 40, "round_number": 3, "reason": "отсутствует в истории"}]
     assert all(row["target_round_number"] != 43 for row in result["upcoming"])
+
+
+def test_preview_explains_unconfirmed_exact_voter_without_shifting_source():
+    from app.cycle18 import STRATEGY_VOTE
+    incomplete = {
+        "finished_at": None, "player_hand_final": 0,
+        "final_snapshot_reverified": None, "calculation_status": "incomplete",
+        "cards_json": "[]", "reason": "Третья карта ещё закрыта",
+    }
+    preview = preview_two_rounds(
+        945, {}, STRATEGY_VOTE, {921: [incomplete]})[0]
+    assert preview["available"] is False
+    assert preview["source_round_numbers"] == [942, 935, 921, 914, 905]
+    assert preview["missing_sources"][2] == {
+        "offset": 24, "round_number": 921,
+        "reason": "финальная рука Игрока не подтверждена (Третья карта ещё закрыта)",
+    }
 
 
 def test_strategy_can_only_change_between_sessions(tmp_path):

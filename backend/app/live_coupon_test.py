@@ -206,6 +206,7 @@ async def place_regular_coupon(page, suit: str, amount: Decimal, mark_submitting
     await _selected_card(page, suit, box["odds"])
     if _amount(await amount_field.input_value()) != amount:
         raise PlacementError("Сумма ставки изменилась перед подтверждением")
+    stage("Купон готов: исход, сумма и кнопка подтверждены")
     if not submit:
         stage("Купон готов: исход, сумма и кнопка подтверждены; отправка отключена")
         return "READY"

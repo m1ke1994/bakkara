@@ -1,4 +1,5 @@
 from decimal import Decimal
+import sqlite3
 
 import pytest
 
@@ -49,6 +50,22 @@ def test_single_stake_test_limit_survives_result_and_restart(tmp_path):
     restored = LiveBets(path)
     assert restored.snapshot()["single_test_run_id"] == run_id
     assert not restored.reserve("game-2", "602", "clubs", Decimal("10"))
+
+
+def test_single_ten_ruble_test_preserves_existing_strategy_step(tmp_path):
+    path = tmp_path / "live.sqlite3"
+    bets = LiveBets(path)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE live_control SET step=2 WHERE id=1")
+    bets.begin_single_stake_test()
+    assert bets.reserve("test-1", "953", "diamonds", Decimal("10"),
+                        signal_source="MANUAL_TEST")
+    bets.update("test-1", "ACCEPTED")
+    assert bets.settle("test-1", "LOSE", 8)
+    restarted = LiveBets(path)
+    assert restarted.snapshot()["step"] == 2
+    assert restarted.snapshot()["blocked"]
+    assert not restarted.reserve("test-2", "954", "diamonds", Decimal("10"))
 
 
 def test_forecast_must_exist_before_accepted_attempt():
