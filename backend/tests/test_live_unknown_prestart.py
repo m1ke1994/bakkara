@@ -77,7 +77,7 @@ def test_unknown_status_does_not_skip_manual_live_test(tmp_path, monkeypatch):
     async def inspect(_player, _banker):
         return diagnostics()
 
-    async def fake_coupon(_page, suit, stake, mark, progress):
+    async def fake_coupon(_page, suit, stake, mark, progress, **_kwargs):
         recorded.append((suit, stake))
         progress("Коэффициент выбран и купон проверен")
         mark()

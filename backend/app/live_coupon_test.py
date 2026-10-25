@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 from decimal import Decimal
+from urllib.parse import urlparse
 
 from .live_executor import PlacementError, SUITS, _amount, close_result_dialog, outcome_box
 from .live_market_probe import CANVAS_SELECTOR, MarketProbeError, probe_player_suit_market
@@ -31,6 +32,23 @@ def _check_message(text: str) -> str | None:
     return None
 
 
+def _coupon_has_exact_odds(text: str, odds: float) -> bool:
+    """Compare complete numeric tokens; 1.9 must never match 11.9."""
+    expected = Decimal(str(odds))
+    return any(_amount(token) == expected for token in
+               re.findall(r"(?<![\d.,])\d+(?:[.,]\d+)?(?![\d.,])", text))
+
+
+def _check_game_page(page, expected_url: str | None) -> None:
+    if not expected_url:
+        return
+    current = urlparse(page.url)
+    expected = urlparse(expected_url)
+    if (current.netloc != expected.netloc
+            or current.path.rstrip("/") != expected.path.rstrip("/")):
+        raise PlacementError("Перед выбором или проверкой купона открыта другая игра")
+
+
 async def _visible(locator):
     for index in range(await locator.count()):
         item = locator.nth(index)
@@ -50,11 +68,12 @@ async def _read_balance(page) -> Decimal | None:
     return None
 
 
-async def _selected_card(page, suit: str, odds: float):
+async def _selected_card(page, suit: str, odds: float, expected_url: str | None = None):
     """Wait for exactly one selected outcome and verify it before amount entry."""
     expected = SUITS[suit]
     deadline = asyncio.get_running_loop().time() + 12
     while asyncio.get_running_loop().time() < deadline:
+        _check_game_page(page, expected_url)
         if [item async for item in _visible(page.locator(LOCK_TEXT))]:
             raise PlacementError("Букмекер заблокировал выбранный рынок")
         cards = [item async for item in _visible(page.locator(BET_CARD + ", " + QUICK_CARD))]
@@ -63,7 +82,7 @@ async def _selected_card(page, suit: str, odds: float):
         if cards:
             text = " ".join((await cards[0].inner_text()).casefold().split())
             if ("игрок получит карту" not in text or expected not in text.replace("червы", "черви")
-                    or str(odds) not in text):
+                    or not _coupon_has_exact_odds(text, odds)):
                 raise PlacementError(f"Купон не совпал с мастью {expected} и коэффициентом {odds}")
             return cards[0]
         await asyncio.sleep(0.1)
@@ -131,12 +150,14 @@ async def _submission_result(page, before: str, balance_before: Decimal | None,
 
 
 async def place_regular_coupon(page, suit: str, amount: Decimal, mark_submitting,
-                               report=None, *, submit: bool = True) -> str:
+                               report=None, *, submit: bool = True,
+                               expected_url: str | None = None) -> str:
     """Search Canvas, select odds, verify coupon, fill step, submit exactly once."""
     def stage(message: str) -> None:
         if report:
             report(message)
 
+    _check_game_page(page, expected_url)
     stage("Поиск: ожидаем рынок «Игрок получит карту»")
     try:
         probe = await probe_player_suit_market(page)
@@ -188,7 +209,7 @@ async def place_regular_coupon(page, suit: str, amount: Decimal, mark_submitting
         raise PlacementError("Коэффициент Canvas сейчас неактивен: указатель не стал кликабельным") from exc
     await canvas.click(position=position, timeout=3_000)
     stage("Canvas: выполнен клик по коэффициенту нужной масти")
-    await _selected_card(page, suit, box["odds"])
+    await _selected_card(page, suit, box["odds"], expected_url)
     stage("Купон: выбранный рынок, масть и коэффициент проверены")
 
     amount_fields = [item async for item in _visible(page.locator(AMOUNT))]
@@ -203,7 +224,7 @@ async def place_regular_coupon(page, suit: str, amount: Decimal, mark_submitting
     stage(f"Купон: сумма {value} RUB введена и проверена")
 
     confirm = await _ready_confirm(page)
-    await _selected_card(page, suit, box["odds"])
+    await _selected_card(page, suit, box["odds"], expected_url)
     if _amount(await amount_field.input_value()) != amount:
         raise PlacementError("Сумма ставки изменилась перед подтверждением")
     stage("Купон готов: исход, сумма и кнопка подтверждены")
@@ -212,6 +233,7 @@ async def place_regular_coupon(page, suit: str, amount: Decimal, mark_submitting
         return "READY"
     balance_before = await _read_balance(page)
     before = (await page.locator("body").first.inner_text(timeout=2_000)).casefold()
+    _check_game_page(page, expected_url)
     stage("Купон: нажимаем «Сделать ставку» один раз")
     mark_submitting()
     await confirm.click(timeout=5_000)

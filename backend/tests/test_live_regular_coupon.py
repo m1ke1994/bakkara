@@ -8,11 +8,11 @@ import pytest
 from playwright.async_api import async_playwright
 
 from app.live_bets import LiveBets
-from app.live_coupon_test import place_regular_coupon
+from app.live_coupon_test import place_regular_coupon, _coupon_has_exact_odds
 from app.live_executor import PlacementError, place_one_click
 from app.live_market_probe import INIT_SCRIPT, SNAPSHOT
 from app.browser import BrowserService
-from app.cycle18 import Cycle18Engine
+from app.cycle18 import Cycle18Engine, STRATEGY_VOTE
 from app.observation import Game, ObservationStore
 
 
@@ -102,6 +102,40 @@ async def _with_page(callback):
             await browser.close()
 
 
+def test_coupon_odds_are_compared_as_complete_numbers():
+    assert _coupon_has_exact_odds("Игрок получит карту (масть): Пики 1.90", 1.9)
+    assert _coupon_has_exact_odds("Игрок получит карту (масть): Пики 1,9", 1.9)
+    assert not _coupon_has_exact_odds("Игрок получит карту (масть): Пики 11.9", 1.9)
+
+
+def test_different_game_page_blocks_coupon_before_canvas_click():
+    async def run(page):
+        with pytest.raises(PlacementError, match="другая игра"):
+            await place_regular_coupon(
+                page, "spades", Decimal("10"), lambda: pytest.fail("Ставка отправлена"),
+                expected_url="https://example.test/another-game")
+        assert await page.evaluate("window.oddsClicks") == 0
+        assert await page.evaluate("window.submissions") == 0
+
+    asyncio.run(_with_page(run))
+
+
+def test_spades_click_selects_spades_coupon_without_submission():
+    async def run(page):
+        status = await place_regular_coupon(
+            page, "spades", Decimal("10"),
+            lambda: pytest.fail("Отправка не разрешена"),
+            submit=False, expected_url=page.url)
+        assert status == "READY"
+        assert "odds:Пики" in await page.evaluate("window.trace")
+        assert await page.evaluate("window.oddsClicks") == 1
+        assert await page.evaluate("window.submissions") == 0
+        assert "Пики 1.9" in await page.locator(".coupon-bets__bet").inner_text()
+        assert await page.locator(".coupon-amount input").input_value() == "10"
+
+    asyncio.run(_with_page(run))
+
+
 @pytest.mark.parametrize("submit", [place_regular_coupon, place_one_click])
 def test_regular_coupon_full_browser_flow_and_compatibility(submit):
     async def run(page):
@@ -143,7 +177,8 @@ def test_one_accepted_test_stake_then_next_coupon_ready_without_submission(tmp_p
         await page.goto("data:text/html," + quote(HTML), wait_until="domcontentloaded")
         ready = await place_regular_coupon(
             page, "hearts", Decimal("10"),
-            lambda: pytest.fail("Second bet must not be submitted"), submit=False)
+            lambda: pytest.fail("Second bet must not be submitted"),
+            submit=False, expected_url=page.url)
         assert ready == "READY"
         assert await page.evaluate("window.submissions") == 0
         assert await page.locator(".coupon-amount input").input_value() == "10"
@@ -161,19 +196,22 @@ def test_market_closes_after_selection_before_confirmation():
 
 
 @pytest.mark.parametrize("outcome", ["WIN", "LOSE"])
-def test_observer_prediction_coupon_result_and_next_ready_on_local_bookmaker(tmp_path, outcome):
+@pytest.mark.parametrize("strategy", ["n18", STRATEGY_VOTE])
+def test_observer_prediction_coupon_result_and_next_ready_on_local_bookmaker(tmp_path, outcome, strategy):
     async def run(page):
         async def bookmaker_page(route):
             await route.fulfill(body=HTML, content_type="text/html")
         await page.route("https://example.test/**", bookmaker_page)
         path = tmp_path / "cycle.sqlite3"
         store, engine, bets = ObservationStore(path), Cycle18Engine(path), LiveBets(path)
+        if strategy == STRATEGY_VOTE:
+            engine.save_strategy(strategy)
         engine.start_session()
         bets.mode("LIVE")
         bets.begin_single_stake_test()
         source_cards = [{"position": 1, "rank": "A", "suit": "hearts"},
                         {"position": 2, "rank": "7", "suit": "hearts"}]
-        for number in range(601, 620):
+        for number in range(581 if strategy == STRATEGY_VOTE else 601, 620):
             source = Game(f"r{number}", f"https://example.test/{number}", "", str(number), "Завершена", 0)
             store.upsert(source, source_cards, "CONFIRMED", "стенд", "CARDS_CONFIRMED",
                          player_hand_final=True, final_snapshot_reverified=True)
@@ -209,6 +247,7 @@ def test_observer_prediction_coupon_result_and_next_ready_on_local_bookmaker(tmp
         forecast = engine.refresh({"game_id": "r621", "round_number": "621"})
         preview = next(p for p in forecast["live_preview"] if p["phase"] == "CURRENT")
         assert preview["available"]
+        assert len(preview["votes"]) == (5 if strategy == STRATEGY_VOTE else 1)
         suit = preview["predicted_suit"]
         actual_suit = suit if outcome == "WIN" else next(
             item for item in ("hearts", "diamonds", "clubs", "spades") if item != suit)

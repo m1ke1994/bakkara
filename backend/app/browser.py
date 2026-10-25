@@ -523,6 +523,16 @@ class BrowserService:
                 self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
                            f"прогноз пропущен — {reason}.")
                 return
+            recorded = cycle.get("current") or {}
+            if not (recorded.get("target_game_id") == game.game_id
+                    and recorded.get("target_round_number") == int(game.round_number)
+                    and recorded.get("predicted_suit") == forecast["predicted_suit"]
+                    and recorded.get("result") == "PENDING"
+                    and recorded.get("mode") == "LIVE"):
+                self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
+                           "предварительная масть есть, но сохранённый LIVE-прогноз "
+                           "не привязан к этой игре; купон не открываем.")
+                return
             suit = forecast["predicted_suit"]
             signal_source = "STRATEGY"
             self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
@@ -568,7 +578,7 @@ class BrowserService:
                 status = await place_regular_coupon(
                     self.page, suit, amount,
                     lambda: self.live_bets.update(game.game_id, "SUBMITTING"),
-                    coupon_stage)
+                    coupon_stage, expected_url=getattr(game, "url", None))
             self.live_bets.update(game.game_id, status)
             if status in ("ACCEPTED", "REJECTED"):
                 self.event("INFO" if status == "ACCEPTED" else "WARNING",

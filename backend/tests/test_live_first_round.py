@@ -72,7 +72,7 @@ def test_first_game_bypasses_warmup_and_uses_regular_coupon(tmp_path, monkeypatc
     calls, events = [], []
     monkeypatch.setattr(browser_mod, "classify_game", lambda _game: "UPCOMING")
 
-    async def fake_coupon(_page, suit, amount, mark_submitting, report):
+    async def fake_coupon(_page, suit, amount, mark_submitting, report, **_kwargs):
         calls.append((suit, amount))
         report("Canvas и обычный купон проверены")
         mark_submitting()
@@ -137,7 +137,7 @@ def test_strategy_live_uses_regular_coupon_after_warmup(tmp_path, monkeypatch, w
     monkeypatch.setattr(browser_mod, "classify_game", lambda _game: "UPCOMING")
     calls = []
 
-    async def fake_coupon(_page, suit, amount, mark_submitting, report):
+    async def fake_coupon(_page, suit, amount, mark_submitting, report, **_kwargs):
         calls.append((suit, amount))
         mark_submitting()
         return "ACCEPTED"
@@ -150,6 +150,9 @@ def test_strategy_live_uses_regular_coupon_after_warmup(tmp_path, monkeypatch, w
         def refresh(self, _observation):
             return {
                 "ready": self.count >= warmup,
+                "current": {"target_game_id": "game-601", "target_round_number": 601,
+                            "predicted_suit": "diamonds", "result": "PENDING", "mode": "LIVE"}
+                if self.count >= warmup else None,
                 "live_preview": [{"phase": "CURRENT", "available": True,
                                   "target_round_number": 601, "predicted_suit": "diamonds"}]
                 if self.count >= warmup else [],
@@ -175,6 +178,26 @@ def test_strategy_live_uses_regular_coupon_after_warmup(tmp_path, monkeypatch, w
     assert attempt["status"] == "ACCEPTED"
 
 
+def test_live_requires_recorded_forecast_for_the_exact_game(tmp_path, monkeypatch):
+    import app.browser as browser_mod
+    store = LiveBets(tmp_path / "live.sqlite3")
+    store.mode("LIVE")
+    monkeypatch.setattr(browser_mod, "classify_game", lambda _: "UPCOMING")
+
+    class PreviewOnly:
+        def refresh(self, _):
+            return {"ready": True, "current": None, "live_preview": [
+                {"phase": "CURRENT", "available": True,
+                 "target_round_number": 601, "predicted_suit": "diamonds"}]}
+
+    fake = SimpleNamespace(
+        live_bets=store, cycle_engine=PreviewOnly(), current_observation=None,
+        event=lambda *_: None)
+    asyncio.run(BrowserService._live_before_cards(
+        fake, SimpleNamespace(game_id="game-601", round_number="601")))
+    assert store.get_attempt("game-601") is None
+
+
 def test_pre_submit_failure_is_not_a_bookmaker_rejection(tmp_path, monkeypatch):
     import app.browser as browser_mod
     from app.live_executor import PlacementError
@@ -184,7 +207,7 @@ def test_pre_submit_failure_is_not_a_bookmaker_rejection(tmp_path, monkeypatch):
     store.set_warmup_test(True, "diamonds")
     monkeypatch.setattr(browser_mod, "classify_game", lambda _game: "UPCOMING")
 
-    async def missing_market(*_args):
+    async def missing_market(*_args, **_kwargs):
         raise PlacementError("Canvas: коэффициент не найден")
 
     monkeypatch.setattr(browser_mod, "place_regular_coupon", missing_market)
