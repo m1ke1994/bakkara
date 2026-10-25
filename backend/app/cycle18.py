@@ -70,7 +70,9 @@ def predict_target(number: int, sources: dict[int, dict[str, Any]],
         return None
     counts = {suit: sum(vote["suit"] == suit for vote in votes) for suit in SUIT_PRIORITY}
     predicted = max(SUIT_PRIORITY, key=lambda suit: counts[suit])
-    if strategy == STRATEGY_VOTE and counts[predicted] <= len(votes) // 2:
+    # Preserve the original five-way tie-break for the full strategy.
+    # Partial voting is stricter: refuse signals without a real majority.
+    if strategy == STRATEGY_VOTE and missing and counts[predicted] <= len(votes) // 2:
         return None
     return {
         "predicted_suit": predicted,
