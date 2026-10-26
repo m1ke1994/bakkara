@@ -57,4 +57,4 @@ def audit_history(path, session_id, rows, strategy):
                 WHERE payload_json!=excluded.payload_json""",
                 (session_id, target["game_id"], payload, datetime.now(timezone.utc).isoformat()))
             audited.append(item)
-    return audited[-200:][::-1]
+    return audited[-300:][::-1]
