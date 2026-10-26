@@ -1032,8 +1032,8 @@ class ObservationStore:
                 FROM observations WHERE game_id=?""", (game_id,)).fetchone()
         if not row:
             return None
-        return dict(self._record(row), **self._incoming_predictions().get(game_id, {}),
-                    **self._outgoing_predictions().get(game_id, {}))
+        return dict(self._record(row), **self._incoming_predictions([game_id]).get(game_id, {}),
+                    **self._outgoing_predictions([game_id]).get(game_id, {}))
 
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
         with sqlite3.connect(self.path) as db:
@@ -1045,8 +1045,9 @@ class ObservationStore:
                 FROM observations WHERE cards_json<>'[]'
                     AND (player_hand_final=1 OR finished_at IS NOT NULL)
                 ORDER BY COALESCE(NULLIF(observed_at,''),last_scanned_at,discovered_at) DESC,discovered_at DESC LIMIT ?""", (limit,)).fetchall()
-        incoming = self._incoming_predictions()
-        outgoing = self._outgoing_predictions()
+        ids = [row["game_id"] for row in rows]
+        incoming = self._incoming_predictions(ids)
+        outgoing = self._outgoing_predictions(ids)
         return [dict(self._record(row), **incoming.get(row["game_id"], {}),
                      **outgoing.get(row["game_id"], {})) for row in rows]
 
@@ -1130,10 +1131,17 @@ class ObservationStore:
                 (cards_json, outcome, reason, checked_at, prediction["source_game_id"]))
             return True
 
-    def _incoming_predictions(self) -> dict[str, dict[str, Any]]:
+    def _incoming_predictions(self, game_ids: list[str] | None = None) -> dict[str, dict[str, Any]]:
+        if game_ids is not None and not game_ids:
+            return {}
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
-            rows = db.execute("SELECT * FROM predictions").fetchall()
+            if game_ids is None:
+                rows = db.execute("SELECT * FROM predictions").fetchall()
+            else:
+                placeholders = ",".join("?" for _ in game_ids)
+                rows = db.execute(f"SELECT * FROM predictions WHERE target_game_id IN ({placeholders})",
+                                  game_ids).fetchall()
         return {row["target_game_id"]: {
             "source_game_id": row["source_game_id"],
             "source_round_number": row["source_round_number"],
@@ -1148,12 +1156,19 @@ class ObservationStore:
 
     def incoming_prediction_for(self, target_game_id: str) -> dict[str, Any]:
         """Expose a linked forecast in the Current Observation panel before cards exist."""
-        return self._incoming_predictions().get(target_game_id, {})
+        return self._incoming_predictions([target_game_id]).get(target_game_id, {})
 
-    def _outgoing_predictions(self) -> dict[str, dict[str, Any]]:
+    def _outgoing_predictions(self, game_ids: list[str] | None = None) -> dict[str, dict[str, Any]]:
+        if game_ids is not None and not game_ids:
+            return {}
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
-            rows = db.execute("SELECT * FROM predictions").fetchall()
+            if game_ids is None:
+                rows = db.execute("SELECT * FROM predictions").fetchall()
+            else:
+                placeholders = ",".join("?" for _ in game_ids)
+                rows = db.execute(f"SELECT * FROM predictions WHERE source_game_id IN ({placeholders})",
+                                  game_ids).fetchall()
         return {row["source_game_id"]: {
             "outgoing_prediction": row["predicted_suit"],
             "outgoing_target_game_id": row["target_game_id"],
