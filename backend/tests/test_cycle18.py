@@ -765,7 +765,10 @@ def test_voting_missing_one_exact_source_never_uses_neighbour(tmp_path):
     assert result["live_preview"][0]["vote_count"] == 4
     assert result["live_preview"][0]["missing_sources"] == [
         {"offset": 40, "round_number": 3, "reason": "отсутствует в истории"}]
-    assert any(row["target_round_number"] == 43 for row in result["upcoming"])
+    # The exact target may already be uniquely linked to a prelisted current slot.
+    # Both representations are valid; neither substitutes a neighbouring voter.
+    assert (any(row["target_round_number"] == 43 for row in result["upcoming"])
+            or (result["current"] and result["current"]["target_round_number"] == 43))
 
 
 def test_preview_explains_unconfirmed_exact_voter_without_shifting_source():
