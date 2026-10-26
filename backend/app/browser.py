@@ -512,6 +512,9 @@ class BrowserService:
                 if not cycle["ready"]:
                     reason = (f"подготовлено {cycle.get('warmup_count', 'неизвестно')}/"
                               f"{cycle.get('warmup_required', 'неизвестно')} рук")
+                elif missing and missing.get("filter_paused"):
+                    reason = missing.get("reason") or "Фильтр активен: текущая раздача пропускается."
+                    self.event("INFO", f"FILTER_DRAW_DIAMOND_12 Раздача №{game.round_number}: {reason}.")
                 elif absent:
                     reason = "; ".join(
                         f"источник N−{item['offset']} = №{item['round_number']} "
@@ -627,6 +630,15 @@ class BrowserService:
             if self.live_bets.settle(game.game_id, result, len(plan.row)):
                 self.event("INFO", f"LIVE_RESULT_CONFIRMED Раздача №{game.round_number}, "
                            f"ID {game.game_id}: {result}; шаг обновлён.")
+        elif attempt and attempt.get("status") == "ACCEPTED":
+            # Diagnostic only; NEVER convert a missing verified hand to LOSE.
+            checked = next((p for p in cycle.get("recent", [])
+                            if p.get("target_game_id") == game.game_id), None)
+            why = checked.get("reason") if checked else (
+                "прогноз для точной игры не связан с финальными картами")
+            self.event("WARNING", f"LIVE_RESULT_UNCONFIRMED Раздача №{game.round_number}, "
+                       f"ID {game.game_id}: {why or 'ожидаем подтверждения'}; "
+                       "шаг ставки НЕ изменён.")
 
     def event(self, level: str, message: str) -> None:
         # Never include page content, credentials, tokens, or cookies here.
