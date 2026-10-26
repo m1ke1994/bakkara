@@ -67,7 +67,7 @@ def draw_diamond_pause_triggers(rows: list[dict[str, Any]]) -> list[int]:
             continue
         if verified_suit(row) is None or pause_for_round(number, triggers):
             continue
-        if any(normalize_suit(card.get("suit")) == "diamonds" for card in captured_cards(row)):
+        if any(normalize_suit(card.get("suit")) == "♦" for card in captured_cards(row)):
             triggers.append(number)
     return triggers
 
