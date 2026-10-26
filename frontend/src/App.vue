@@ -88,12 +88,14 @@ const strategyInfo = computed(() => state.value.strategy || {})
 const activeStrategy = computed(() => cycle18.value.session_id
   ? cycle18.value.strategy : (strategyInfo.value.selected || 'n18'))
 const strategyLabel = computed(() => activeStrategy.value === 'n18'
-  ? 'Цикл N−18' : 'Голосование N−3/10/24/31/40')
+  ? 'Цикл N−18' : activeStrategy.value.endsWith('_draw_diamond_12')
+    ? 'Голосование + ничья ♦ / пропуск 12' : 'Голосование N−3/10/24/31/40')
 const strategyShortLabel = computed(() => activeStrategy.value === 'n18' ? 'цикл 18' : '5 циклов')
 const strategyDirty = computed(() => strategyChoice.value !== (strategyInfo.value.selected || 'n18'))
 const strategyOptions = [
   { id: 'n18', label: 'Цикл N−18', detail: 'Один источник · 20 подтверждённых раздач для подготовки' },
   { id: 'vote_3_10_24_31_40', label: 'Голосование N−3/10/24/31/40', detail: 'Пять голосов · 40 подтверждённых раздач для подготовки' },
+  { id: 'vote_3_10_24_31_40_draw_diamond_12', label: 'Голосование + ничья ♦ / пропуск 12', detail: 'После подтверждённой ничьей с ♦ у Игрока не ставить в 12 следующих раздачах; новые ничьи внутри паузы не продлевают её' },
 ]
 const sourceDescription = forecast => (forecast?.source_round_numbers || [forecast?.source_round_number])
   .filter(Boolean).map(number => '№' + number).join(', ') || '—'
@@ -127,7 +129,7 @@ const filteredHistory = computed(() => {
 })
 async function refreshHistory() {
   try {
-    const response = await fetch(`${api}/api/history?limit=200`)
+    const response = await fetch(`${api}/api/history?limit=300`)
     if (!response.ok) return
     const rows = await response.json()
     if (!Array.isArray(rows)) return
@@ -287,7 +289,7 @@ onBeforeUnmount(() => {
       <article><span>Авторизация</span><strong :class="badge(state.authorization)">{{ label('authorization', state.authorization) }}</strong></article>
     </section>
     <section class="events strategy-panel" aria-label="Выбор фильтра прогнозирования">
-      <div class="section-title"><div><p class="eyebrow">СТРАТЕГИЯ / ФИЛЬТР</p><h2>Выберите алгоритм прогнозирования</h2></div><span class="standalone-label">На сервере: {{ strategyInfo.selected === 'vote_3_10_24_31_40' ? '5 циклов' : 'N−18' }}</span></div>
+      <div class="section-title"><div><p class="eyebrow">СТРАТЕГИЯ / ФИЛЬТР</p><h2>Выберите алгоритм прогнозирования</h2></div><span class="standalone-label">На сервере: {{ strategyInfo.selected === 'n18' ? 'N−18' : '5 циклов' }}</span></div>
       <div class="strategy-options" role="radiogroup" aria-label="Фильтр прогноза">
         <label v-for="option in strategyOptions" :key="option.id" class="strategy-option" :class="{ 'strategy-option-selected': strategyChoice === option.id }">
           <input v-model="strategyChoice" type="radio" name="forecast-strategy" :value="option.id" :disabled="busy || observing" @change="strategyTouched = true; strategyNotice = ''" />
@@ -299,7 +301,7 @@ onBeforeUnmount(() => {
         <span class="diagnostic">{{ observing ? 'Сканирование активно: для смены фильтра сначала остановите его.' : (strategyDirty ? 'Выбор изменён — нажмите «Сохранить стратегию».' : 'Настройка хранится в базе данных бэкенда.') }}</span>
       </div>
       <p v-if="strategyNotice" class="strategy-notice">{{ strategyNotice }}</p>
-      <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. ДЕМО только наблюдает. В LIVE бот работает с купоном БК; тест с первой раздачи не является прогнозом стратегии.</p>
+      <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. Виртуальное голосование продолжает работать в паузе. В LIVE пропуск блокирует ставки по стратегии. Тест с первой раздачи не является прогнозом стратегии.</p>
     </section>
     <section class="controls"><button :disabled="busy || running" @click="command('/api/browser/start')">Запустить браузер</button><button class="secondary" :disabled="busy || !running" @click="command('/api/browser/stop')">Остановить браузер</button></section>
     <p class="diagnostic">{{ state.diagnostic }}</p><p v-if="error" class="error">{{ error }}</p>
@@ -379,7 +381,8 @@ onBeforeUnmount(() => {
           <strong>{{ cycle18.ready ? 'Готов к прогнозированию' : 'Сбор истории' }}</strong>
         </div>
         <p class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. Для голосования достаточно 3–4 проверенных источников только при строгом большинстве; при 5/5 действует прежнее правило равенства. Неполное голосование помечается отдельно. LIVE-ставка возможна только по подтверждённому прогнозу и открытому рынку.</p>
-        <div class="warmup">
+        <div v-if="cycle18.pause_enabled" class="diagnostic">Фильтр «ничья + ♦»: {{ cycle18.filter_skipped_count ?? 0 }} виртуальных прогнозов пропущено · WIN: {{ cycle18.filter_skipped_wins ?? 0 }} · LOSE: {{ cycle18.filter_skipped_losses ?? 0 }}. Пропуски не изменяют шаг виртуального догона.</div>
+       <div class="warmup">
           <div class="section-title"><strong>Подтверждено в сохранённой сессии: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? strategyLabel + ' активен' : 'Только сбор карт' }}</span></div>
           <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
           <p v-if="!cycle18.ready" class="diagnostic">Подготовка: первые {{ cycle18.warmup_required ?? 20 }} финально подтверждённых раздач. До её завершения WIN/LOSE не рассчитываем. Если источник отсутствует, сигнал пропускается.</p>
@@ -392,6 +395,12 @@ onBeforeUnmount(() => {
           Ожидают подтверждения карт или начала: <strong>{{ cycle18.missing_count ?? 0 }}</strong>.
           Раздачи без подтверждения остаются в истории и не сдвигают цикл. Карты соседних игр не подменяют отсутствующие.
         </p>
+        <details v-if="cycle18.unconfirmed_forecasts?.length">
+          <summary>Прогнозы без подтверждённого результата ({{ cycle18.unconfirmed_forecasts.length }})</summary>
+          <p v-for="forecast in cycle18.unconfirmed_forecasts" :key="forecast.source_game_id">
+            №{{ forecast.target_round_number }} · {{ predictionLabels[forecast.result] || forecast.result }} · {{ forecast.reason || 'Нет финально подтверждённой карты или целевая игра ещё не найдена' }}
+          </p>
+        </details>
         <details v-if="cycle18.missing_hands?.length">
           <summary>Раздачи без финального подтверждения ({{ cycle18.missing_count }})</summary>
           <p v-for="item in cycle18.missing_hands" :key="item.game_id">
@@ -436,9 +445,9 @@ onBeforeUnmount(() => {
               <tbody><tr v-for="forecast in cycle18.recent" :key="forecast.source_game_id">
                 <td>{{ sourceDescription(forecast) }}</td><td>№{{ forecast.target_round_number }}</td>
                 <td :class="isRedSuit(forecast.predicted_suit) ? 'red-suit' : 'black-suit'">{{ suits[forecast.predicted_suit]?.[0] || '—' }}</td>
-                <td><strong :class="forecast.result === 'WIN' ? 'win-text' : forecast.result === 'LOSE' ? 'lose-text' : ''">{{ predictionLabels[forecast.result] || forecast.result }}</strong></td>
+                <td><strong :class="forecast.result === 'WIN' ? 'win-text' : forecast.result === 'LOSE' ? 'lose-text' : ''">{{ forecast.mode === 'FILTER' ? 'Пропуск · ' : '' }}{{ predictionLabels[forecast.result] || forecast.result }}</strong></td>
                 <td>{{ forecast.step ?? '—' }}</td>
-                <td>{{ forecast.mode === 'BACKFILL' ? 'По истории' : 'Наблюдение' }}</td>
+                <td>{{ forecast.mode === 'FILTER' ? 'По фильтру · без ставки' : forecast.mode === 'BACKFILL' ? 'По истории' : 'Наблюдение' }}</td>
               </tr></tbody>
             </table>
           </div>
@@ -454,8 +463,8 @@ onBeforeUnmount(() => {
             <div v-if="currentForecast?.available" class="forecast-suit" :class="isRedSuit(currentForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
               {{ suits[currentForecast.predicted_suit]?.[0] }} <small>{{ suits[currentForecast.predicted_suit]?.[1] }}</small>
             </div>
-            <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
-            <p v-if="currentForecast && !currentForecast.available" class="diagnostic">{{ missingSourcesDescription(currentForecast) }}</p>
+            <div v-else class="forecast-unavailable">{{ currentForecast?.filter_paused ? 'Фильтр: пропуск ставки' : 'Нет подтверждённого источника' }}</div>
+            <p v-if="currentForecast && !currentForecast.available" class="diagnostic">{{ currentForecast.filter_paused ? currentForecast.reason : missingSourcesDescription(currentForecast) }}</p>
             <p v-if="currentForecast?.available && currentForecast.partial_vote" class="diagnostic">Частичное голосование: {{ currentForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(currentForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
@@ -466,8 +475,8 @@ onBeforeUnmount(() => {
             <div v-if="nextForecast?.available" class="forecast-suit" :class="isRedSuit(nextForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
               {{ suits[nextForecast.predicted_suit]?.[0] }} <small>{{ suits[nextForecast.predicted_suit]?.[1] }}</small>
             </div>
-            <div v-else class="forecast-unavailable">Нет подтверждённого источника</div>
-            <p v-if="nextForecast && !nextForecast.available" class="diagnostic">{{ missingSourcesDescription(nextForecast) }}</p>
+            <div v-else class="forecast-unavailable">{{ nextForecast?.filter_paused ? 'Фильтр: пропуск ставки' : 'Нет подтверждённого источника' }}</div>
+            <p v-if="nextForecast && !nextForecast.available" class="diagnostic">{{ nextForecast.filter_paused ? nextForecast.reason : missingSourcesDescription(nextForecast) }}</p>
             <p v-if="nextForecast?.available && nextForecast.partial_vote" class="diagnostic">Частичное голосование: {{ nextForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(nextForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
@@ -478,7 +487,7 @@ onBeforeUnmount(() => {
         <p v-if="!cycle18.ready" class="diagnostic">Прогнозы появятся после {{ cycle18.warmup_required ?? 20 }} подтверждённых игр в сохранённой сессии.</p>
     </section>
     <section class="events history-panel" id="history">
-      <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Последние {{ fullHistory.length }} подтверждённых раздач · доступно до 200 записей.</p></div><div class="history-actions"><button class="secondary" @click="refreshHistory">Обновить</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div></div>
+      <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Последние {{ fullHistory.length }} подтверждённых раздач · доступно до 300 записей.</p></div><div class="history-actions"><button class="secondary" @click="refreshHistory">Обновить</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div></div>
       <label class="field history-search">Поиск по номеру, ID или картам
         <input v-model="historySearch" type="search" placeholder="Например: 600 или A♥" />
       </label>
