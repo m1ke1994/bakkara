@@ -153,7 +153,7 @@ async def start_observation():
     # first round. Otherwise the first records have discovered_at < started_at
     # and are silently excluded from the 20-round preparation.
     if not was_running:
-        await asyncio.to_thread(cycle18_engine.start_session)
+        await asyncio.to_thread(cycle18_engine.start_session, resume=True)
     try:
         await browser_service.start_observation()
     except Exception:
@@ -201,13 +201,13 @@ async def probe_market():
 
 
 @app.get("/api/history")
-async def history(limit: int = 200):
-    """Read the last 200 completed Player hands without bloating live polling.
+async def history(limit: int = 300):
+    """Read up to 300 completed Player hands without bloating live polling.
 
     This endpoint is read-only; calculation and observation state are never
     changed by opening history.
     """
-    safe_limit = min(200, max(1, limit))
+    safe_limit = min(300, max(1, limit))
     return await asyncio.to_thread(browser_service.store.history, safe_limit)
 
 

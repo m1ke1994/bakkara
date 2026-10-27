@@ -760,10 +760,15 @@ def test_voting_missing_one_exact_source_never_uses_neighbour(tmp_path):
     assert result["ready"]
     # 43-40 = 3 (missing), whereas #4 exists. This must NOT be shifted.
     assert result["live_preview"][0]["source_round_numbers"] == [40, 33, 19, 12, 3]
-    assert result["live_preview"][0]["available"] is False
+    assert result["live_preview"][0]["available"] is True
+    assert result["live_preview"][0]["partial_vote"] is True
+    assert result["live_preview"][0]["vote_count"] == 4
     assert result["live_preview"][0]["missing_sources"] == [
         {"offset": 40, "round_number": 3, "reason": "отсутствует в истории"}]
-    assert all(row["target_round_number"] != 43 for row in result["upcoming"])
+    # The exact target may already be uniquely linked to a prelisted current slot.
+    # Both representations are valid; neither substitutes a neighbouring voter.
+    assert (any(row["target_round_number"] == 43 for row in result["upcoming"])
+            or (result["current"] and result["current"]["target_round_number"] == 43))
 
 
 def test_preview_explains_unconfirmed_exact_voter_without_shifting_source():
@@ -823,8 +828,49 @@ def test_voting_missing_target_does_not_reset_loss_step(tmp_path):
         {"position": 2, "rank": "2", "suit": "hearts"},
     ])
     result = engine.refresh()
-    assert result["statistics"]["checked_count"] == 2
-    assert result["statistics"]["losses"] == 1
+    # A four-voter majority can produce a partial forecast for #43.
+    # Results must still come from confirmed target cards only.
+    assert result["statistics"]["checked_count"] == 3
+    assert result["statistics"]["losses"] == 2
     assert result["statistics"]["wins"] == 1
-    assert result["statistics"]["wins_by_step"] == {"2": 1}
-    assert all(item["target_round_number"] != 43 for item in result["recent"])
+    assert result["statistics"]["wins_by_step"] == {"3": 1}
+    assert any(item["target_round_number"] == 43 for item in result["recent"])
+
+
+def test_voting_partial_quorum_and_strict_majority():
+    from app.cycle18 import STRATEGY_VOTE, predict_target
+    import json
+    def verified(suit):
+        return {"finished_at": None, "player_hand_final": 1,
+                "final_snapshot_reverified": 1,
+                "calculation_status": "complete",
+                "cards_json": json.dumps([
+                    {"position": 1, "rank": "9", "suit": suit},
+                    {"position": 2, "rank": "9", "suit": suit}])}
+    # N=100 sources 97,90,76,69,60. Three real votes, two missing.
+    sources = {97: verified("clubs"), 90: verified("clubs"), 76: verified("clubs")}
+    result = predict_target(100, sources, STRATEGY_VOTE)
+    assert result is not None
+    assert result["vote_count"] == 3
+    assert result["partial_vote"]
+    assert result["source_round_numbers"] == [97, 90, 76, 69, 60]
+    # Less than three verified sources cannot produce a forecast.
+    assert predict_target(100, {97: verified("clubs"), 90: verified("clubs")},
+                          STRATEGY_VOTE) is None
+
+
+def test_recent_session_can_resume_without_resetting_persisted_warmup(tmp_path):
+    path = tmp_path / "resume.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    original_id = engine.start_session()
+    for number in range(1, 41):
+        add_round(store, number)
+    assert engine.refresh()["ready"]
+    engine.stop_session()
+    assert engine.start_session(resume=True) == original_id
+    resumed = engine.refresh()
+    assert resumed["ready"] and resumed["warmup_count"] == 20
+    engine.stop_session()
+    # Default explicit session creation retains the original reset semantics.
+    assert engine.start_session() != original_id
+    assert engine.refresh()["warmup_count"] == 0

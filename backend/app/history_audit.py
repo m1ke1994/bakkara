@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 
 
 def audit_history(path, session_id, rows, strategy):
-    from .cycle18 import (round_number, verified_suit, predict_target, captured_cards,
-                          strategy_offsets, ROUND_MAX)
+    from .cycle18 import (round_number, source_verified, predict_target, captured_cards,
+                          strategy_offsets, ROUND_MAX, hot_window_analysis, STRATEGY_HOT_8)
     from .observation import evaluate_prediction
     counts = {}
     for row in rows:
@@ -14,7 +14,7 @@ def audit_history(path, session_id, rows, strategy):
         if number is not None:
             counts[number] = counts.get(number, 0) + 1
     sources = {round_number(row.get("round_number")): row for row in rows
-               if counts.get(round_number(row.get("round_number"))) == 1 and verified_suit(row)}
+               if counts.get(round_number(row.get("round_number"))) == 1 and source_verified(row, strategy)}
     audited = []
     with sqlite3.connect(path) as db:
         db.row_factory = sqlite3.Row
@@ -38,9 +38,12 @@ def audit_history(path, session_id, rows, strategy):
                 final_snapshot_reverified=target.get("final_snapshot_reverified") == 1)
                 if suit else "UNKNOWN")
             saved = original.get(target["game_id"])
+            hot_reason = (hot_window_analysis(number, sources).get("reason", "")
+                          if strategy == STRATEGY_HOT_8 and counts[number] == 1 else "")
             reason = ("Неоднозначный номер целевой раздачи" if counts[number] != 1 else
                       "Нет подтверждённых источников: " + ", ".join(map(str, missing)) if missing else
-                      "Окончательные карты цели не подтверждены" if not verified_suit(target) else
+                      hot_reason if hot_reason else
+                      "Окончательные карты цели не подтверждены" if not source_verified(target, strategy) else
                       "Исторический пересчёт; исходный прогноз сохранён" if saved else
                       "Исторический пересчёт; своевременный прогноз не был записан")
             item = {"target_game_id": target["game_id"], "target_round_number": number,
@@ -57,4 +60,4 @@ def audit_history(path, session_id, rows, strategy):
                 WHERE payload_json!=excluded.payload_json""",
                 (session_id, target["game_id"], payload, datetime.now(timezone.utc).isoformat()))
             audited.append(item)
-    return audited[-200:][::-1]
+    return audited[-300:][::-1]

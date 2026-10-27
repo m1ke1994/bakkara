@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError as PlaywrightTimeoutError, async_playwright
 
-from .draw_rules import player_card_count
+from .draw_rules import player_card_count, resolved_baccarat_scores
 from .cycle18 import moment
 from .config import settings
 from .live_bets import LiveBets, settle_test_hand
@@ -512,10 +512,16 @@ class BrowserService:
                 if not cycle["ready"]:
                     reason = (f"подготовлено {cycle.get('warmup_count', 'неизвестно')}/"
                               f"{cycle.get('warmup_required', 'неизвестно')} рук")
+                elif missing and missing.get("filter_paused"):
+                    reason = missing.get("reason") or "Фильтр активен: текущая раздача пропускается."
+                    self.event("INFO", f"FILTER_DRAW_DIAMOND_12 Раздача №{game.round_number}: {reason}.")
                 elif absent:
                     reason = "; ".join(
                         f"источник N−{item['offset']} = №{item['round_number']} "
                         f"{item['reason']}" for item in absent)
+                elif missing and missing.get("skip_reason"):
+                    # Frequency-filter skips are deliberate, not absent links.
+                    reason = missing["skip_reason"]
                 else:
                     reason = "прогноз не связан с текущей раздачей"
                 self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
@@ -535,8 +541,15 @@ class BrowserService:
                 return
             suit = forecast["predicted_suit"]
             signal_source = "STRATEGY"
-            self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
-                       f"ID {game.game_id}: все источники {forecast.get('source_round_numbers', [])} подтверждены.")
+            if forecast.get("partial_vote"):
+                self.event("WARNING", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: частичное голосование "
+                           f"{forecast.get('vote_count', 0)}/5; подтверждены "
+                           f"{forecast.get('source_round_numbers', [])}, "
+                           f"недоступны {forecast.get('missing_sources', [])}.")
+            else:
+                self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: все источники {forecast.get('source_round_numbers', [])} подтверждены.")
             remaining = list_timer_seconds(getattr(game, "time", ""))
             timer_seen_at = getattr(self, "_game_timer_observed_at", None)
             if remaining is not None and timer_seen_at is not None:
@@ -630,6 +643,15 @@ class BrowserService:
             if self.live_bets.settle(game.game_id, result, len(plan.row)):
                 self.event("INFO", f"LIVE_RESULT_CONFIRMED Раздача №{game.round_number}, "
                            f"ID {game.game_id}: {result}; шаг обновлён.")
+        elif attempt and attempt.get("status") == "ACCEPTED":
+            # Diagnostic only; NEVER convert a missing verified hand to LOSE.
+            checked = next((p for p in cycle.get("recent", [])
+                            if p.get("target_game_id") == game.game_id), None)
+            why = checked.get("reason") if checked else (
+                "прогноз для точной игры не связан с финальными картами")
+            self.event("WARNING", f"LIVE_RESULT_UNCONFIRMED Раздача №{game.round_number}, "
+                       f"ID {game.game_id}: {why or 'ожидаем подтверждения'}; "
+                       "шаг ставки НЕ изменён.")
 
     def event(self, level: str, message: str) -> None:
         # Never include page content, credentials, tokens, or cookies here.
@@ -977,6 +999,7 @@ class BrowserService:
         player_hand_final: bool = False,
         diagnostics: dict[str, Any] | None = None,
         final_snapshot_reverified: bool | None = None,
+        baccarat_outcome: str = "",
     ) -> bool:
         try:
             def persist() -> dict[str, Any] | None:
@@ -990,6 +1013,7 @@ class BrowserService:
                         final_snapshot_reverified=final_snapshot_reverified,
                         pending_card_slots=pending_card_slots,
                         player_hand_final=player_hand_final,
+                        baccarat_outcome=baccarat_outcome,
                     )
                     stored = self.store.get(game.game_id)
                 if stored and LEGACY_NEXT_GAME_MODE:
@@ -1042,6 +1066,7 @@ class BrowserService:
             "outgoing_prediction": stored_record.get("outgoing_prediction", stored_record.get("prediction_for_next_round")) if stored_record else None,
             "prediction_result": stored_record.get("prediction_result") if stored_record else None,
             "prediction_reason": stored_record.get("prediction_reason") if stored_record else None,
+            "baccarat_outcome": stored_record.get("baccarat_outcome") if stored_record else None,
         })
         if diagnostics is not None:
             current["diagnostics"] = diagnostics
@@ -1245,13 +1270,14 @@ class BrowserService:
                   const bankerSide = wrappers.find(side => [...side.querySelectorAll('.baccarat-player__name')]
                     .some(node => visible(node) && text(node).toLocaleLowerCase() === bankerName));
                   const bankerBoxes = [...(bankerSide?.querySelectorAll('.baccarat-player__card-box') || [])].filter(visible);
-                  const banker_initial_ranks = bankerBoxes.slice(0, 2).map(box => {
+                  const banker_ranks = bankerBoxes.map(box => {
                     const nodes = [box, ...box.querySelectorAll('*')];
                     const node = nodes.find(node => visible(node) &&
                       (node.children.length === 0 || node.hasAttribute('data-rank')) &&
                       /^(?:A|[2-9]|10|J|Q|K)$/.test((node.getAttribute('data-rank') || text(node)).toUpperCase()));
                     return (node?.getAttribute('data-rank') || text(node)).toUpperCase();
                   });
+                  const banker_initial_ranks = banker_ranks.slice(0, 2);
                   const timerLabels = [...document.querySelectorAll('.ui-game-timer__label')]
                     .filter(visible).map(text).filter(value => /^\d{1,2}:\d{2}$/.test(value));
                   const statusTexts = [...document.querySelectorAll('.scoreboard-header__match-info, .scoreboard-status')]
@@ -1317,7 +1343,7 @@ class BrowserService:
                       player_card_ranks: rankCount,
                       player_card_suits: suitCount
                     },
-                    banker_initial_ranks, cards, pending_card_slots: pending, status_texts: statusTexts,
+                    banker_initial_ranks, banker_ranks, cards, pending_card_slots: pending, status_texts: statusTexts,
                     card_slot_evidence: pending ? cardSlotEvidence : [],
                     round_timer_text: timerLabels[0] || '',
                     finished, finish_flag_text: finishLabel,
@@ -1369,6 +1395,7 @@ class BrowserService:
             "cards": (data_frame or {}).get("cards", []),
             "pending_card_slots": (data_frame or {}).get("pending_card_slots", 0),
             "banker_initial_ranks": (data_frame or {}).get("banker_initial_ranks", []),
+            "banker_ranks": (data_frame or {}).get("banker_ranks", []),
             "snapshot_captured_at_ms": (data_frame or {}).get("captured_at_ms"),
             "round_timer_text": next((frame["round_timer_text"] for frame in frames
                                       if frame.get("round_timer_text")), ""),
@@ -2377,6 +2404,22 @@ class BrowserService:
                     # don't carry any older per-position values into the final record.
                     cards = [dict(item) for item in observed_cards]
                 final_reverified = hand_final
+                # The bookmaker list's pre-deal 0:0 is not a confirmed draw.
+                banker_ranks = (final_read.get("banker_ranks", []) if confirmed_two
+                                else diagnostics.get("banker_ranks", []))
+                final_scores = resolved_baccarat_scores(cards, banker_ranks) if hand_final else None
+                final_caption = str(diagnostics.get("finish_flag_text") or "").strip().casefold()
+                baccarat_outcome = ""
+                if final_scores:
+                    player_points, banker_points = final_scores
+                    baccarat_outcome = ("DRAW" if player_points == banker_points else
+                                        "PLAYER" if player_points > banker_points else "BANKER")
+                    game.player_score, game.banker_score = str(player_points), str(banker_points)
+                elif hand_final and final_caption == "ничья":
+                    baccarat_outcome = "DRAW"
+                if final_caption == "ничья" and baccarat_outcome not in ("", "DRAW"):
+                    self.event("WARNING", f"Раздача №{game.round_number}: надпись 'Ничья' противоречит картам; фильтр не запускаем.")
+                    baccarat_outcome = ""
                 scan_result, completeness = classify_player_scan(
                     player_field_present=player_present,
                     cards_container_present=container_present,
@@ -2445,6 +2488,7 @@ class BrowserService:
                         player_hand_final=hand_final,
                         diagnostics=diagnostics,
                         final_snapshot_reverified=final_reverified if hand_final else None,
+                        baccarat_outcome=baccarat_outcome,
                     )
                     if saved:
                         last_saved_signature = save_signature

@@ -41,7 +41,7 @@ def test_history_hides_win_lose_until_cycle18_ready_and_shows_only_cycle18_outco
     assert "cycle18.value.recent" in app
     assert 'v-if="cycle18.ready" scope="col">WIN / LOSE' in app
     assert 'v-if="cycle18.ready"><span v-if="outcomeFor(item.game_id)' in app
-    assert 'Подтверждено за запуск:' in app
+    assert 'Подтверждено в сохранённой сессии:' in app
     assert 'Во время первых 20' not in app
     assert "Проверки подготовки N−1" not in app
     assert ':key="item.game_id"' in app
@@ -78,24 +78,25 @@ def test_dashboard_has_two_numbered_suit_forecasts_immediately_above_history():
     assert 'История виртуальных результатов' not in template
 
 
-def test_history_supports_search_and_up_to_two_hundred_rows_without_live_poll_bloat():
+def test_history_supports_search_and_up_to_three_hundred_rows_without_live_poll_bloat():
     app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
     main = (Path(__file__).resolve().parents[1] / 'app' / 'main.py').read_text(encoding='utf-8')
     cycle = (Path(__file__).resolve().parents[1] / 'app' / 'cycle18.py').read_text(encoding='utf-8')
-    assert 'api}/api/history?limit=200' in app
+    assert 'api}/api/history?limit=300' in app
     assert 'historySearch' in app
     assert 'v-for="item in filteredHistory"' in app
     assert 'history-full-scroll' in app
-    assert 'async def history(limit: int = 200)' in main
-    assert 'safe_limit = min(200, max(1, limit))' in main
-    assert '[-200:][::-1]' in cycle
+    assert 'async def history(limit: int = 300)' in main
+    assert 'safe_limit = min(300, max(1, limit))' in main
+    assert '[-300:][::-1]' in cycle
 
 
-def test_saved_strategy_has_two_filters_and_selects_40_hand_voting():
+def test_saved_strategy_has_draw_diamond_filter_and_selects_40_hand_voting():
     app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
     main = (Path(__file__).resolve().parents[1] / 'app' / 'main.py').read_text(encoding='utf-8')
     assert 'name="forecast-strategy"' in app
     assert "vote_3_10_24_31_40" in app
+    assert "vote_3_10_24_31_40_draw_diamond_12" in app
     assert 'Сохранить стратегию' in app
     assert "method: 'PUT'" in app
     assert '/api/strategy' in app and '@app.put("/api/strategy")' in main

@@ -23,21 +23,130 @@ STALE_SECONDS = 5400
 
 STRATEGY_N18 = "n18"
 STRATEGY_VOTE = "vote_3_10_24_31_40"
+STRATEGY_VOTE_DRAW_12 = "vote_3_10_24_31_40_draw_diamond_12"
+STRATEGY_HOT_8 = "hot_suits_8_spread_6"
+DRAW_DIAMOND_PAUSE_ROUNDS = 12
+HOT_WINDOW = 8
+HOT_MIN_SPREAD = 6
+HOT_MAX_GAP_SECONDS = 185
+VOTE_STRATEGIES = (STRATEGY_VOTE, STRATEGY_VOTE_DRAW_12)
+AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES + (STRATEGY_HOT_8,)
 VOTE_OFFSETS = (3, 10, 24, 31, 40)
 SUIT_PRIORITY = ("hearts", "diamonds", "clubs", "spades")
 STRATEGY_OPTIONS = (
     {"id": STRATEGY_N18, "label": "Цикл N−18", "description": "Один источник N−18, подготовка 20 рук"},
     {"id": STRATEGY_VOTE, "label": "Голосование N−3/10/24/31/40",
      "description": "Пять источников, большинство голосов, подготовка 40 рук"},
+    {"id": STRATEGY_VOTE_DRAW_12, "label": "Голосование + ничья ♦ / пропуск 12",
+     "description": "После подтверждённой ничьей с бубной Игрока пропустить 12 следующих раздач"},
+    {"id": STRATEGY_HOT_8, "label": "Частые масти · 8 раздач / разница ≥6",
+     "description": "Подсчёт реальных мастей восьми подряд завершённых рук; "
+                    "сигнал только при разбросе частот от 6"},
 )
 
 
 def strategy_warmup(strategy: str) -> int:
-    return 40 if strategy == STRATEGY_VOTE else WARMUP
+    return HOT_WINDOW if strategy == STRATEGY_HOT_8 else 40 if strategy in VOTE_STRATEGIES else WARMUP
 
 
 def strategy_offsets(strategy: str) -> tuple[int, ...]:
-    return VOTE_OFFSETS if strategy == STRATEGY_VOTE else (CYCLE,)
+    return tuple(range(1, HOT_WINDOW + 1)) if strategy == STRATEGY_HOT_8 else VOTE_OFFSETS if strategy in VOTE_STRATEGIES else (CYCLE,)
+
+
+def pause_for_round(target_number: int, trigger_rounds: list[int]) -> dict[str, Any] | None:
+    """Pause ONLY the next 12 physical rounds after a confirmed trigger."""
+    for trigger in reversed(trigger_rounds):
+        distance = (target_number - trigger) % ROUND_MAX
+        if 1 <= distance <= DRAW_DIAMOND_PAUSE_ROUNDS:
+            return {"trigger_round_number": trigger,
+                    "pause_remaining": DRAW_DIAMOND_PAUSE_ROUNDS - distance + 1,
+                    "reason": (f"Ничья с ♦ Игрока в №{trigger}: "
+                               f"пропуск {distance}/{DRAW_DIAMOND_PAUSE_ROUNDS}")}
+    return None
+
+
+def draw_diamond_pause_triggers(rows: list[dict[str, Any]]) -> list[int]:
+    """Do not infer draws from 0:0. Ignore triggers during a pause."""
+    triggers: list[int] = []
+    for row in rows:
+        number = round_number(row.get("round_number"))
+        if number is None or row.get("baccarat_outcome") != "DRAW":
+            continue
+        if verified_suit(row) is None or pause_for_round(number, triggers):
+            continue
+        if any(normalize_suit(card.get("suit")) == "♦" for card in captured_cards(row)):
+            triggers.append(number)
+    return triggers
+
+
+def verified_player_cards(row: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """A final, independently rechecked Player hand (without the suit table)."""
+    if not row or not (row.get("finished_at") or row.get("player_hand_final")):
+        return []
+    if row.get("final_snapshot_reverified") != 1:
+        return []
+    return captured_cards(row)
+
+
+def source_verified(row: dict[str, Any] | None, strategy: str) -> bool:
+    """The hot-suit strategy must not depend on calculated_suit/suit_map."""
+    if strategy == STRATEGY_HOT_8:
+        return bool(verified_player_cards(row))
+    return bool(verified_suit(row)) if row else False
+
+
+def hot_window_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """Use ONLY eight actual previous consecutive Player hands.
+
+    As in the frozen offline backtest, gaps in physical numbering, missing
+    or partial results, and time gaps greater than 185 seconds invalidate
+    the entire eight-hand window. No future or Banker cards are read.
+    """
+    offsets = strategy_offsets(STRATEGY_HOT_8)
+    previous_numbers = [((number - offset - 1) % ROUND_MAX) + 1 for offset in offsets]
+    missing = [n for n in previous_numbers
+               if not verified_player_cards(sources.get(n))]
+    if missing:
+        return {"predicted_suit": None, "source_round_numbers": previous_numbers,
+                "missing_source_round_numbers": missing,
+                "reason": "Нет восьми подряд подтверждённых раздач"}
+    chronological = [sources[n] for n in reversed(previous_numbers)]
+    for left, right in zip(chronological, chronological[1:]):
+        left_n, right_n = round_number(left.get("round_number")), round_number(right.get("round_number"))
+        left_time = moment(left.get("finished_at") or left.get("observed_at"))
+        right_time = moment(right.get("finished_at") or right.get("observed_at"))
+        if (left_n is None or right_n != following(left_n)
+                or left_time is None or right_time is None
+                or not 0 <= (right_time - left_time).total_seconds() <= HOT_MAX_GAP_SECONDS):
+            return {"predicted_suit": None, "source_round_numbers": previous_numbers,
+                    "missing_source_round_numbers": [],
+                    "reason": "Нарушена непрерывность восьми раздач (номер или время)"}
+    counts = {suit: 0 for suit in SUIT_PRIORITY}
+    votes = []
+    for offset, source_number in zip(offsets, previous_numbers):
+        cards = verified_player_cards(sources[source_number])
+        suits = [SUIT_SYMBOL_TO_NAME[normalize_suit(card["suit"])] for card in cards]
+        for suit in suits:
+            counts[suit] += 1
+        votes.append({"offset": offset, "round_number": source_number, "cards": suits})
+    spread = max(counts.values()) - min(counts.values())
+    predicted = (max(SUIT_PRIORITY, key=lambda suit: counts[suit])
+                 if spread >= HOT_MIN_SPREAD else None)
+    return {
+        "predicted_suit": predicted,
+        "source_round_number": previous_numbers[0],
+        "source_round_numbers": previous_numbers,
+        "votes": votes,
+        "vote_counts": counts,
+        "suit_counts": counts,
+        "count_spread": spread,
+        "min_spread": HOT_MIN_SPREAD,
+        "vote_count": HOT_WINDOW,
+        "partial_vote": False,
+        "missing_source_round_numbers": [],
+        "reason": "" if predicted else
+                  f"Разница частот {spread} < {HOT_MIN_SPREAD}: пропуск",
+    }
 
 
 def predict_target(number: int, sources: dict[int, dict[str, Any]],
@@ -46,26 +155,46 @@ def predict_target(number: int, sources: dict[int, dict[str, Any]],
 
     Majority uses the unmodified ordered 2/3-card suit table. Ties use
     hearts, diamonds, clubs, spades, fixed before observing the target.
-    If any required source is absent, there is no signal at all.
+    A missing source never gets replaced with a neighbouring round.
+    Voting requires at least three verified sources and a strict majority
+    of the available votes; fewer/ambiguous votes produce no signal.
     """
     if not 1 <= number <= ROUND_MAX:
         return None
+    if strategy == STRATEGY_HOT_8:
+        result = hot_window_analysis(number, sources)
+        return result if result["predicted_suit"] else None
     votes = []
-    for offset in strategy_offsets(strategy):
+    missing = []
+    offsets = strategy_offsets(strategy)
+    for offset in offsets:
         source_number = ((number - offset - 1) % ROUND_MAX) + 1
         source = sources.get(source_number)
         suit = verified_suit(source) if source else None
         if suit is None:
-            return None
+            missing.append({"offset": offset, "round_number": source_number})
+            continue
         votes.append({"offset": offset, "round_number": source_number, "suit": suit})
+    if strategy == STRATEGY_N18:
+        if len(votes) != 1:
+            return None
+    elif len(votes) < 3:
+        return None
     counts = {suit: sum(vote["suit"] == suit for vote in votes) for suit in SUIT_PRIORITY}
     predicted = max(SUIT_PRIORITY, key=lambda suit: counts[suit])
+    # Preserve the original five-way tie-break for the full strategy.
+    # Partial voting is stricter: refuse signals without a real majority.
+    if strategy in VOTE_STRATEGIES and missing and counts[predicted] <= len(votes) // 2:
+        return None
     return {
         "predicted_suit": predicted,
         "source_round_number": votes[0]["round_number"],
-        "source_round_numbers": [vote["round_number"] for vote in votes],
+        "source_round_numbers": [((number - offset - 1) % ROUND_MAX) + 1 for offset in offsets],
         "votes": votes,
         "vote_counts": counts,
+        "vote_count": len(votes),
+        "partial_vote": bool(missing),
+        "missing_source_round_numbers": [item["round_number"] for item in missing],
     }
 
 
@@ -206,12 +335,14 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             else:
                 record = records[0]
                 detail = ("финальная рука Игрока не подтверждена"
-                          if not verified_suit(record) else "источник недоступен")
+                          if not source_verified(record, strategy) else "источник недоступен")
                 reason = str(record.get("reason") or "").strip()
                 if reason:
                     detail += f" ({reason})"
             missing_sources.append({"offset": offset, "round_number": source_number,
                                     "reason": detail})
+        hot_state = (hot_window_analysis(number, sources)
+                     if strategy == STRATEGY_HOT_8 else {})
         previews.append({
             "phase": phase,
             "target_round_number": number,
@@ -220,7 +351,12 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             "predicted_suit": forecast["predicted_suit"] if forecast else None,
             "votes": forecast["votes"] if forecast else [],
             "available": forecast is not None,
+            "partial_vote": bool(forecast and forecast["partial_vote"]),
+            "vote_count": len(forecast["votes"]) if forecast else 0,
             "missing_sources": missing_sources,
+            "suit_counts": hot_state.get("suit_counts"),
+            "count_spread": hot_state.get("count_spread"),
+            "skip_reason": hot_state.get("reason", ""),
         })
     return previews
 
@@ -278,12 +414,12 @@ class Cycle18Engine:
         with sqlite3.connect(self.path) as db:
             row = db.execute("SELECT strategy FROM bot_strategy_settings WHERE id=1").fetchone()
             session = db.execute("SELECT strategy FROM cycle18_sessions WHERE stopped_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
-        selected = row[0] if row and row[0] in (STRATEGY_N18, STRATEGY_VOTE) else STRATEGY_N18
+        selected = row[0] if row and row[0] in AVAILABLE_STRATEGIES else STRATEGY_N18
         return {"selected": selected, "active": session[0] if session else None,
                 "options": list(STRATEGY_OPTIONS)}
 
     def save_strategy(self, strategy: str) -> dict[str, Any]:
-        if strategy not in (STRATEGY_N18, STRATEGY_VOTE):
+        if strategy not in AVAILABLE_STRATEGIES:
             raise ValueError("Неизвестный фильтр прогнозирования")
         with sqlite3.connect(self.path, timeout=5) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -292,12 +428,26 @@ class Cycle18Engine:
             db.execute("UPDATE bot_strategy_settings SET strategy=? WHERE id=1", (strategy,))
         return self.get_strategy()
 
-    def start_session(self) -> int:
-        now = datetime.now(timezone.utc).isoformat()
+    def start_session(self, *, resume: bool = False) -> int:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
         with sqlite3.connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             selected = db.execute("SELECT strategy FROM bot_strategy_settings WHERE id=1").fetchone()
             strategy = selected[0] if selected else STRATEGY_N18
+            if resume:
+                last = db.execute(
+                    "SELECT id,strategy,stopped_at,started_at FROM cycle18_sessions "
+                    "ORDER BY id DESC LIMIT 1").fetchone()
+                if last and last[1] == strategy:
+                    ended = moment(last[2])
+                    # Reopening an existing session preserves its 40-hand
+                    # preparation and forecasts without forging card data.
+                    # Do not resume a session after a long gap.
+                    if ended and 0 <= (now_dt - ended).total_seconds() <= STALE_SECONDS:
+                        db.execute("UPDATE cycle18_sessions SET stopped_at=NULL WHERE id=?",
+                                   (last[0],))
+                        return int(last[0])
             db.execute("UPDATE cycle18_sessions SET stopped_at=? WHERE stopped_at IS NULL", (now,))
             cursor = db.execute("INSERT INTO cycle18_sessions(started_at,strategy) VALUES(?,?)",
                                 (now, strategy))
@@ -323,7 +473,7 @@ class Cycle18Engine:
             session = db.execute("SELECT * FROM cycle18_sessions ORDER BY id DESC LIMIT 1").fetchone()
             if not session:
                 return self._empty(self.get_strategy()["selected"])
-            strategy = session["strategy"] if session["strategy"] in (STRATEGY_N18, STRATEGY_VOTE) else STRATEGY_N18
+            strategy = session["strategy"] if session["strategy"] in AVAILABLE_STRATEGIES else STRATEGY_N18
             warmup_required = strategy_warmup(strategy)
             sid, started_at = int(session["id"]), moment(session["started_at"])
             stopped_at = moment(session["stopped_at"])
@@ -331,7 +481,7 @@ class Cycle18Engine:
                 SELECT game_id,round_number,discovered_at,finished_at,
                        cards_json,completeness,calculated_suit,calculation_status,
                        final_snapshot_reverified,player_hand_final,
-                       scan_result,reason,last_scanned_at,observed_at
+                       scan_result,reason,last_scanned_at,observed_at,baccarat_outcome
                 FROM observations
                 WHERE discovered_at>=?
                 ORDER BY discovered_at,list_position,game_id
@@ -357,8 +507,9 @@ class Cycle18Engine:
             valid_hands: dict[int, dict[str, Any]] = {
                 number: row for row in rows
                 if (number := round_number(row.get("round_number"))) is not None
-                and physical_counts[number] == 1 and verified_suit(row)
+                and physical_counts[number] == 1 and source_verified(row, strategy)
             }
+            pause_triggers = (draw_diamond_pause_triggers(rows) if strategy == STRATEGY_VOTE_DRAW_12 else [])
             warmup_complete = False
             missing_hands: list[dict[str, Any]] = []
             verified_total = 0
@@ -366,7 +517,7 @@ class Cycle18Engine:
             for hand in rows:
                 physical = round_number(hand.get("round_number"))
                 unique = physical is not None and physical_counts[physical] == 1
-                confirmed = verified_suit(hand) if unique else None
+                confirmed = source_verified(hand, strategy) if unique else False
                 has_cards = bool(captured_cards(hand))
                 verified_total += bool(confirmed)
                 captured_total += has_cards
@@ -379,9 +530,9 @@ class Cycle18Engine:
                         "scan_result": hand.get("scan_result", "DISCOVERED"),
                         "reason": hand.get("reason", ""),
                     })
-                # Warm-up counts unique final Player hands, not the length of
-                # the LAST run of uninterrupted round numbers. A temporary
-                # unavailable round stays at its real number in physical history.
+                # Preparation counts final Player hands. For the hot strategy,
+                # the actual signal additionally requires eight PHYSICALLY
+                # consecutive recent hands with <=185s between their timestamps.
                 if verified_total >= warmup_required:
                     warmup_complete = True
                 if stopped_at or not warmup_complete or not confirmed:
@@ -392,20 +543,22 @@ class Cycle18Engine:
                 target_number = following(hand_number)
                 forecast = predict_target(target_number, valid_hands, strategy)
                 if forecast is None:
-                    # An absent N−18 source, or ANY of the five voter sources,
-                    # suppresses the signal instead of shifting to a neighbour.
+                    # No forecast on a missing source, non-consecutive hot window
+                    # or hot-suit count spread below six. A skip never bets.
                     continue
                 source_number = forecast["source_round_number"]
                 source = valid_hands[source_number]
+                pause = pause_for_round(target_number, pause_triggers)
                 db.execute("""INSERT OR IGNORE INTO cycle18_forecasts
                     (session_id,source_game_id,anchor_game_id,source_round_number,
-                     target_round_number,predicted_suit,created_at,sources_json,votes_json)
-                    VALUES(?,?,?,?,?,?,?,?,?)""",
+                     target_round_number,predicted_suit,created_at,sources_json,votes_json,mode,reason)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                     (sid, source["game_id"], hand["game_id"],
                      source_number, target_number, forecast["predicted_suit"],
                      now.isoformat(),
                      json.dumps(forecast["source_round_numbers"]),
-                     json.dumps(forecast["votes"], ensure_ascii=False)))
+                     json.dumps(forecast["votes"], ensure_ascii=False),
+                     "FILTER" if pause else "UNLINKED", pause["reason"] if pause else ""))
             # A completed hand always keeps its credit in the current session.
             # Neither missing physical round numbers nor future list shells
             # reset the counter. Old sessions are excluded by started_at.
@@ -448,7 +601,9 @@ class Cycle18Engine:
                     gap = (target_time - anchor_time).total_seconds()
                     # The next game may already have been registered while
                     # its predecessor was still running: that is not a gap.
-                    if abs(gap) <= MAX_GAP_SECONDS:
+                    # Future rounds can be listed >10 minutes early; unique physical
+                    # round identity and same session prevent wrong linking.
+                    if abs(gap) <= STALE_SECONDS:
                         matching.append((target_time, target))
                 if len(matching) == 1:
                     target = matching[0][1]
@@ -473,7 +628,9 @@ class Cycle18Engine:
                             SET target_game_id=?, linked_at=?, mode=?,
                                 reason='Сопоставлено по номеру целевой раздачи'
                             WHERE session_id=? AND source_game_id=? AND target_game_id IS NULL""",
-                            (target["game_id"], now.isoformat(), "LIVE" if not final else "BACKFILL",
+                            (target["game_id"], now.isoformat(),
+                             "FILTER" if prediction["mode"] == "FILTER" else
+                             ("LIVE" if not final else "BACKFILL"),
                              sid, prediction["source_game_id"]))
                 elif (now - anchor_time).total_seconds() > STALE_SECONDS:
                     db.execute("""UPDATE cycle18_forecasts SET result='UNKNOWN', checked_at=?,
@@ -526,13 +683,14 @@ class Cycle18Engine:
                 for row in forecasts
             ])
 
-        checked = [row for row in forecasts if row["result"] in ("WIN", "LOSE")]
+        checked = [row for row in forecasts if row["result"] in ("WIN", "LOSE")
+                   and row["mode"] != "FILTER"]
         wins = sum(row["result"] == "WIN" for row in checked)
         losing = max_losing = 0
         steps: dict[str, int] = {}
         previous = None
         for row in forecasts:
-            if not row["target_game_id"] or row["result"] not in ("WIN", "LOSE"):
+            if row["mode"] == "FILTER" or not row["target_game_id"] or row["result"] not in ("WIN", "LOSE"):
                 if row["result"] == "UNKNOWN" and strategy == STRATEGY_N18:
                     losing = 0
                     previous = None
@@ -540,7 +698,7 @@ class Cycle18Engine:
                 # voting mode preserve the attempted-loss count over skipped
                 # physical rounds, provided the time gap is still plausible.
                 continue
-            if previous and (
+            if previous and strategy != STRATEGY_HOT_8 and (
                 not self._close_in_time(previous, row)
                 or (strategy == STRATEGY_N18
                     and following(previous["target_round_number"]) != row["target_round_number"])
@@ -559,6 +717,11 @@ class Cycle18Engine:
         previews = (preview_two_rounds(current_number, valid_hands, strategy,
                                        observed_by_number)
                     if warmup_complete and not stopped_at else [])
+        if strategy == STRATEGY_VOTE_DRAW_12:
+            for preview in previews:
+                pause = pause_for_round(preview["target_round_number"], pause_triggers)
+                if pause:
+                    preview.update(available=False, filter_paused=True, **pause)
         active = next((row for row in forecasts if current and row["target_game_id"] == current.get("game_id")), None)
         pending_upcoming = [row for row in forecasts if row["result"] == "PENDING" and not row["target_game_id"]]
         audit_signature = (sid, strategy,
@@ -577,6 +740,14 @@ class Cycle18Engine:
             "confirmed_warmup_count": confirmed_warmup_count,
             "captured_count": captured_total, "verified_count": verified_total,
             "ready": warmup_complete and not stopped_at,
+            "pause_enabled": strategy == STRATEGY_VOTE_DRAW_12,
+            "pause_triggers": pause_triggers[-25:],
+            "filter_skipped_count": sum(row["mode"] == "FILTER" for row in forecasts),
+            "filter_skipped_wins": sum(row["mode"] == "FILTER" and row["result"] == "WIN" for row in forecasts),
+            "filter_skipped_losses": sum(row["mode"] == "FILTER" and row["result"] == "LOSE" for row in forecasts),
+            "unconfirmed_forecasts": [self._public(row) for row in forecasts
+                if row["result"] in ("PENDING", "UNKNOWN", "SKIPPED")
+                and row["mode"] != "FILTER"][-30:][::-1],
             "discovered_count": len(rows), "missing_hands": missing_hands[-30:],
             "missing_count": len(missing_hands),
             "session_id": sid, "session_started_at": session["started_at"],
@@ -593,7 +764,7 @@ class Cycle18Engine:
             "live_preview": previews,
             "upcoming": [self._public(row) for row in pending_upcoming[-max(strategy_offsets(strategy)):][::-1]],
             "historical_audit": self._historical_audit,
-            "recent": [self._public(row) for row in forecasts if row["target_game_id"]][-200:][::-1],
+            "recent": [self._public(row) for row in forecasts if row["target_game_id"]][-300:][::-1],
         }
 
     @staticmethod
@@ -621,6 +792,14 @@ class Cycle18Engine:
             sources, votes = None, None
         result["source_round_numbers"] = sources if isinstance(sources, list) else [row.get("source_round_number")]
         result["votes"] = votes if isinstance(votes, list) else []
+        if result["votes"] and isinstance(result["votes"][0].get("cards"), list):
+            counts = {suit: 0 for suit in SUIT_PRIORITY}
+            for vote in result["votes"]:
+                for suit in vote.get("cards", []):
+                    if suit in counts:
+                        counts[suit] += 1
+            result["suit_counts"] = counts
+            result["count_spread"] = max(counts.values()) - min(counts.values())
         return result
 
     @staticmethod
@@ -632,6 +811,10 @@ class Cycle18Engine:
             "warmup_required": strategy_warmup(strategy), "warmup_count": 0,
             "confirmed_warmup_count": 0,
             "captured_count": 0, "verified_count": 0,
+            "pause_enabled": strategy == STRATEGY_VOTE_DRAW_12,
+            "pause_triggers": [], "filter_skipped_count": 0,
+            "filter_skipped_wins": 0, "filter_skipped_losses": 0,
+            "unconfirmed_forecasts": [],
             "ready": False, "session_active": False, "session_id": None,
             "discovered_count": 0, "missing_hands": [], "missing_count": 0,
             "statistics": {
