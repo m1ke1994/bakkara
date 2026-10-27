@@ -328,7 +328,13 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             if source_number in sources:
                 continue
             records = (observed or {}).get(source_number, [])
-            if not records:
+            # N+1 depends on the cards of currently running N. Empty card
+            # placeholders before N is dealt are expected, not corrupt data.
+            # Never mark N as verified until its final Player hand is captured.
+            if phase == "NEXT" and source_number == current_round and len(records) <= 1:
+                detail = (f"текущая раздача №{source_number} ещё не подтверждена; "
+                          f"для прогноза №{number} ждём её окончательные карты")
+            elif not records:
                 detail = "отсутствует в истории"
             elif len(records) > 1:
                 detail = "неоднозначен: несколько игр с этим номером"
