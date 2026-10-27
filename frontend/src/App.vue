@@ -88,19 +88,30 @@ const strategyInfo = computed(() => state.value.strategy || {})
 const activeStrategy = computed(() => cycle18.value.session_id
   ? cycle18.value.strategy : (strategyInfo.value.selected || 'n18'))
 const strategyLabel = computed(() => activeStrategy.value === 'n18'
-  ? 'Цикл N−18' : activeStrategy.value.endsWith('_draw_diamond_12')
-    ? 'Голосование + ничья ♦ / пропуск 12' : 'Голосование N−3/10/24/31/40')
-const strategyShortLabel = computed(() => activeStrategy.value === 'n18' ? 'цикл 18' : '5 циклов')
+  ? 'Цикл N−18' : activeStrategy.value === 'hot_suits_8_spread_6'
+    ? 'Частые масти · 8 раздач / разница ≥6' : activeStrategy.value.endsWith('_draw_diamond_12')
+      ? 'Голосование + ничья ♦ / пропуск 12' : 'Голосование N−3/10/24/31/40')
+const strategyShortLabel = computed(() => activeStrategy.value === 'n18' ? 'цикл 18'
+  : activeStrategy.value === 'hot_suits_8_spread_6' ? 'частые масти' : '5 циклов')
 const strategyDirty = computed(() => strategyChoice.value !== (strategyInfo.value.selected || 'n18'))
 const strategyOptions = [
   { id: 'n18', label: 'Цикл N−18', detail: 'Один источник · 20 подтверждённых раздач для подготовки' },
   { id: 'vote_3_10_24_31_40', label: 'Голосование N−3/10/24/31/40', detail: 'Пять голосов · 40 подтверждённых раздач для подготовки' },
   { id: 'vote_3_10_24_31_40_draw_diamond_12', label: 'Голосование + ничья ♦ / пропуск 12', detail: 'После подтверждённой ничьей с ♦ у Игрока не ставить в 12 следующих раздачах; новые ничьи внутри паузы не продлевают её' },
+  { id: 'hot_suits_8_spread_6', label: 'Частые масти · 8 раздач / разница ≥6', detail: 'Без таблицы преобразования: 8 подряд финальных рук Игрока, сумма фактических мастей, разброс ≥6. Иначе пропуск, шаг догона сохраняется.' },
 ]
 const sourceDescription = forecast => (forecast?.source_round_numbers || [forecast?.source_round_number])
   .filter(Boolean).map(number => '№' + number).join(', ') || '—'
 const votesDescription = forecast => (forecast?.votes || [])
-  .map(vote => 'N−' + vote.offset + ': ' + (suits[vote.suit]?.[0] || '—')).join(' · ')
+  .map(vote => 'N−' + vote.offset + ': ' + (Array.isArray(vote.cards)
+    ? vote.cards.map(s => suits[s]?.[0] || '—').join('')
+    : suits[vote.suit]?.[0] || '—')).join(' · ')
+const hotCountsDescription = forecast => {
+  const c = forecast?.suit_counts
+  if (!c) return '—'
+  return ['hearts', 'diamonds', 'clubs', 'spades']
+    .map(s => (suits[s]?.[0] || '—') + ' ' + (c[s] ?? 0)).join(' · ')
+}
 const missingSourcesDescription = forecast => (forecast?.missing_sources || [])
   .map(source => `N−${source.offset} = №${source.round_number}: ${source.reason}`)
   .join('; ') || 'Нужная раздача ещё не подтверждена'
@@ -289,7 +300,7 @@ onBeforeUnmount(() => {
       <article><span>Авторизация</span><strong :class="badge(state.authorization)">{{ label('authorization', state.authorization) }}</strong></article>
     </section>
     <section class="events strategy-panel" aria-label="Выбор фильтра прогнозирования">
-      <div class="section-title"><div><p class="eyebrow">СТРАТЕГИЯ / ФИЛЬТР</p><h2>Выберите алгоритм прогнозирования</h2></div><span class="standalone-label">На сервере: {{ strategyInfo.selected === 'n18' ? 'N−18' : '5 циклов' }}</span></div>
+      <div class="section-title"><div><p class="eyebrow">СТРАТЕГИЯ / ФИЛЬТР</p><h2>Выберите алгоритм прогнозирования</h2></div><span class="standalone-label">На сервере: {{ strategyOptions.find(item => item.id === strategyInfo.selected)?.label || '—' }}</span></div>
       <div class="strategy-options" role="radiogroup" aria-label="Фильтр прогноза">
         <label v-for="option in strategyOptions" :key="option.id" class="strategy-option" :class="{ 'strategy-option-selected': strategyChoice === option.id }">
           <input v-model="strategyChoice" type="radio" name="forecast-strategy" :value="option.id" :disabled="busy || observing" @change="strategyTouched = true; strategyNotice = ''" />
@@ -380,13 +391,16 @@ onBeforeUnmount(() => {
           <h3>{{ strategyLabel }} · прогноз масти Игрока</h3>
           <strong>{{ cycle18.ready ? 'Готов к прогнозированию' : 'Сбор истории' }}</strong>
         </div>
-        <p class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. Для голосования достаточно 3–4 проверенных источников только при строгом большинстве; при 5/5 действует прежнее правило равенства. Неполное голосование помечается отдельно. LIVE-ставка возможна только по подтверждённому прогнозу и открытому рынку.</p>
+        <p v-if="activeStrategy === 'hot_suits_8_spread_6'" class="diagnostic">Алгоритм без преобразования мастей: перед раздачей N берём только 8 последних подряд завершённых раздач (N−1…N−8, временные разрывы не более 185 с). Считаем фактические ♥ ♦ ♣ ♠ во всех картах Игрока. Сигнал — самая частая масть, только при разнице MAX−MIN ≥ 6; равенства разрешаем в порядке ♥ → ♦ → ♣ → ♠. Иначе ПРОПУСК: шаг догона не меняется. Для 9 шагов укажи в калькуляторе соответствующий ряд ставок; выбор стратегии его автоматически не меняет. Это экспериментальное правило, не гарантия выигрыша.</p>
+        <p v-else class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. Для голосования достаточно 3–4 проверенных источников только при строгом большинстве; при 5/5 действует прежнее правило равенства. Неполное голосование помечается отдельно. LIVE-ставка возможна только по подтверждённому прогнозу и открытому рынку.</p>
+        <p v-if="activeStrategy === 'hot_suits_8_spread_6' && currentForecast" class="diagnostic">Текущая игра: {{ hotCountsDescription(currentForecast) }} · разброс {{ currentForecast.count_spread ?? '—' }} / 6. {{ currentForecast.available ? 'Сигнал: ' + (suits[currentForecast.predicted_suit]?.[1] || '—') : currentForecast.skip_reason || 'Ожидание полного окна' }}</p>
+        <p v-if="activeStrategy === 'hot_suits_8_spread_6' && nextForecast" class="diagnostic">Следующая игра: {{ hotCountsDescription(nextForecast) }} · разброс {{ nextForecast.count_spread ?? '—' }} / 6. {{ nextForecast.available ? 'Сигнал: ' + (suits[nextForecast.predicted_suit]?.[1] || '—') : nextForecast.skip_reason || 'Ожидание полного окна' }}</p>
         <div v-if="cycle18.pause_enabled" class="diagnostic">Фильтр «ничья + ♦»: {{ cycle18.filter_skipped_count ?? 0 }} виртуальных прогнозов пропущено · WIN: {{ cycle18.filter_skipped_wins ?? 0 }} · LOSE: {{ cycle18.filter_skipped_losses ?? 0 }}. Пропуски не изменяют шаг виртуального догона.</div>
        <div class="warmup">
           <div class="section-title"><strong>Подтверждено в сохранённой сессии: {{ cycle18.warmup_count ?? 0 }} / {{ cycle18.warmup_required ?? 20 }}</strong><span>{{ cycle18.ready ? strategyLabel + ' активен' : 'Только сбор карт' }}</span></div>
           <progress :value="cycle18.warmup_count ?? 0" :max="cycle18.warmup_required ?? 20"></progress>
-          <p v-if="!cycle18.ready" class="diagnostic">Подготовка: первые {{ cycle18.warmup_required ?? 20 }} финально подтверждённых раздач. До её завершения WIN/LOSE не рассчитываем. Если источник отсутствует, сигнал пропускается.</p>
-          <p v-else class="diagnostic">Подготовка завершена. Прогнозы строятся только по реальным номерам завершённых источников: {{ strategyLabel }}.</p>
+          <p v-if="!cycle18.ready" class="diagnostic">Подготовка: первые {{ cycle18.warmup_required ?? 20 }} финально подтверждённых раздач. До её завершения WIN/LOSE не рассчитываем. {{ activeStrategy === 'hot_suits_8_spread_6' ? 'Для первого сигнала нужны 8 последовательных раздач без пробелов.' : 'Если источник отсутствует, сигнал пропускается.' }}</p>
+          <p v-else class="diagnostic">Подготовка завершена. Прогнозы строятся только по реальным номерам завершённых источников: {{ strategyLabel }}. {{ activeStrategy === 'hot_suits_8_spread_6' ? 'После пробела в истории снова необходимо собрать 8 последовательных раздач.' : '' }}</p>
         </div>
         <p class="diagnostic">
           Всего обнаружено игр: <strong>{{ cycle18.discovered_count ?? 0 }}</strong>.
@@ -426,7 +440,7 @@ onBeforeUnmount(() => {
           <p class="diagnostic">Расчёт по текущим подтверждённым картам. Исходные прогнозы и исполненные ставки сохраняются. Пересчёт не означает, что сигнал был известен до начала игры.</p>
           <div class="history-table-scroll">
             <table class="history-table" aria-label="Исторический пересчёт">
-              <thead><tr><th>Раздача</th><th>Голоса</th><th>Пересчёт</th><th>Исходный прогноз</th><th>Причина</th></tr></thead>
+              <thead><tr><th>Раздача</th><th>{{ activeStrategy === 'hot_suits_8_spread_6' ? '8 исходных рук' : 'Голоса' }}</th><th>Пересчёт</th><th>Исходный прогноз</th><th>Причина</th></tr></thead>
               <tbody><tr v-for="audit in cycle18.historical_audit" :key="audit.target_game_id">
                 <td>№{{ audit.target_round_number }}</td>
                 <td>{{ votesDescription(audit) || '—' }}</td>
