@@ -103,3 +103,14 @@ def test_saved_strategy_has_draw_diamond_filter_and_selects_40_hand_voting():
     assert 'cycle18.warmup_required' in app
     assert 'strategyShortLabel' in app
     assert 'votesDescription' in app
+
+
+def test_hot_suit_preview_shows_true_skip_reason_instead_of_false_missing_source():
+    app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
+    assert 'forecastUnavailableTitle' in app
+    assert 'forecastUnavailableDescription' in app
+    assert 'forecast?.skip_reason' in app
+    assert "if (forecast?.missing_sources?.length)" in app
+    assert 'Частоты мастей: {{ hotCountsDescription(currentForecast) }}' in app
+    assert 'Частоты мастей: {{ hotCountsDescription(nextForecast) }}' in app
+    assert "Нет подтверждённого источника" not in app
