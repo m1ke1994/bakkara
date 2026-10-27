@@ -519,6 +519,9 @@ class BrowserService:
                     reason = "; ".join(
                         f"источник N−{item['offset']} = №{item['round_number']} "
                         f"{item['reason']}" for item in absent)
+                elif missing and missing.get("skip_reason"):
+                    # Frequency-filter skips are deliberate, not absent links.
+                    reason = missing["skip_reason"]
                 else:
                     reason = "прогноз не связан с текущей раздачей"
                 self.event("INFO", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
