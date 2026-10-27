@@ -24,9 +24,13 @@ STALE_SECONDS = 5400
 STRATEGY_N18 = "n18"
 STRATEGY_VOTE = "vote_3_10_24_31_40"
 STRATEGY_VOTE_DRAW_12 = "vote_3_10_24_31_40_draw_diamond_12"
+STRATEGY_HOT_8 = "hot_suits_8_spread_6"
 DRAW_DIAMOND_PAUSE_ROUNDS = 12
+HOT_WINDOW = 8
+HOT_MIN_SPREAD = 6
+HOT_MAX_GAP_SECONDS = 185
 VOTE_STRATEGIES = (STRATEGY_VOTE, STRATEGY_VOTE_DRAW_12)
-AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES
+AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES + (STRATEGY_HOT_8,)
 VOTE_OFFSETS = (3, 10, 24, 31, 40)
 SUIT_PRIORITY = ("hearts", "diamonds", "clubs", "spades")
 STRATEGY_OPTIONS = (
@@ -35,15 +39,18 @@ STRATEGY_OPTIONS = (
      "description": "Пять источников, большинство голосов, подготовка 40 рук"},
     {"id": STRATEGY_VOTE_DRAW_12, "label": "Голосование + ничья ♦ / пропуск 12",
      "description": "После подтверждённой ничьей с бубной Игрока пропустить 12 следующих раздач"},
+    {"id": STRATEGY_HOT_8, "label": "Частые масти · 8 раздач / разница ≥6",
+     "description": "Подсчёт реальных мастей восьми подряд завершённых рук; "
+                    "сигнал только при разбросе частот от 6"},
 )
 
 
 def strategy_warmup(strategy: str) -> int:
-    return 40 if strategy in VOTE_STRATEGIES else WARMUP
+    return HOT_WINDOW if strategy == STRATEGY_HOT_8 else 40 if strategy in VOTE_STRATEGIES else WARMUP
 
 
 def strategy_offsets(strategy: str) -> tuple[int, ...]:
-    return VOTE_OFFSETS if strategy in VOTE_STRATEGIES else (CYCLE,)
+    return tuple(range(1, HOT_WINDOW + 1)) if strategy == STRATEGY_HOT_8 else VOTE_OFFSETS if strategy in VOTE_STRATEGIES else (CYCLE,)
 
 
 def pause_for_round(target_number: int, trigger_rounds: list[int]) -> dict[str, Any] | None:
@@ -72,6 +79,76 @@ def draw_diamond_pause_triggers(rows: list[dict[str, Any]]) -> list[int]:
     return triggers
 
 
+def verified_player_cards(row: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """A final, independently rechecked Player hand (without the suit table)."""
+    if not row or not (row.get("finished_at") or row.get("player_hand_final")):
+        return []
+    if row.get("final_snapshot_reverified") != 1:
+        return []
+    return captured_cards(row)
+
+
+def source_verified(row: dict[str, Any] | None, strategy: str) -> bool:
+    """The hot-suit strategy must not depend on calculated_suit/suit_map."""
+    if strategy == STRATEGY_HOT_8:
+        return bool(verified_player_cards(row))
+    return bool(verified_suit(row)) if row else False
+
+
+def hot_window_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """Use ONLY eight actual previous consecutive Player hands.
+
+    As in the frozen offline backtest, gaps in physical numbering, missing
+    or partial results, and time gaps greater than 185 seconds invalidate
+    the entire eight-hand window. No future or Banker cards are read.
+    """
+    offsets = strategy_offsets(STRATEGY_HOT_8)
+    previous_numbers = [((number - offset - 1) % ROUND_MAX) + 1 for offset in offsets]
+    missing = [n for n in previous_numbers
+               if not verified_player_cards(sources.get(n))]
+    if missing:
+        return {"predicted_suit": None, "source_round_numbers": previous_numbers,
+                "missing_source_round_numbers": missing,
+                "reason": "Нет восьми подряд подтверждённых раздач"}
+    chronological = [sources[n] for n in reversed(previous_numbers)]
+    for left, right in zip(chronological, chronological[1:]):
+        left_n, right_n = round_number(left.get("round_number")), round_number(right.get("round_number"))
+        left_time = moment(left.get("finished_at") or left.get("observed_at"))
+        right_time = moment(right.get("finished_at") or right.get("observed_at"))
+        if (left_n is None or right_n != following(left_n)
+                or left_time is None or right_time is None
+                or not 0 <= (right_time - left_time).total_seconds() <= HOT_MAX_GAP_SECONDS):
+            return {"predicted_suit": None, "source_round_numbers": previous_numbers,
+                    "missing_source_round_numbers": [],
+                    "reason": "Нарушена непрерывность восьми раздач (номер или время)"}
+    counts = {suit: 0 for suit in SUIT_PRIORITY}
+    votes = []
+    for offset, source_number in zip(offsets, previous_numbers):
+        cards = verified_player_cards(sources[source_number])
+        suits = [SUIT_SYMBOL_TO_NAME[normalize_suit(card["suit"])] for card in cards]
+        for suit in suits:
+            counts[suit] += 1
+        votes.append({"offset": offset, "round_number": source_number, "cards": suits})
+    spread = max(counts.values()) - min(counts.values())
+    predicted = (max(SUIT_PRIORITY, key=lambda suit: counts[suit])
+                 if spread >= HOT_MIN_SPREAD else None)
+    return {
+        "predicted_suit": predicted,
+        "source_round_number": previous_numbers[0],
+        "source_round_numbers": previous_numbers,
+        "votes": votes,
+        "vote_counts": counts,
+        "suit_counts": counts,
+        "count_spread": spread,
+        "min_spread": HOT_MIN_SPREAD,
+        "vote_count": HOT_WINDOW,
+        "partial_vote": False,
+        "missing_source_round_numbers": [],
+        "reason": "" if predicted else
+                  f"Разница частот {spread} < {HOT_MIN_SPREAD}: пропуск",
+    }
+
+
 def predict_target(number: int, sources: dict[int, dict[str, Any]],
                    strategy: str = STRATEGY_N18) -> dict[str, Any] | None:
     """One advance prediction from exact, verified physical source rounds.
@@ -84,6 +161,9 @@ def predict_target(number: int, sources: dict[int, dict[str, Any]],
     """
     if not 1 <= number <= ROUND_MAX:
         return None
+    if strategy == STRATEGY_HOT_8:
+        result = hot_window_analysis(number, sources)
+        return result if result["predicted_suit"] else None
     votes = []
     missing = []
     offsets = strategy_offsets(strategy)
@@ -255,12 +335,14 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             else:
                 record = records[0]
                 detail = ("финальная рука Игрока не подтверждена"
-                          if not verified_suit(record) else "источник недоступен")
+                          if not source_verified(record, strategy) else "источник недоступен")
                 reason = str(record.get("reason") or "").strip()
                 if reason:
                     detail += f" ({reason})"
             missing_sources.append({"offset": offset, "round_number": source_number,
                                     "reason": detail})
+        hot_state = (hot_window_analysis(number, sources)
+                     if strategy == STRATEGY_HOT_8 else {})
         previews.append({
             "phase": phase,
             "target_round_number": number,
@@ -272,6 +354,9 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             "partial_vote": bool(forecast and forecast["partial_vote"]),
             "vote_count": len(forecast["votes"]) if forecast else 0,
             "missing_sources": missing_sources,
+            "suit_counts": hot_state.get("suit_counts"),
+            "count_spread": hot_state.get("count_spread"),
+            "skip_reason": hot_state.get("reason", ""),
         })
     return previews
 
@@ -422,7 +507,7 @@ class Cycle18Engine:
             valid_hands: dict[int, dict[str, Any]] = {
                 number: row for row in rows
                 if (number := round_number(row.get("round_number"))) is not None
-                and physical_counts[number] == 1 and verified_suit(row)
+                and physical_counts[number] == 1 and source_verified(row, strategy)
             }
             pause_triggers = (draw_diamond_pause_triggers(rows) if strategy == STRATEGY_VOTE_DRAW_12 else [])
             warmup_complete = False
@@ -432,7 +517,7 @@ class Cycle18Engine:
             for hand in rows:
                 physical = round_number(hand.get("round_number"))
                 unique = physical is not None and physical_counts[physical] == 1
-                confirmed = verified_suit(hand) if unique else None
+                confirmed = source_verified(hand, strategy) if unique else False
                 has_cards = bool(captured_cards(hand))
                 verified_total += bool(confirmed)
                 captured_total += has_cards
@@ -445,9 +530,9 @@ class Cycle18Engine:
                         "scan_result": hand.get("scan_result", "DISCOVERED"),
                         "reason": hand.get("reason", ""),
                     })
-                # Warm-up counts unique final Player hands, not the length of
-                # the LAST run of uninterrupted round numbers. A temporary
-                # unavailable round stays at its real number in physical history.
+                # Preparation counts final Player hands. For the hot strategy,
+                # the actual signal additionally requires eight PHYSICALLY
+                # consecutive recent hands with <=185s between their timestamps.
                 if verified_total >= warmup_required:
                     warmup_complete = True
                 if stopped_at or not warmup_complete or not confirmed:
@@ -458,8 +543,8 @@ class Cycle18Engine:
                 target_number = following(hand_number)
                 forecast = predict_target(target_number, valid_hands, strategy)
                 if forecast is None:
-                    # Never invent an absent source: strict N−18 or at least
-                    # three verified voter sources with a real majority.
+                    # No forecast on a missing source, non-consecutive hot window
+                    # or hot-suit count spread below six. A skip never bets.
                     continue
                 source_number = forecast["source_round_number"]
                 source = valid_hands[source_number]
@@ -613,7 +698,7 @@ class Cycle18Engine:
                 # voting mode preserve the attempted-loss count over skipped
                 # physical rounds, provided the time gap is still plausible.
                 continue
-            if previous and (
+            if previous and strategy != STRATEGY_HOT_8 and (
                 not self._close_in_time(previous, row)
                 or (strategy == STRATEGY_N18
                     and following(previous["target_round_number"]) != row["target_round_number"])
@@ -707,6 +792,14 @@ class Cycle18Engine:
             sources, votes = None, None
         result["source_round_numbers"] = sources if isinstance(sources, list) else [row.get("source_round_number")]
         result["votes"] = votes if isinstance(votes, list) else []
+        if result["votes"] and isinstance(result["votes"][0].get("cards"), list):
+            counts = {suit: 0 for suit in SUIT_PRIORITY}
+            for vote in result["votes"]:
+                for suit in vote.get("cards", []):
+                    if suit in counts:
+                        counts[suit] += 1
+            result["suit_counts"] = counts
+            result["count_spread"] = max(counts.values()) - min(counts.values())
         return result
 
     @staticmethod
