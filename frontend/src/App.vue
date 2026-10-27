@@ -114,7 +114,19 @@ const hotCountsDescription = forecast => {
 }
 const missingSourcesDescription = forecast => (forecast?.missing_sources || [])
   .map(source => `N−${source.offset} = №${source.round_number}: ${source.reason}`)
-  .join('; ') || 'Нужная раздача ещё не подтверждена'
+  .join('; ') || 'Нет неподтверждённых источников'
+const forecastUnavailableTitle = forecast => {
+  if (forecast?.filter_paused) return 'Фильтр: пропуск ставки'
+  if (forecast?.missing_sources?.length) return 'Ожидаем подтверждения источника'
+  if (forecast?.skip_reason) return 'Пропуск по условиям стратегии'
+  return 'Прогноз пока недоступен'
+}
+const forecastUnavailableDescription = forecast => {
+  if (forecast?.filter_paused) return forecast.reason || 'Действует пауза фильтра'
+  if (forecast?.missing_sources?.length) return missingSourcesDescription(forecast)
+  // A fully verified 8-hand window with spread < 6 is a SKIP, not missing data.
+  return forecast?.skip_reason || 'Ждём финальные карты предыдущих раздач'
+}
 
 const cycleStats = computed(() => cycle18.value.statistics || {})
 const currentForecast = computed(() => cycle18.value.ready
@@ -416,7 +428,7 @@ onBeforeUnmount(() => {
           </p>
         </details>
         <details v-if="cycle18.missing_hands?.length">
-          <summary>Раздачи без финального подтверждения ({{ cycle18.missing_count }})</summary>
+          <summary>Раздачи, ожидающие карт или повторной проверки ({{ cycle18.missing_count }})</summary>
           <p v-for="item in cycle18.missing_hands" :key="item.game_id">
             Раздача №{{ item.round_number || 'номер ещё не получен' }} ·
             ID {{ item.game_id }} · {{ scanResultName(item.scan_result) }}
@@ -477,8 +489,11 @@ onBeforeUnmount(() => {
             <div v-if="currentForecast?.available" class="forecast-suit" :class="isRedSuit(currentForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
               {{ suits[currentForecast.predicted_suit]?.[0] }} <small>{{ suits[currentForecast.predicted_suit]?.[1] }}</small>
             </div>
-            <div v-else class="forecast-unavailable">{{ currentForecast?.filter_paused ? 'Фильтр: пропуск ставки' : 'Нет подтверждённого источника' }}</div>
-            <p v-if="currentForecast && !currentForecast.available" class="diagnostic">{{ currentForecast.filter_paused ? currentForecast.reason : missingSourcesDescription(currentForecast) }}</p>
+            <div v-else class="forecast-unavailable">{{ forecastUnavailableTitle(currentForecast) }}</div>
+            <p v-if="currentForecast && !currentForecast.available" class="diagnostic">{{ forecastUnavailableDescription(currentForecast) }}</p>
+            <p v-if="activeStrategy === 'hot_suits_8_spread_6' && currentForecast?.suit_counts" class="diagnostic">
+              Частоты мастей: {{ hotCountsDescription(currentForecast) }} · разброс {{ currentForecast.count_spread }} (нужно ≥6).
+            </p>
             <p v-if="currentForecast?.available && currentForecast.partial_vote" class="diagnostic">Частичное голосование: {{ currentForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(currentForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
@@ -489,8 +504,11 @@ onBeforeUnmount(() => {
             <div v-if="nextForecast?.available" class="forecast-suit" :class="isRedSuit(nextForecast.predicted_suit) ? 'red-suit' : 'black-suit'">
               {{ suits[nextForecast.predicted_suit]?.[0] }} <small>{{ suits[nextForecast.predicted_suit]?.[1] }}</small>
             </div>
-            <div v-else class="forecast-unavailable">{{ nextForecast?.filter_paused ? 'Фильтр: пропуск ставки' : 'Нет подтверждённого источника' }}</div>
-            <p v-if="nextForecast && !nextForecast.available" class="diagnostic">{{ nextForecast.filter_paused ? nextForecast.reason : missingSourcesDescription(nextForecast) }}</p>
+            <div v-else class="forecast-unavailable">{{ forecastUnavailableTitle(nextForecast) }}</div>
+            <p v-if="nextForecast && !nextForecast.available" class="diagnostic">{{ forecastUnavailableDescription(nextForecast) }}</p>
+            <p v-if="activeStrategy === 'hot_suits_8_spread_6' && nextForecast?.suit_counts" class="diagnostic">
+              Частоты мастей: {{ hotCountsDescription(nextForecast) }} · разброс {{ nextForecast.count_spread }} (нужно ≥6).
+            </p>
             <p v-if="nextForecast?.available && nextForecast.partial_vote" class="diagnostic">Частичное голосование: {{ nextForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(nextForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
