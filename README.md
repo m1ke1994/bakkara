@@ -10,6 +10,18 @@ The Canvas text capture and bookmaker acceptance signals depend on the current s
 
 To update an existing Windows checkout, stop `start.bat`, run `git pull` in the project directory, then run `start.bat` again. Keep the local `.env`, `browser_profile` and SQLite database. For manual checks run `cd backend; python -m pytest tests -q` and `cd frontend; npm ci; npm test; npm run build` in separate PowerShell sessions.
 
+## Strategy: raw Player suits from the last eight rounds (experimental)
+
+The fourth selection in **Стратегия / фильтр** is **«Частые масти · 8 раздач / разница ≥6»** (`hot_suits_8_spread_6`). It does not use the suit-transformation table:
+
+1. The target Baccarat round N must have eight preceding, consecutive physical rounds N−8 through N−1 with independently confirmed final Player hands. Missing, duplicate, or unconfirmed rounds block the signal. Consecutive final-hand timestamps must be at most 185 seconds apart.
+2. Count the actual suits of **all** two or three Player cards in those eight hands. Do not count Banker cards and do not replace any cards by transformed suits.
+3. Calculate `max(suit_count) - min(suit_count)`. If it is below **6**, skip the target round. Otherwise predict the most frequent suit; ties are resolved in the fixed order **♥, ♦, ♣, ♠**.
+4. A skipped round is never a WIN or LOSE and must not advance the virtual loss step. On a confirmed WIN the streak resets; on a confirmed LOSE it advances. The existing persisted LIVE acceptance/settlement safeguards remain in force.
+5. The nine-step stake plan is configured **separately** in the calculator (e.g. 10, 28, 69, 155, 388, 970, 2450, 6078, 11286 RUB at odds 1.90). Selecting a strategy never silently changes the user's stored stake amounts.
+
+This is a backtested hypothesis, **not a guaranteed or risk-free system**. Historical test on the previously unseen `analiz2.txt` export recorded 173 signals / 91 WIN / 82 LOSE (52.60% accuracy); the profitable nine-step progression in that sample relied on the *order* of wins, not proven positive expected value. The ninth step was not used in the sample. Use DEMO to collect new independent results before considering LIVE.
+
 ## Layout
 
 ```text
