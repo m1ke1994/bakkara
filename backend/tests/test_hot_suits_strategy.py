@@ -217,3 +217,22 @@ def test_skip_between_bets_keeps_previous_loss_step(tmp_path):
     actual = [row for row in state["recent"] if row["result"] in ("WIN", "LOSE")]
     assert checked == len(actual)
     assert state["statistics"]["next_step"] == 1 + state["statistics"]["current_lose_streak"]
+
+
+def test_next_round_waits_for_current_real_cards_without_false_failure():
+    """A prelisted N with three empty DOM slots cannot be a source for N+1."""
+    sources = source_window(list(range(101, 109)))
+    waiting = hand(109, [], 8 * 60, final=False)
+    waiting["reason"] = "Карты раскрываются: прочитано 0, неподтверждённых позиций 3"
+    current, following_round = preview_two_rounds(
+        109, sources, STRATEGY_HOT_8, observed={109: [waiting]})
+    assert current["available"] is True
+    assert following_round["available"] is False
+    assert following_round["missing_sources"][0]["round_number"] == 109
+    assert "текущая раздача №109" in following_round["missing_sources"][0]["reason"]
+    assert "окончательные карты" in following_round["missing_sources"][0]["reason"]
+    assert "Карты раскрываются" not in following_round["missing_sources"][0]["reason"]
+    # Completing N with a verified hand is the only way to unlock N+1.
+    sources[109] = hand(109, ["hearts", "hearts"], 8 * 60)
+    next_after_confirm = preview_two_rounds(109, sources, STRATEGY_HOT_8)[1]
+    assert next_after_confirm["available"] is True
