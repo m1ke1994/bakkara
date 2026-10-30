@@ -8,6 +8,7 @@ from app.browser import BrowserService
 from app.cycle18 import Cycle18Engine, STRATEGY_53
 from app.draw_rules import resolved_baccarat_outcome
 from app.observation import Game, ObservationStore
+from playwright.async_api import async_playwright
 
 
 def hand(*ranks):
@@ -23,6 +24,60 @@ def hand(*ranks):
     (hand("A", "A", "5"), hand("A", "A", "5"), "DRAW", (7, 7)),
     (hand("4", "K"), hand("8", "K"), "BANKER", (4, 8)),
 ])
+
+def test_chromium_banker_dom_three_cards_ignores_hidden_suit_faces():
+    """Actual Playwright DOM pass: three Banker cards and an invisible old suit."""
+    async def run():
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            service.page = page
+            try:
+                await page.set_content("""
+                    <style>
+                    .baccarat-player,.baccarat-player__card-box,
+                    .baccarat-player__cards {display:block}
+                    .hidden {display:none}
+                    </style>
+                    <div class="baccarat-player">
+                      <span class="baccarat-player__name">Игрок</span>
+                      <ul class="baccarat-player__cards">
+                        <li class="baccarat-player__card-box suit-hearts"><span class="baccarat-card__rank">A</span></li>
+                        <li class="baccarat-player__card-box suit-clubs"><span class="baccarat-card__rank">A</span></li>
+                        <li class="baccarat-player__card-box suit-diamonds"><span class="baccarat-card__rank">5</span></li>
+                      </ul>
+                    </div>
+                    <div class="baccarat-player">
+                      <span class="baccarat-player__name">Банкир</span>
+                      <ul class="baccarat-player__cards">
+                        <li class="baccarat-player__card-box">
+                          <span class="hidden">♠</span>
+                          <span class="baccarat-card__rank">A</span>
+                          <span class="baccarat-card__suit">♥</span>
+                        </li>
+                        <li class="baccarat-player__card-box suit-clubs"><span class="baccarat-card__rank">A</span></li>
+                        <li class="baccarat-player__card-box suit-diamonds"><span class="baccarat-card__rank">5</span></li>
+                      </ul>
+                    </div>
+                    <span class="baccarat-panel__caption">Ничья</span>
+                """)
+                snapshot = await service._inspect_game_dom("Игрок", "Банкир")
+                expected_player = [
+                    {"position": 1, "rank": "A", "suit": "hearts"},
+                    {"position": 2, "rank": "A", "suit": "clubs"},
+                    {"position": 3, "rank": "5", "suit": "diamonds"},
+                ]
+                assert snapshot["cards"] == expected_player
+                assert snapshot["banker_cards"] == expected_player
+                assert snapshot["banker_card_boxes"] == 3
+                assert snapshot["banker_pending_card_slots"] == 0
+                assert resolved_baccarat_outcome(snapshot["cards"], snapshot["banker_cards"])[0] == "DRAW"
+            finally:
+                await browser.close()
+    asyncio.run(run())
+
+
 def test_complete_card_sets_resolve_all_outcomes(player, banker, outcome, scores):
     assert resolved_baccarat_outcome(player, banker) == (outcome, *scores)
 
