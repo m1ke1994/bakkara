@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError as PlaywrightTimeoutError, async_playwright
 
-from .draw_rules import player_card_count, resolved_baccarat_scores
+from .draw_rules import player_card_count, resolved_baccarat_outcome
 from .cycle18 import moment
 from .config import settings
 from .live_bets import LiveBets, settle_test_hand
@@ -421,6 +421,9 @@ class BrowserService:
         self.page_lock = asyncio.Lock()
         self.monitor_task: asyncio.Task[None] | None = None
         self.observation_task: asyncio.Task[None] | None = None
+        self._outcome_watchers: dict[str, tuple[Page, asyncio.Task[None]]] = {}
+        self._opening_primary_page = False
+        self._outcome_conflicts: set[str] = set()
         self.observation_status = "STOPPED"
         self.current_observation: dict[str, Any] | None = None
         self.observation_diagnostic = "Наблюдение ещё не запускалось."
@@ -729,7 +732,9 @@ class BrowserService:
     def _on_context_page(self, page: Page) -> None:
         """Ignore sign-in popups before scanning; close extra tabs during it."""
         observer = self.observation_task
-        if page is self.page or observer is None or observer.done():
+        if (page is self.page or getattr(self, "_opening_primary_page", False)
+                or page in (item[0] for item in getattr(self, "_outcome_watchers", {}).values())
+                or observer is None or observer.done()):
             return
         asyncio.create_task(self._close_unexpected_page(page))
 
@@ -779,6 +784,12 @@ class BrowserService:
         if task and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        watchers = list(getattr(self, "_outcome_watchers", {}).values())
+        for _page, watcher in watchers:
+            watcher.cancel()
+        if watchers:
+            await asyncio.gather(*(watcher for _page, watcher in watchers), return_exceptions=True)
+        getattr(self, "_outcome_watchers", {}).clear()
         settlement, self._pending_live_settlement = getattr(self, "_pending_live_settlement", None), None
         if settlement is not None:
             try:
@@ -919,9 +930,116 @@ class BrowserService:
         if self.context is None or self.page is None:
             return
         for extra in list(self.context.pages):
-            if extra is self.page or extra.is_closed():
+            if (extra is self.page or extra.is_closed()
+                    or extra in (item[0] for item in getattr(self, "_outcome_watchers", {}).values())):
                 continue
             await self._close_unexpected_page(extra)
+
+    async def _confirm_outcome_from_snapshot(
+        self, game: Game, player_cards: list[dict[str, Any]], snapshot: dict[str, Any],
+        *, page: Page | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist only a complete Banker hand from the same game URL."""
+        observed_url = urlparse(snapshot.get("url") or game.url)
+        expected_url = urlparse(game.url)
+        if (observed_url.netloc != expected_url.netloc
+                or observed_url.path.rstrip("/") != expected_url.path.rstrip("/")):
+            return None
+        observed_player = snapshot.get("cards") or []
+        if (len(observed_player) == len(player_cards) and observed_player != player_cards):
+            return None
+        banker_cards = snapshot.get("banker_cards") or []
+        resolved = resolved_baccarat_outcome(player_cards, banker_cards)
+        if resolved is None:
+            return None
+        if page is not None and not snapshot.get("finished"):
+            # A complete third slot may briefly precede the terminal label.
+            # One independent reread rejects an animation/transient card face.
+            await asyncio.sleep(0.05)
+            reread = await self._inspect_game_dom(
+                settings.player_name_text, settings.banker_name_text, page=page)
+            if (reread.get("banker_cards") != banker_cards
+                    or urlparse(reread.get("url") or game.url).path.rstrip("/")
+                    != expected_url.path.rstrip("/")):
+                return None
+            reread_player = reread.get("cards") or []
+            if len(reread_player) == len(player_cards) and reread_player != player_cards:
+                return None
+            snapshot = reread
+        caption = str(snapshot.get("finish_flag_text") or "").strip().casefold()
+        explicit = ("DRAW" if caption in ("ничья", "draw", "tie") else
+                    "PLAYER" if "игрок" in caption or "player" in caption else
+                    "BANKER" if "банкир" in caption or "banker" in caption else None)
+        if explicit and explicit != resolved[0]:
+            conflicts = getattr(self, "_outcome_conflicts", set())
+            if game.game_id not in conflicts:
+                conflicts.add(game.game_id)
+                self._outcome_conflicts = conflicts
+                self.event("WARNING", f"Раздача №{game.round_number}: надпись результата противоречит полным картам; исход ожидает проверки.")
+            return None
+        result = await asyncio.to_thread(
+            self.store.confirm_baccarat_outcome, game.game_id, game.round_number,
+            player_cards, banker_cards)
+        if result:
+            current = self.current_observation
+            if current and current.get("game_id") == game.game_id:
+                current.update(result)
+                current["banker_hand_final"] = True
+                self.state_version += 1
+            self.event("INFO", f"BACCARAT_OUTCOME_CONFIRMED Раздача №{game.round_number}, ID {game.game_id}: "
+                       f"{result['baccarat_outcome']} ({result['player_score']}:{result['banker_score']}); "
+                       f"карты Игрока и Банкира подтверждены.")
+        return result
+
+    async def _watch_outcome(self, game: Game, player_cards: list[dict[str, Any]], page: Page) -> None:
+        """Retain the old game page while the primary page advances to N+1."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 60
+        try:
+            while loop.time() < deadline and not page.is_closed():
+                snapshot = await self._inspect_game_dom(
+                    settings.player_name_text, settings.banker_name_text, page=page)
+                if await self._confirm_outcome_from_snapshot(game, player_cards, snapshot, page=page):
+                    return
+                await asyncio.sleep(0.15)
+            self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
+                       "исход Банкира не подтверждён за 60 секунд; сохранён UNKNOWN.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
+                       f"проверка исхода прервана ({type(exc).__name__}); сохранён UNKNOWN.")
+        finally:
+            if not page.is_closed():
+                await page.close()
+            self._outcome_watchers.pop(game.game_id, None)
+
+    async def _handoff_outcome_page(self, game: Game, player_cards: list[dict[str, Any]]) -> None:
+        """Move the primary observer to a fresh tab without losing the old DOM."""
+        if (getattr(self, "context", None) is None or self.page is None
+                or game.game_id in getattr(self, "_outcome_watchers", {})):
+            return
+        old_page = self.page
+        next_page = None
+        try:
+            async with self.page_lock:
+                self._opening_primary_page = True
+                try:
+                    next_page = await self.context.new_page()
+                    self.page = next_page
+                    await next_page.bring_to_front()
+                finally:
+                    self._opening_primary_page = False
+            task = asyncio.create_task(self._watch_outcome(game, list(player_cards), old_page))
+            self._outcome_watchers[game.game_id] = (old_page, task)
+            self.event("INFO", f"Раздача №{game.round_number}: наблюдаем Банкира в сохранённой вкладке; "
+                       "основная вкладка переходит к следующей игре.")
+        except Exception as exc:
+            self.page = old_page
+            if next_page is not None and not next_page.is_closed():
+                await next_page.close()
+            self.event("WARNING", f"Раздача №{game.round_number}: не удалось открыть вкладку "
+                       f"для следующей игры ({type(exc).__name__}); исход остаётся UNKNOWN.")
 
     async def _observe_live(self) -> None:
         """Run one game at a time until its final Player hand is observed."""
@@ -1278,6 +1396,24 @@ class BrowserService:
                     return (node?.getAttribute('data-rank') || text(node)).toUpperCase();
                   });
                   const banker_initial_ranks = banker_ranks.slice(0, 2);
+                  const banker_cards = [];
+                  let banker_pending_card_slots = 0;
+                  for (const [index, box] of bankerBoxes.entries()) {
+                    const rank = banker_ranks[index];
+                    const metadata = [box, ...box.querySelectorAll('*')].map(node => [
+                      node.getAttribute('class') || '', node.getAttribute('data-v-ico') || '',
+                      node.getAttribute('data-suit') || '', node.getAttribute('href') || '',
+                      node.getAttribute('xlink:href') || '', node.textContent || '',
+                    ].join(' ')).join(' ').toLowerCase();
+                    const suit = [
+                      ['hearts', '♥', 'heart'], ['diamonds', '♦', 'diamond'],
+                      ['clubs', '♣', 'club'], ['spades', '♠', 'spade'],
+                    ].find(([plural, glyph, singular]) =>
+                      new RegExp('(?:^|[^a-z])' + singular + 's?(?:$|[^a-z])').test(metadata)
+                      || metadata.includes(glyph))?.[0] || '';
+                    if (rank && suit) banker_cards.push({position: index + 1, rank, suit});
+                    else banker_pending_card_slots += 1;
+                  }
                   const timerLabels = [...document.querySelectorAll('.ui-game-timer__label')]
                     .filter(visible).map(text).filter(value => /^\d{1,2}:\d{2}$/.test(value));
                   const statusTexts = [...document.querySelectorAll('.scoreboard-header__match-info, .scoreboard-status')]
@@ -1343,7 +1479,11 @@ class BrowserService:
                       player_card_ranks: rankCount,
                       player_card_suits: suitCount
                     },
-                    banker_initial_ranks, banker_ranks, cards, pending_card_slots: pending, status_texts: statusTexts,
+                    banker_initial_ranks, banker_ranks, banker_cards,
+                    banker_card_boxes: bankerBoxes.length, banker_pending_card_slots,
+                    player_score_text: text(playerSide?.querySelector('.baccarat-player__number')),
+                    banker_score_text: text(bankerSide?.querySelector('.baccarat-player__number')),
+                    cards, pending_card_slots: pending, status_texts: statusTexts,
                     card_slot_evidence: pending ? cardSlotEvidence : [],
                     round_timer_text: timerLabels[0] || '',
                     finished, finish_flag_text: finishLabel,
@@ -1396,6 +1536,11 @@ class BrowserService:
             "pending_card_slots": (data_frame or {}).get("pending_card_slots", 0),
             "banker_initial_ranks": (data_frame or {}).get("banker_initial_ranks", []),
             "banker_ranks": (data_frame or {}).get("banker_ranks", []),
+            "banker_cards": (data_frame or {}).get("banker_cards", []),
+            "banker_card_boxes": (data_frame or {}).get("banker_card_boxes", 0),
+            "banker_pending_card_slots": (data_frame or {}).get("banker_pending_card_slots", 0),
+            "player_score_text": (data_frame or {}).get("player_score_text", ""),
+            "banker_score_text": (data_frame or {}).get("banker_score_text", ""),
             "snapshot_captured_at_ms": (data_frame or {}).get("captured_at_ms"),
             "round_timer_text": next((frame["round_timer_text"] for frame in frames
                                       if frame.get("round_timer_text")), ""),
@@ -2404,22 +2549,10 @@ class BrowserService:
                     # don't carry any older per-position values into the final record.
                     cards = [dict(item) for item in observed_cards]
                 final_reverified = hand_final
-                # The bookmaker list's pre-deal 0:0 is not a confirmed draw.
-                banker_ranks = (final_read.get("banker_ranks", []) if confirmed_two
-                                else diagnostics.get("banker_ranks", []))
-                final_scores = resolved_baccarat_scores(cards, banker_ranks) if hand_final else None
-                final_caption = str(diagnostics.get("finish_flag_text") or "").strip().casefold()
-                baccarat_outcome = ""
-                if final_scores:
-                    player_points, banker_points = final_scores
-                    baccarat_outcome = ("DRAW" if player_points == banker_points else
-                                        "PLAYER" if player_points > banker_points else "BANKER")
-                    game.player_score, game.banker_score = str(player_points), str(banker_points)
-                elif hand_final and final_caption == "ничья":
-                    baccarat_outcome = "DRAW"
-                if final_caption == "ничья" and baccarat_outcome not in ("", "DRAW"):
-                    self.event("WARNING", f"Раздача №{game.round_number}: надпись 'Ничья' противоречит картам; фильтр не запускаем.")
-                    baccarat_outcome = ""
+                # The pre-deal 0:0 and a result caption alone are never an outcome.
+                # Banker cards may still be drawing after the Player hand is final.
+                outcome_snapshot = final_read if confirmed_two else diagnostics
+                banker_cards = outcome_snapshot.get("banker_cards", [])
                 scan_result, completeness = classify_player_scan(
                     player_field_present=player_present,
                     cards_container_present=container_present,
@@ -2460,6 +2593,9 @@ class BrowserService:
                     "round_timer_seconds": timer_seconds,
                     "scan_result": scan_result, "finished_confirmed": finish_seen,
                     "player_hand_final": hand_final,
+                    "banker_cards": banker_cards,
+                    "banker_hand_final": False,
+                    "baccarat_outcome": "UNKNOWN",
                     "final_snapshot_reverified": final_reverified if hand_final else None,
                     "lifecycle_state": "CARDS_COMPLETE" if hand_final else "OBSERVING",
                     "reason": reason, "diagnostics": diagnostics,
@@ -2488,7 +2624,6 @@ class BrowserService:
                         player_hand_final=hand_final,
                         diagnostics=diagnostics,
                         final_snapshot_reverified=final_reverified if hand_final else None,
-                        baccarat_outcome=baccarat_outcome,
                     )
                     if saved:
                         last_saved_signature = save_signature
@@ -2496,6 +2631,10 @@ class BrowserService:
 
                 if hand_final:
                     if saved:
+                        outcome = await self._confirm_outcome_from_snapshot(
+                            game, cards, outcome_snapshot, page=self.page)
+                        if not outcome:
+                            await self._handoff_outcome_page(game, cards)
                         processed_ids.add(game.game_id)
                         retry_after.pop(game.game_id, None)
                         self._set_lifecycle_state(game.game_id, "FINALIZED")

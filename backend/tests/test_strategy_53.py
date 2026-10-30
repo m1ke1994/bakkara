@@ -24,6 +24,7 @@ def row(number, items=None, *, outcome="PLAYER", verified=True):
         "finished_at": stamp if verified else None, "observed_at": stamp,
         "final_snapshot_reverified": 1 if verified else 0,
         "player_hand_final": 1 if verified else 0, "baccarat_outcome": outcome,
+        "banker_hand_final": 1 if outcome in ("PLAYER", "BANKER", "DRAW") else 0,
         "calculation_status": "not_calculated",
         "cards_json": json.dumps(cards(items or [("2", "♥"), ("4", "♦")])),
     }
@@ -72,13 +73,21 @@ def test_pause_four_rounds_after_verified_draw():
     h[37]["baccarat_outcome"] = "PLAYER"
     h[36]["baccarat_outcome"] = "DRAW"  # N-5: allowed.
     assert predict_target(41, h, STRATEGY_53)["predicted_suit"] == "clubs"
-    h[40]["baccarat_outcome"] = ""  # Missing Banker outcome => conditional forecast.
-    partial = predict_target(41, h, STRATEGY_53)
-    assert partial["predicted_suit"] == "clubs"
+    h[40]["baccarat_outcome"] = ""  # Missing Banker outcome => preview only.
+    assert predict_target(41, h, STRATEGY_53) is None
+    partial = facecard_53_analysis(41, h)
+    assert partial["provisional_suit"] == "clubs"
     assert not partial["draw_filter_verified"]
     assert partial["unverified_outcome_round_numbers"] == [40]
     h[39]["baccarat_outcome"] = "DRAW"
     assert predict_target(41, h, STRATEGY_53) is None
+
+
+def test_legacy_caption_only_outcome_is_not_a_verified_draw_filter():
+    h = history()
+    h[40]["banker_hand_final"] = 0
+    assert predict_target(41, h, STRATEGY_53) is None
+    assert facecard_53_analysis(41, h)["unverified_outcome_round_numbers"] == [40]
 
 
 def test_unconfirmed_hand_or_time_gap_blocks_signal():
@@ -90,14 +99,15 @@ def test_unconfirmed_hand_or_time_gap_blocks_signal():
     assert predict_target(41, h, STRATEGY_53) is None
 
 
-def test_unknown_banker_outcomes_do_not_block_suit_forecast():
+def test_unknown_banker_outcomes_block_signal_but_expose_provisional_suit():
     sources = history()
     for item in sources.values():
         item["baccarat_outcome"] = ""
-    signal = predict_target(41, sources, STRATEGY_53)
-    assert signal["predicted_suit"] == "clubs"
-    assert signal["unverified_outcome_round_numbers"] == [40, 39, 38, 37]
-    assert not signal["draw_filter_verified"]
+    assert predict_target(41, sources, STRATEGY_53) is None
+    preview = facecard_53_analysis(41, sources)
+    assert preview["provisional_suit"] == "clubs"
+    assert preview["unverified_outcome_round_numbers"] == [40, 39, 38, 37]
+    assert not preview["draw_filter_verified"]
     sources[37]["baccarat_outcome"] = "DRAW"
     assert predict_target(41, sources, STRATEGY_53) is None
 
@@ -105,12 +115,27 @@ def test_unknown_banker_outcomes_do_not_block_suit_forecast():
 def test_real_card_examples_from_30_october():
     sources = history()
     sources[40] = row(40, [("J", "♣"), ("2", "♠"), ("8", "♠")], outcome="")
-    result = predict_target(41, sources, STRATEGY_53)
-    assert result["predicted_suit"] == "clubs"
+    result = facecard_53_analysis(41, sources)
+    assert result["provisional_suit"] == "clubs"
     sources[40] = row(40, [("3", "♥"), ("J", "♣"), ("7", "♥")], outcome="")
-    result = predict_target(41, sources, STRATEGY_53)
-    assert result["predicted_suit"] == "diamonds"
-    assert result["votes"][0]["mirrored"] is True
+    result = facecard_53_analysis(41, sources)
+    assert result["provisional_suit"] == "diamonds"
+    assert result["mirrored"] is True
+
+
+def test_draw_pause_is_exactly_four_physical_rounds_and_restarts_on_new_draw():
+    sources = {n: row(n) for n in range(1, 46)}
+    for n in range(40, 46):
+        sources[n] = row(n, [("A", "♥"), ("4", "♦")])
+    sources[40]["baccarat_outcome"] = "DRAW"
+    for target in range(41, 45):
+        analysis = facecard_53_analysis(target, sources)
+        assert analysis["pause_remaining"] == 45 - target
+        assert predict_target(target, sources, STRATEGY_53) is None
+    assert predict_target(45, sources, STRATEGY_53) is not None
+    sources[42]["baccarat_outcome"] = "DRAW"
+    for target in range(43, 47):
+        assert predict_target(target, sources, STRATEGY_53) is None
 
 
 def test_independent_strategy_selection_survives_restart(tmp_path):

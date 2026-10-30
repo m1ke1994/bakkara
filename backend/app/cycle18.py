@@ -158,12 +158,7 @@ def hot_window_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict
 
 
 def facecard_53_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict[str, Any]:
-    """Predict after 40 confirmed cards with a four-round observed draw pause.
-
-    Baccarat Player cards may become final before Banker finishes. Do not
-    suppress every suit signal when Banker outcome is missing. Instead expose
-    the unverified draw status so the user sees a conditional forecast.
-    """
+    """Require four confirmed outcomes; expose an unknown case as preview only."""
     offsets = strategy_offsets(STRATEGY_53)
     previous = [((number - k - 1) % ROUND_MAX) + 1 for k in offsets]
     missing = [n for n in previous if not verified_player_cards(sources.get(n))]
@@ -180,17 +175,28 @@ def facecard_53_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dic
             return {**info, "predicted_suit": None, "reason": "Разрыв номеров/времени в 40 раздачах"}
     unknown_draw_rounds = []
     for distance, source_number in enumerate(previous[:PAUSE_53], 1):
-        result = sources[source_number].get("baccarat_outcome")
+        source_row = sources[source_number]
+        result = (source_row.get("baccarat_outcome")
+                  if source_row.get("banker_hand_final") else "UNKNOWN")
         if result == "DRAW":
             return {**info, "predicted_suit": None,
                     "reason": f"После ничьей №{source_number} пропуск четырёх раздач (N−{distance})",
-                    "unverified_outcome_round_numbers": unknown_draw_rounds}
+                     "pause_remaining": PAUSE_53 - distance + 1,
+                     "draw_filter_verified": True,
+                     "unverified_outcome_round_numbers": unknown_draw_rounds}
         if result not in ("PLAYER", "BANKER"):
             unknown_draw_rounds.append(source_number)
     trigger = map_facecard_53(verified_player_cards(sources[previous[0]]))
     if trigger is None:
         return {**info, "predicted_suit": None,
                 "reason": "В предыдущей руке должна быть ровно одна A/K/Q/J"}
+    if unknown_draw_rounds:
+        return {**info, **trigger, "predicted_suit": None,
+                "provisional_suit": trigger["predicted_suit"],
+                "source_round_number": previous[0],
+                "draw_filter_verified": False,
+                "unverified_outcome_round_numbers": unknown_draw_rounds,
+                "reason": "Ожидаем подтверждения исходов: №" + ", №".join(map(str, unknown_draw_rounds))}
     return {
         **info, **trigger,
         "source_round_number": previous[0],
@@ -425,6 +431,10 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             "suit_counts": hot_state.get("suit_counts"),
             "count_spread": hot_state.get("count_spread"),
             "skip_reason": hot_state.get("reason", ""),
+            "provisional_suit": hot_state.get("provisional_suit"),
+            "trigger_card": hot_state.get("trigger_card"),
+            "mirrored": hot_state.get("mirrored", False),
+            "pause_remaining": hot_state.get("pause_remaining", 0),
             "unverified_outcome_round_numbers": hot_state.get("unverified_outcome_round_numbers", []),
             "draw_filter_verified": hot_state.get("draw_filter_verified", True),
         })
@@ -630,7 +640,7 @@ class Cycle18Engine:
             rows = [dict(row) for row in db.execute("""
                 SELECT game_id,round_number,discovered_at,finished_at,
                        cards_json,completeness,calculated_suit,calculation_status,
-                       final_snapshot_reverified,player_hand_final,
+                        final_snapshot_reverified,player_hand_final,banker_hand_final,
                        scan_result,reason,last_scanned_at,observed_at,baccarat_outcome
                 FROM observations
                 WHERE discovered_at>=?

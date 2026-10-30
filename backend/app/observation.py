@@ -585,6 +585,9 @@ class ObservationStore:
                 "prediction_hit": "INTEGER",
                 "player_hand_final": "INTEGER NOT NULL DEFAULT 0",
                 "baccarat_outcome": "TEXT NOT NULL DEFAULT ''",
+                "banker_cards_json": "TEXT NOT NULL DEFAULT '[]'",
+                "banker_hand_final": "INTEGER NOT NULL DEFAULT 0",
+                "outcome_confirmed_at": "TEXT",
             }
             for name, declaration in migrations.items():
                 if name not in columns:
@@ -923,6 +926,7 @@ class ObservationStore:
                 FROM observations WHERE game_id=?""", (game.game_id,)).fetchone()
             previous_cards = json.loads(row["cards_json"]) if row else []
             merged_cards = merge_card_snapshots(previous_cards, cards)
+            cards_changed = bool(row and merged_cards != previous_cards)
             stored_finished = bool(finished_confirmed or (row and row["finished_at"]))
             stored_hand_final = bool(player_hand_final or (row and row["player_hand_final"]))
             saved_reverified = row["final_snapshot_reverified"] if row else None
@@ -962,9 +966,12 @@ class ObservationStore:
                                 bool(row["finished_at"]), saved_reverified, old_calculated, old_calculation_status,
                                 row["prediction_for_next_round"], prediction_checked, prediction_hit,
                                 bool(row["player_hand_final"])) if row else None)
+            needs_unknown = stored_hand_final and (not row or not row["baccarat_outcome"])
             needs_outcome = (baccarat_outcome in ("DRAW", "PLAYER", "BANKER")
-                and stored_hand_final and reverified and (not row or not row["baccarat_outcome"]))
-            if existing_values == values and not needs_outcome:
+                and stored_hand_final and reverified
+                and (cards_changed or not row
+                     or row["baccarat_outcome"] not in ("DRAW", "PLAYER", "BANKER")))
+            if existing_values == values and not needs_outcome and not needs_unknown:
                 return False
             finished_at = (row["finished_at"] if row else None) or (now if finished_confirmed else None)
             db.execute("""INSERT INTO observations(
@@ -992,11 +999,53 @@ class ObservationStore:
                  game.time, None if reverified is None else int(bool(reverified)), now,
                  calculated, calculation_status, prediction, prediction_checked, prediction_hit,
                  int(stored_hand_final)))
+            if cards_changed:
+                # A corrected Player hand invalidates any earlier Banker
+                # comparison until both complete hands are checked again.
+                db.execute("""UPDATE observations SET baccarat_outcome='UNKNOWN',
+                    banker_cards_json='[]',banker_hand_final=0,outcome_confirmed_at=NULL
+                    WHERE game_id=?""", (game.game_id,))
+            if needs_unknown:
+                db.execute("""UPDATE observations SET baccarat_outcome='UNKNOWN' WHERE game_id=?
+                    AND (baccarat_outcome IS NULL OR baccarat_outcome='')""", (game.game_id,))
             if needs_outcome:
                 db.execute("""UPDATE observations SET baccarat_outcome=? WHERE game_id=?
-                    AND (baccarat_outcome IS NULL OR baccarat_outcome='')""",
+                    AND baccarat_outcome NOT IN ('DRAW','PLAYER','BANKER')""",
                     (baccarat_outcome, game.game_id))
             return True
+
+    def confirm_baccarat_outcome(
+        self, game_id: str, round_number: str, player_cards: list[dict[str, Any]],
+        banker_cards: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Atomically attach a card-derived outcome to one verified physical hand."""
+        from .draw_rules import resolved_baccarat_outcome
+
+        resolved = resolved_baccarat_outcome(player_cards, banker_cards)
+        if resolved is None:
+            return None
+        outcome, player_points, banker_points = resolved
+        with sqlite3.connect(self.path, timeout=3) as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute("""SELECT round_number,cards_json,player_hand_final,
+                final_snapshot_reverified,baccarat_outcome,banker_cards_json
+                FROM observations WHERE game_id=?""", (game_id,)).fetchone()
+            if (row is None or row["round_number"] != round_number
+                    or not row["player_hand_final"] or row["final_snapshot_reverified"] != 1
+                    or json.loads(row["cards_json"]) != player_cards):
+                return None
+            if (row["baccarat_outcome"] != outcome
+                    or json.loads(row["banker_cards_json"] or "[]") != banker_cards):
+                now = datetime.now(timezone.utc).isoformat()
+                db.execute("""UPDATE observations SET baccarat_outcome=?,banker_cards_json=?,
+                    banker_hand_final=1,player_score=?,banker_score=?,
+                    outcome_confirmed_at=?,finished_at=COALESCE(finished_at,?)
+                    WHERE game_id=?""",
+                    (outcome, json.dumps(banker_cards, ensure_ascii=False),
+                     str(player_points), str(banker_points), now, now, game_id))
+        return {"game_id": game_id, "round_number": round_number,
+                "baccarat_outcome": outcome, "player_score": player_points,
+                "banker_score": banker_points, "banker_cards": banker_cards}
 
     @staticmethod
     def _record(row: sqlite3.Row) -> dict[str, Any]:
@@ -1016,6 +1065,9 @@ class ObservationStore:
                 "final_snapshot_reverified": None if row["final_snapshot_reverified"] is None else bool(row["final_snapshot_reverified"]),
                 "calculated_suit": row["calculated_suit"], "calculation_status": row["calculation_status"],
                 "baccarat_outcome": row["baccarat_outcome"],
+                "banker_cards": json.loads(row["banker_cards_json"] or "[]"),
+                "banker_hand_final": bool(row["banker_hand_final"]),
+                "outcome_confirmed_at": row["outcome_confirmed_at"],
                 "prediction_for_next_round": row["prediction_for_next_round"],
                 "outgoing_prediction": row["prediction_for_next_round"],
                 "incoming_prediction": None,
@@ -1028,7 +1080,7 @@ class ObservationStore:
             row = db.execute("""SELECT game_id,url,round_number,discovered_at,finished_at,cards_json,
                 completeness,reason,list_position,site_status,player_score,banker_score,scan_result,last_scanned_at,game_time,final_snapshot_reverified,
                 observed_at,calculated_suit,calculation_status,prediction_for_next_round,prediction_checked,prediction_hit,
-                player_hand_final,baccarat_outcome
+                player_hand_final,baccarat_outcome,banker_cards_json,banker_hand_final,outcome_confirmed_at
                 FROM observations WHERE game_id=?""", (game_id,)).fetchone()
         if not row:
             return None
@@ -1041,7 +1093,7 @@ class ObservationStore:
             rows = db.execute("""SELECT game_id,url,round_number,discovered_at,finished_at,cards_json,
                 completeness,reason,list_position,site_status,player_score,banker_score,scan_result,last_scanned_at,game_time,final_snapshot_reverified,
                 observed_at,calculated_suit,calculation_status,prediction_for_next_round,prediction_checked,prediction_hit,
-                player_hand_final,baccarat_outcome
+                player_hand_final,baccarat_outcome,banker_cards_json,banker_hand_final,outcome_confirmed_at
                 FROM observations WHERE cards_json<>'[]'
                     AND (player_hand_final=1 OR finished_at IS NOT NULL)
                 ORDER BY COALESCE(NULLIF(observed_at,''),last_scanned_at,discovered_at) DESC,discovered_at DESC LIMIT ?""", (limit,)).fetchall()

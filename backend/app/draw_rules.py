@@ -70,3 +70,21 @@ def resolved_baccarat_scores(player_cards, banker_ranks):
     if None in values + bank:
         return None
     return sum(values) % 10, sum(bank) % 10
+
+
+def resolved_baccarat_outcome(player_cards, banker_cards):
+    """Resolve only two complete, positioned, suited hands from one round."""
+    valid_suits = {"hearts", "diamonds", "clubs", "spades"}
+    for hand in (player_cards, banker_cards):
+        if len(hand) not in (2, 3):
+            return None
+        if [card.get("position") for card in hand] != list(range(1, len(hand) + 1)):
+            return None
+        if any(card_points(card.get("rank")) is None or card.get("suit") not in valid_suits
+               for card in hand):
+            return None
+    scores = resolved_baccarat_scores(player_cards, [card["rank"] for card in banker_cards])
+    if scores is None:
+        return None
+    player, banker = scores
+    return ("DRAW" if player == banker else "PLAYER" if player > banker else "BANKER"), player, banker

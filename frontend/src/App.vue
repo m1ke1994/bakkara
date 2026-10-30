@@ -122,6 +122,8 @@ const missingSourcesDescription = forecast => (forecast?.missing_sources || [])
   .map(source => `N−${source.offset} = №${source.round_number}: ${source.reason}`)
   .join('; ') || 'Нет неподтверждённых источников'
 const forecastUnavailableTitle = forecast => {
+  if (activeStrategy.value === 'facecards_53' && forecast?.pause_remaining) return 'Пауза после ничьей X'
+  if (activeStrategy.value === 'facecards_53' && forecast?.provisional_suit) return 'Ожидаем исходы Банкира'
   if (forecast?.filter_paused) return 'Фильтр: пропуск ставки'
   if (forecast?.missing_sources?.length) return 'Ожидаем подтверждения источника'
   if (forecast?.skip_reason) return 'Пропуск по условиям стратегии'
@@ -147,6 +149,9 @@ const historyLoaded = ref(false)
 const historySearch = ref('')
 const fullHistory = computed(() => historyLoaded.value
   ? historyRows.value : (state.value.observation?.history || []))
+const latest53Hand = computed(() => fullHistory.value[0] || null)
+const cardLine = cards => (cards || []).map(card => `${card.rank}${suits[card.suit]?.[0] || ''}`).join(' ') || 'ожидаем карты'
+const baccaratLabel = outcome => ({ PLAYER: 'Игрок', BANKER: 'Банкир', DRAW: 'X · ничья' }[outcome] || 'неизвестен')
 const filteredHistory = computed(() => {
   const term = historySearch.value.trim().toLowerCase()
   return term ? fullHistory.value.filter(item =>
@@ -330,7 +335,7 @@ onBeforeUnmount(() => {
         <span class="diagnostic">{{ observing ? 'Сканирование активно: для смены фильтра сначала остановите его.' : (strategyDirty ? 'Выбор изменён — нажмите «Сохранить стратегию».' : 'Настройка хранится в базе данных бэкенда.') }}</span>
       </div>
       <p v-if="strategyNotice" class="strategy-notice">{{ strategyNotice }}</p>
-      <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — экспериментальная стратегия. При неизвестном итоге Банкира прогноз рассчитывается условно: фильтр ничьих не подтверждён. Пропуски не считаются LOSE и не обнуляют шаг. Название не гарантирует точность.</p>
+      <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — экспериментальная стратегия. При неизвестном итоге Банкира масть показывается только предварительно; сигнал и ставка ждут подтверждения четырёх исходов. Пропуски не считаются LOSE и не обнуляют шаг. Название не гарантирует точность.</p>
       <p v-if="activeStrategy === 'vote_3_10_24_31_40_step3_reverse'" class="diagnostic">Стратегия 5: после двух подтверждённых LOSE на 3-м шаге один раз преобразуем масти (текущий базовый прогноз + предыдущий базовый прогноз). Без подтверждений замена запрещена.</p>
       <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. Виртуальное голосование продолжает работать в паузе. В LIVE пропуск блокирует ставки по стратегии. Тест с первой раздачи не является прогнозом стратегии.</p>
     </section>
@@ -386,7 +391,8 @@ onBeforeUnmount(() => {
       <p class="diagnostic">{{ state.observation?.diagnostic }}</p>
       <template v-if="state.observation?.current">
         <p>Позиция в списке: {{ state.observation.current.position }} · Время: {{ state.observation.current.time || '—' }} · Статус на сайте: {{ state.observation.current.site_status || 'Не удалось определить' }}</p>
-        <p>Счёт Игрок : Банкир — {{ state.observation.current.player_score || '—' }} : {{ state.observation.current.banker_score || '—' }} · Результат: {{ scanResultName(state.observation.current.scan_result) }}</p>
+         <p v-if="activeStrategy === 'facecards_53'">Счёт Игрок : Банкир — {{ state.observation.current.banker_hand_final ? `${state.observation.current.player_score} : ${state.observation.current.banker_score}` : 'ожидаем финальные карты' }} · Исход: {{ baccaratLabel(state.observation.current.baccarat_outcome) }}</p>
+         <p v-else>Счёт Игрок : Банкир — {{ state.observation.current.player_score || '—' }} : {{ state.observation.current.banker_score || '—' }} · Результат: {{ scanResultName(state.observation.current.scan_result) }}</p>
         <p v-if="state.observation.current.round_timer_text !== undefined">
           Таймер раздачи: <strong>{{ state.observation.current.round_timer_text || 'не определён' }}</strong>
           · Отслеживаем завершение и возможную третью карту Игрока.
@@ -412,7 +418,13 @@ onBeforeUnmount(() => {
           <strong>{{ cycle18.ready ? 'Готов к прогнозированию' : 'Сбор истории' }}</strong>
         </div>
         <p v-if="activeStrategy === 'hot_suits_8_spread_6'" class="diagnostic">Алгоритм без преобразования мастей: перед раздачей N берём только 8 последних подряд завершённых раздач (N−1…N−8, временные разрывы не более 185 с). Считаем фактические ♥ ♦ ♣ ♠ во всех картах Игрока. Сигнал — самая частая масть, только при разнице MAX−MIN ≥ 6; равенства разрешаем в порядке ♥ → ♦ → ♣ → ♠. Иначе ПРОПУСК: шаг догона не меняется. Для 9 шагов укажи в калькуляторе соответствующий ряд ставок; выбор стратегии его автоматически не меняет. Это экспериментальное правило, не гарантия выигрыша.</p>
-        <p v-else-if="activeStrategy === 'facecards_53'" class="diagnostic">53%: 40 подтверждённых раздач, одна карта A/K/Q/J в прошлой руке Игрока, зеркало назначенной масти (если вторая из трёх), пропуск 4 после известной ничьей X. Без подтверждённого итога Банкира прогноз условный — не гарантируется правильность фильтра X. Шаг и суммы прежние.</p>
+         <p v-else-if="activeStrategy === 'facecards_53'" class="diagnostic">53%: 40 подтверждённых раздач, одна карта A/K/Q/J в прошлой руке Игрока, зеркало назначенной масти (если вторая из трёх), пропуск 4 после известной ничьей X. Для сигнала нужны четыре подтверждённых исхода; неизвестный итог блокирует сигнал. Шаг и суммы прежние.</p>
+         <div v-if="activeStrategy === 'facecards_53'" class="diagnostic" data-testid="strategy-53-diagnostics">
+           <p>Последняя завершённая раздача: №{{ latest53Hand?.round_number || '—' }} · ID {{ latest53Hand?.game_id || '—' }}. Следующая: №{{ nextForecast?.target_round_number || '—' }}.</p>
+           <p>Игрок: {{ cardLine(latest53Hand?.player_cards) }} · Банкир: {{ latest53Hand?.banker_hand_final ? cardLine(latest53Hand?.banker_cards) : 'ожидаем подтверждения' }} · Исход: {{ baccaratLabel(latest53Hand?.baccarat_outcome) }}.</p>
+           <p>Карта-источник: {{ currentForecast?.trigger_card || '—' }} · Зеркало: {{ currentForecast?.mirrored ? 'да' : 'нет' }} · Масть: {{ suits[currentForecast?.predicted_suit || currentForecast?.provisional_suit]?.[0] || '—' }} · Осталось пропустить: {{ currentForecast?.pause_remaining || 0 }}.</p>
+           <p>Статус сигнала: {{ currentForecast?.available ? 'СИГНАЛ' : currentForecast?.pause_remaining ? 'ПАУЗА' : currentForecast?.provisional_suit ? 'ОЖИДАНИЕ' : 'ПРОПУСК' }} · {{ currentForecast?.skip_reason || (currentForecast?.available ? 'Фильтр ничьих подтверждён' : 'Ожидаем условия стратегии') }}</p>
+         </div>
         <p v-else class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. Для голосования достаточно 3–4 проверенных источников только при строгом большинстве; при 5/5 действует прежнее правило равенства. Неполное голосование помечается отдельно. LIVE-ставка возможна только по подтверждённому прогнозу и открытому рынку.</p>
         <p v-if="currentForecast?.strategy_five_applied" class="diagnostic">Стратегия 5 · шаг 3: {{ suits[currentForecast.base_predicted_suit]?.[0] || '—' }} + {{ suits[currentForecast.strategy_five_previous_suit]?.[0] || '—' }} → {{ suits[currentForecast.predicted_suit]?.[0] || '—' }} · обратная таблица</p>
         <p v-if="activeStrategy === 'hot_suits_8_spread_6' && currentForecast" class="diagnostic">Текущая игра: {{ hotCountsDescription(currentForecast) }} · разброс {{ currentForecast.count_spread ?? '—' }} / 6. {{ currentForecast.available ? 'Сигнал: ' + (suits[currentForecast.predicted_suit]?.[1] || '—') : currentForecast.skip_reason || 'Ожидание полного окна' }}</p>
@@ -506,9 +518,10 @@ onBeforeUnmount(() => {
             </p>
             <p v-if="currentForecast?.available && currentForecast.partial_vote" class="diagnostic">Частичное голосование: {{ currentForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(currentForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
-            <p v-else-if="activeStrategy === 'facecards_53'">Карта: {{ currentForecast?.votes?.[0]?.card || '—' }} · {{ currentForecast?.votes?.[0]?.mirrored ? 'зеркало' : 'без зеркала' }}</p>
-            <p v-if="activeStrategy === 'facecards_53' && currentForecast?.available && currentForecast?.unverified_outcome_round_numbers?.length" class="diagnostic">⚠ Условный прогноз: исходы №{{ currentForecast.unverified_outcome_round_numbers.join(', №') }} неизвестны. Нельзя исключить ничью X.</p>
-             <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
+             <p v-else-if="activeStrategy === 'facecards_53'">Карта: {{ currentForecast?.trigger_card || currentForecast?.votes?.[0]?.card || '—' }} · {{ currentForecast?.mirrored || currentForecast?.votes?.[0]?.mirrored ? 'зеркало' : 'без зеркала' }}</p>
+             <p v-if="activeStrategy === 'facecards_53' && currentForecast?.provisional_suit" class="diagnostic">Предварительная масть: {{ suits[currentForecast.provisional_suit]?.[0] || '—' }}. Исходы №{{ currentForecast.unverified_outcome_round_numbers.join(', №') }} неизвестны; сигнал заблокирован.</p>
+             <p v-if="activeStrategy === 'facecards_53' && currentForecast?.pause_remaining" class="diagnostic">Осталось пропустить {{ currentForecast.pause_remaining }} раздач.</p>
+             <p>Источники: {{ sourceDescription(currentForecast) }}</p>
             <p v-if="currentForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(currentForecast) }}</p>
           </article>
           <article class="forecast-tile" data-testid="forecast-next">
@@ -523,9 +536,10 @@ onBeforeUnmount(() => {
             </p>
             <p v-if="nextForecast?.available && nextForecast.partial_vote" class="diagnostic">Частичное голосование: {{ nextForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(nextForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
-            <p v-else-if="activeStrategy === 'facecards_53'">Карта: {{ nextForecast?.votes?.[0]?.card || '—' }} · {{ nextForecast?.votes?.[0]?.mirrored ? 'зеркало' : 'без зеркала' }}</p>
-            <p v-if="activeStrategy === 'facecards_53' && nextForecast?.available && nextForecast?.unverified_outcome_round_numbers?.length" class="diagnostic">⚠ Условный прогноз: исходы №{{ nextForecast.unverified_outcome_round_numbers.join(', №') }} неизвестны. Нельзя исключить ничью X.</p>
-             <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
+             <p v-else-if="activeStrategy === 'facecards_53'">Карта: {{ nextForecast?.trigger_card || nextForecast?.votes?.[0]?.card || '—' }} · {{ nextForecast?.mirrored || nextForecast?.votes?.[0]?.mirrored ? 'зеркало' : 'без зеркала' }}</p>
+             <p v-if="activeStrategy === 'facecards_53' && nextForecast?.provisional_suit" class="diagnostic">Предварительная масть: {{ suits[nextForecast.provisional_suit]?.[0] || '—' }}. Исходы №{{ nextForecast.unverified_outcome_round_numbers.join(', №') }} неизвестны; сигнал заблокирован.</p>
+             <p v-if="activeStrategy === 'facecards_53' && nextForecast?.pause_remaining" class="diagnostic">Осталось пропустить {{ nextForecast.pause_remaining }} раздач.</p>
+             <p>Источники: {{ sourceDescription(nextForecast) }}</p>
             <p v-if="nextForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(nextForecast) }}</p>
           </article>
         </div>
@@ -541,12 +555,14 @@ onBeforeUnmount(() => {
       <p v-else-if="!filteredHistory.length" class="diagnostic">По указанному запросу раздач не найдено.</p>
       <div v-else class="history-table-scroll history-full-scroll">
         <table class="history-table" aria-label="История наблюдений">
-          <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th scope="col">Расчётная масть</th><th v-if="cycle18.ready" scope="col">WIN / LOSE ({{ strategyShortLabel }})</th></tr></thead>
+           <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th v-if="activeStrategy === 'facecards_53'" scope="col">Карты Банкира</th><th v-if="activeStrategy === 'facecards_53'" scope="col">Исход баккары</th><th scope="col">Расчётная масть</th><th v-if="cycle18.ready" scope="col">WIN / LOSE ({{ strategyShortLabel }})</th></tr></thead>
           <tbody>
             <tr v-for="item in filteredHistory" :key="item.game_id">
               <td class="history-time">{{ formatObservedAt(item.observed_at || item.last_scanned_at || item.discovered_at) }}</td>
               <td class="history-round"><strong><a v-if="item.game_url || item.url" :href="item.game_url || item.url" target="_blank" rel="noopener noreferrer" :title="`Открыть игру ${item.game_id}`">{{ item.round_number || '—' }}</a><span v-else>{{ item.round_number || '—' }}</span></strong></td>
               <td><div v-if="item.player_cards?.length" class="history-card-line"><span v-for="(card, index) in item.player_cards" :key="card.position || index" class="history-card" :class="isRedSuit(card.suit) ? 'red-suit' : 'black-suit'">{{ card.rank }}{{ suits[card.suit]?.[0] || '' }}</span></div><span v-else class="prediction-none">—</span></td>
+               <td v-if="activeStrategy === 'facecards_53'">{{ item.banker_hand_final ? cardLine(item.banker_cards) : 'ожидаем' }}</td>
+               <td v-if="activeStrategy === 'facecards_53'">{{ baccaratLabel(item.baccarat_outcome) }}</td>
               <td><span v-if="item.calculated_suit" class="calculated-suit" :class="isRedSuit(item.calculated_suit) ? 'red-suit' : 'black-suit'" title="Масть, рассчитанная из карт этой раздачи">{{ suits[item.calculated_suit]?.[0] || '—' }}</span><span v-else class="prediction-none">—</span></td>
               <td v-if="cycle18.ready"><span v-if="outcomeFor(item.game_id) && ['WIN', 'LOSE'].includes(outcomeFor(item.game_id).result)" class="prediction-result" :class="`prediction-${outcomeFor(item.game_id).result.toLowerCase()}`" :title="`${strategyLabel}: прогноз ${suits[outcomeFor(item.game_id).predicted_suit]?.[1] || '—'}`">{{ outcomeFor(item.game_id).result }}</span><span v-else-if="outcomeFor(item.game_id)?.result === 'PENDING'" class="prediction-pending">Ожидаем карт</span></td>
             </tr>
