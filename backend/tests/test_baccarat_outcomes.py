@@ -17,13 +17,6 @@ def hand(*ranks):
             for i, rank in enumerate(ranks)]
 
 
-@pytest.mark.parametrize("player,banker,outcome,scores", [
-    (hand("9", "9"), hand("K", "6"), "PLAYER", (8, 6)),
-    (hand("3", "4"), hand("2", "3", "A"), "PLAYER", (7, 6)),
-    (hand("2", "3", "4"), hand("2", "5"), "PLAYER", (9, 7)),
-    (hand("A", "A", "5"), hand("A", "A", "5"), "DRAW", (7, 7)),
-    (hand("4", "K"), hand("8", "K"), "BANKER", (4, 8)),
-])
 
 def test_chromium_banker_dom_three_cards_ignores_hidden_suit_faces():
     """Actual Playwright DOM pass: three Banker cards and an invisible old suit."""
@@ -77,6 +70,15 @@ def test_chromium_banker_dom_three_cards_ignores_hidden_suit_faces():
                 await browser.close()
     asyncio.run(run())
 
+
+
+@pytest.mark.parametrize("player,banker,outcome,scores", [
+    (hand("9", "9"), hand("K", "6"), "PLAYER", (8, 6)),
+    (hand("3", "4"), hand("2", "3", "A"), "PLAYER", (7, 6)),
+    (hand("2", "3", "4"), hand("2", "5"), "PLAYER", (9, 7)),
+    (hand("A", "A", "5"), hand("A", "A", "5"), "DRAW", (7, 7)),
+    (hand("4", "K"), hand("8", "K"), "BANKER", (4, 8)),
+])
 
 def test_complete_card_sets_resolve_all_outcomes(player, banker, outcome, scores):
     assert resolved_baccarat_outcome(player, banker) == (outcome, *scores)
