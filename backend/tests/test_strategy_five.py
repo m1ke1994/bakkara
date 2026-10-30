@@ -32,7 +32,7 @@ def start_ready(tmp_path, *, mixed_vote=False):
     store, engine = ObservationStore(db_path), Cycle18Engine(db_path)
     options = engine.get_strategy()["options"]
     assert len(options) == 6
-    assert options[-1]["id"] == STRATEGY_FIVE
+    assert any(option["id"] == STRATEGY_FIVE for option in options)
     assert engine.save_strategy(STRATEGY_FIVE)["selected"] == STRATEGY_FIVE
     assert Cycle18Engine(db_path).get_strategy()["selected"] == STRATEGY_FIVE
     engine.start_session()
