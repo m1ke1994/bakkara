@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 
 def audit_history(path, session_id, rows, strategy):
     from .cycle18 import (round_number, source_verified, predict_target, captured_cards,
-                          strategy_offsets, ROUND_MAX, hot_window_analysis, STRATEGY_HOT_8,
+                          strategy_offsets, ROUND_MAX, hot_window_analysis, facecard_53_analysis,
+                           STRATEGY_53, STRATEGY_HOT_8,
                           STRATEGY_FIVE)
     from .observation import evaluate_prediction
     counts = {}
@@ -43,7 +44,9 @@ def audit_history(path, session_id, rows, strategy):
                 final_snapshot_reverified=target.get("final_snapshot_reverified") == 1)
                 if suit else "UNKNOWN")
             hot_reason = (hot_window_analysis(number, sources).get("reason", "")
-                          if strategy == STRATEGY_HOT_8 and counts[number] == 1 else "")
+                          if strategy == STRATEGY_HOT_8 and counts[number] == 1 else
+                          facecard_53_analysis(number, sources).get("reason", "")
+                          if strategy == STRATEGY_53 and counts[number] == 1 else "")
             reason = ("Неоднозначный номер целевой раздачи" if counts[number] != 1 else
                       "Нет подтверждённых источников: " + ", ".join(map(str, missing)) if missing else
                       hot_reason if hot_reason else

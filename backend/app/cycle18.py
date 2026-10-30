@@ -14,6 +14,7 @@ from typing import Any
 from .history_audit import audit_history
 from .observation import evaluate_prediction, valid_card_rank
 from .suit_calculator import SUIT_SYMBOL_TO_NAME, calculate_cards_suit, calculate_suit, normalize_suit
+from .strategy_53 import MAX_GAP_53, PAUSE_53, WARMUP_53, map_facecard_53
 
 CYCLE = 18
 WARMUP = 20
@@ -26,12 +27,13 @@ STRATEGY_VOTE = "vote_3_10_24_31_40"
 STRATEGY_VOTE_DRAW_12 = "vote_3_10_24_31_40_draw_diamond_12"
 STRATEGY_HOT_8 = "hot_suits_8_spread_6"
 STRATEGY_FIVE = "vote_3_10_24_31_40_step3_reverse"
+STRATEGY_53 = "facecards_53"
 DRAW_DIAMOND_PAUSE_ROUNDS = 12
 HOT_WINDOW = 8
 HOT_MIN_SPREAD = 6
 HOT_MAX_GAP_SECONDS = 185
 VOTE_STRATEGIES = (STRATEGY_VOTE, STRATEGY_VOTE_DRAW_12, STRATEGY_FIVE)
-AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES + (STRATEGY_HOT_8,)
+AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES + (STRATEGY_HOT_8, STRATEGY_53)
 VOTE_OFFSETS = (3, 10, 24, 31, 40)
 SUIT_PRIORITY = ("hearts", "diamonds", "clubs", "spades")
 STRATEGY_OPTIONS = (
@@ -46,15 +48,17 @@ STRATEGY_OPTIONS = (
     {"id": STRATEGY_FIVE, "label": "Стратегия 5 · обратный 3-й шаг",
      "description": "Голосование N−3/10/24/31/40; после двух подтверждённых LOSE "
                     "на 3-м шаге преобразовать прогноз 3-го + прогноз 2-го; затем обычный алгоритм"},
+    {"id": STRATEGY_53, "label": "53%",
+     "description": "16 соответствий A/K/Q/J; зеркало для средней из трёх; пропуск 4 игр после X; прогрев 40"},
 )
 
 
 def strategy_warmup(strategy: str) -> int:
-    return HOT_WINDOW if strategy == STRATEGY_HOT_8 else 40 if strategy in VOTE_STRATEGIES else WARMUP
+    return WARMUP_53 if strategy == STRATEGY_53 else HOT_WINDOW if strategy == STRATEGY_HOT_8 else 40 if strategy in VOTE_STRATEGIES else WARMUP
 
 
 def strategy_offsets(strategy: str) -> tuple[int, ...]:
-    return tuple(range(1, HOT_WINDOW + 1)) if strategy == STRATEGY_HOT_8 else VOTE_OFFSETS if strategy in VOTE_STRATEGIES else (CYCLE,)
+    return tuple(range(1, WARMUP_53 + 1)) if strategy == STRATEGY_53 else tuple(range(1, HOT_WINDOW + 1)) if strategy == STRATEGY_HOT_8 else VOTE_OFFSETS if strategy in VOTE_STRATEGIES else (CYCLE,)
 
 
 def pause_for_round(target_number: int, trigger_rounds: list[int]) -> dict[str, Any] | None:
@@ -94,7 +98,7 @@ def verified_player_cards(row: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def source_verified(row: dict[str, Any] | None, strategy: str) -> bool:
     """The hot-suit strategy must not depend on calculated_suit/suit_map."""
-    if strategy == STRATEGY_HOT_8:
+    if strategy in (STRATEGY_HOT_8, STRATEGY_53):
         return bool(verified_player_cards(row))
     return bool(verified_suit(row)) if row else False
 
@@ -153,6 +157,48 @@ def hot_window_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict
     }
 
 
+def facecard_53_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """Прогноз только по подтверждённым 40 прошлым физическим раздачам.
+
+    Последние четыре исхода нужны для безопасного пропуска после X.
+    Отсутствующие / неоднозначные карты не интерпретируются как отсутствие X.
+    """
+    offsets = strategy_offsets(STRATEGY_53)
+    previous = [((number - k - 1) % ROUND_MAX) + 1 for k in offsets]
+    missing = [n for n in previous if not verified_player_cards(sources.get(n))]
+    info = {"source_round_numbers": previous, "missing_source_round_numbers": missing}
+    if missing:
+        return {**info, "predicted_suit": None, "reason": "Нужны 40 подтверждённых подряд рук Игрока"}
+    ordered = [sources[n] for n in reversed(previous)]
+    for left, right in zip(ordered, ordered[1:]):
+        first = moment(left.get("finished_at") or left.get("observed_at"))
+        second = moment(right.get("finished_at") or right.get("observed_at"))
+        if (first is None or second is None
+                or following(round_number(left.get("round_number")) or 0) != round_number(right.get("round_number"))
+                or not 0 <= (second - first).total_seconds() <= MAX_GAP_53):
+            return {**info, "predicted_suit": None, "reason": "Разрыв номеров/времени в 40 раздачах"}
+    for distance, source_number in enumerate(previous[:PAUSE_53], 1):
+        result = sources[source_number].get("baccarat_outcome")
+        if result not in ("PLAYER", "BANKER", "DRAW"):
+            return {**info, "predicted_suit": None, "reason": f"Итог №{source_number} не подтверждён"}
+        if result == "DRAW":
+            return {**info, "predicted_suit": None,
+                    "reason": f"После ничьей №{source_number} пропуск четырёх раздач (N−{distance})"}
+    trigger = map_facecard_53(verified_player_cards(sources[previous[0]]))
+    if trigger is None:
+        return {**info, "predicted_suit": None,
+                "reason": "В предыдущей руке должна быть ровно одна A/K/Q/J"}
+    return {
+        **info, **trigger,
+        "source_round_number": previous[0],
+        "votes": [{"offset": 1, "round_number": previous[0],
+                   "suit": trigger["predicted_suit"], "card": trigger["trigger_card"],
+                   "mirrored": trigger["mirrored"]}],
+        "vote_counts": {}, "vote_count": 1, "partial_vote": False,
+        "missing_source_round_numbers": [], "reason": "",
+    }
+
+
 def predict_target(number: int, sources: dict[int, dict[str, Any]],
                    strategy: str = STRATEGY_N18) -> dict[str, Any] | None:
     """One advance prediction from exact, verified physical source rounds.
@@ -167,6 +213,9 @@ def predict_target(number: int, sources: dict[int, dict[str, Any]],
         return None
     if strategy == STRATEGY_HOT_8:
         result = hot_window_analysis(number, sources)
+        return result if result["predicted_suit"] else None
+    if strategy == STRATEGY_53:
+        result = facecard_53_analysis(number, sources)
         return result if result["predicted_suit"] else None
     votes = []
     missing = []
@@ -354,8 +403,8 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
                     detail += f" ({reason})"
             missing_sources.append({"offset": offset, "round_number": source_number,
                                     "reason": detail})
-        hot_state = (hot_window_analysis(number, sources)
-                     if strategy == STRATEGY_HOT_8 else {})
+        hot_state = (hot_window_analysis(number, sources) if strategy == STRATEGY_HOT_8
+                     else facecard_53_analysis(number, sources) if strategy == STRATEGY_53 else {})
         previews.append({
             "phase": phase,
             "target_round_number": number,
@@ -799,7 +848,7 @@ class Cycle18Engine:
                 # voting mode preserve the attempted-loss count over skipped
                 # physical rounds, provided the time gap is still plausible.
                 continue
-            if previous and strategy != STRATEGY_HOT_8 and (
+            if previous and strategy not in (STRATEGY_HOT_8, STRATEGY_53) and (
                 not self._close_in_time(previous, row)
                 or (strategy in (STRATEGY_N18, STRATEGY_FIVE)
                     and following(previous["target_round_number"]) != row["target_round_number"])

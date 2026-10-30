@@ -2,6 +2,17 @@
 
 Local control panel for a visible Playwright browser session. It opens the configured Baccarat page and lets a person sign in manually. DEMO records virtual suit predictions. LIVE uses the same observer and saved calculator amounts to attempt bets through the visible bookmaker interface.
 
+## Отдельная стратегия «53%» (`facecards_53`)
+
+В разделе **«Стратегия / фильтр»** добавлена самостоятельная стратегия **«53%»**. Это название исторической гипотезы, не гарантия вероятности и не безопасный догон. Прежние режимы и их сохранённые настройки остаются без изменений.
+
+- Используется только предыдущая финально подтверждённая рука Игрока N−1 с **ровно одной** картой A/K/Q/J; её масть назначается по неизменяемой таблице `backend/app/strategy_53.py`.
+- При **трёх картах** и нахождении подходящей карты **второй** зеркалится именно назначенная масть: ♥↔♠, ♦↔♣.
+- **После любой ничьей (X)** четыре следующие физические раздачи пропускаются. Если исход одной из четырёх предыдущих не подтверждён, прогноз не выдаётся.
+- **Прогрев 40 подряд завершённых уникальных раздач**, интервалы между финальными картами не более 185 секунд. При разрыве истории нужен новый непрерывный участок. Неполные карты не подставляются.
+- Пропуски не меняют шаг догона; WIN означает появление назначенной масти хотя бы на одной карте Игрока. Ставки и девятишаговые суммы управляются отдельно.
+- В архиве 3 982 раздач было 460 WIN из 868 сигналов (53,00%) и максимум пять наблюдаемых LOSE. Это лишь исследовательская статистика и не гарантирует шестой шаг в будущем.
+
 ## LIVE status and local update
 
 Choose **LIVE** before starting observation. The mode can change only while scanning is stopped. LIVE tries only a numbered upcoming game with an available prediction. It saves the game ID, suit, step and amount in SQLite before touching the outcome. A submission with an unknown acceptance status blocks further LIVE submissions, including after a backend restart. The stake step changes only when an accepted attempt has a confirmed final WIN or LOSE. The bookmaker's RUB interface is used as configured in the existing browser session; the bot does not switch wallets.
