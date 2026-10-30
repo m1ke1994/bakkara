@@ -151,7 +151,7 @@ def add_final(store, number, suits):
 def test_strategy_is_saved_and_first_signal_comes_after_eight_real_hands(tmp_path):
     path = tmp_path / "hot.sqlite3"
     store, engine = ObservationStore(path), Cycle18Engine(path)
-    assert len(engine.get_strategy()["options"]) == 4
+    assert len(engine.get_strategy()["options"]) == 5
     engine.save_strategy(STRATEGY_HOT_8)
     assert Cycle18Engine(path).get_strategy()["selected"] == STRATEGY_HOT_8
     engine.start_session()
