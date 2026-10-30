@@ -72,7 +72,12 @@ def test_pause_four_rounds_after_verified_draw():
     h[37]["baccarat_outcome"] = "PLAYER"
     h[36]["baccarat_outcome"] = "DRAW"  # N-5: allowed.
     assert predict_target(41, h, STRATEGY_53)["predicted_suit"] == "clubs"
-    h[40]["baccarat_outcome"] = ""  # Unknown is NOT proof of no draw.
+    h[40]["baccarat_outcome"] = ""  # Missing Banker outcome => conditional forecast.
+    partial = predict_target(41, h, STRATEGY_53)
+    assert partial["predicted_suit"] == "clubs"
+    assert not partial["draw_filter_verified"]
+    assert partial["unverified_outcome_round_numbers"] == [40]
+    h[39]["baccarat_outcome"] = "DRAW"
     assert predict_target(41, h, STRATEGY_53) is None
 
 
@@ -83,6 +88,29 @@ def test_unconfirmed_hand_or_time_gap_blocks_signal():
     h = history()
     h[27]["finished_at"] = (BASE + timedelta(minutes=27, seconds=190)).isoformat()
     assert predict_target(41, h, STRATEGY_53) is None
+
+
+def test_unknown_banker_outcomes_do_not_block_suit_forecast():
+    sources = history()
+    for item in sources.values():
+        item["baccarat_outcome"] = ""
+    signal = predict_target(41, sources, STRATEGY_53)
+    assert signal["predicted_suit"] == "clubs"
+    assert signal["unverified_outcome_round_numbers"] == [40, 39, 38, 37]
+    assert not signal["draw_filter_verified"]
+    sources[37]["baccarat_outcome"] = "DRAW"
+    assert predict_target(41, sources, STRATEGY_53) is None
+
+
+def test_real_card_examples_from_30_october():
+    sources = history()
+    sources[40] = row(40, [("J", "♣"), ("2", "♠"), ("8", "♠")], outcome="")
+    result = predict_target(41, sources, STRATEGY_53)
+    assert result["predicted_suit"] == "clubs"
+    sources[40] = row(40, [("3", "♥"), ("J", "♣"), ("7", "♥")], outcome="")
+    result = predict_target(41, sources, STRATEGY_53)
+    assert result["predicted_suit"] == "diamonds"
+    assert result["votes"][0]["mirrored"] is True
 
 
 def test_independent_strategy_selection_survives_restart(tmp_path):

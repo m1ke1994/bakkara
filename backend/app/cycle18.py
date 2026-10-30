@@ -158,10 +158,11 @@ def hot_window_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict
 
 
 def facecard_53_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict[str, Any]:
-    """Прогноз только по подтверждённым 40 прошлым физическим раздачам.
+    """Predict after 40 confirmed cards with a four-round observed draw pause.
 
-    Последние четыре исхода нужны для безопасного пропуска после X.
-    Отсутствующие / неоднозначные карты не интерпретируются как отсутствие X.
+    Baccarat Player cards may become final before Banker finishes. Do not
+    suppress every suit signal when Banker outcome is missing. Instead expose
+    the unverified draw status so the user sees a conditional forecast.
     """
     offsets = strategy_offsets(STRATEGY_53)
     previous = [((number - k - 1) % ROUND_MAX) + 1 for k in offsets]
@@ -177,13 +178,15 @@ def facecard_53_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dic
                 or following(round_number(left.get("round_number")) or 0) != round_number(right.get("round_number"))
                 or not 0 <= (second - first).total_seconds() <= MAX_GAP_53):
             return {**info, "predicted_suit": None, "reason": "Разрыв номеров/времени в 40 раздачах"}
+    unknown_draw_rounds = []
     for distance, source_number in enumerate(previous[:PAUSE_53], 1):
         result = sources[source_number].get("baccarat_outcome")
-        if result not in ("PLAYER", "BANKER", "DRAW"):
-            return {**info, "predicted_suit": None, "reason": f"Итог №{source_number} не подтверждён"}
         if result == "DRAW":
             return {**info, "predicted_suit": None,
-                    "reason": f"После ничьей №{source_number} пропуск четырёх раздач (N−{distance})"}
+                    "reason": f"После ничьей №{source_number} пропуск четырёх раздач (N−{distance})",
+                    "unverified_outcome_round_numbers": unknown_draw_rounds}
+        if result not in ("PLAYER", "BANKER"):
+            unknown_draw_rounds.append(source_number)
     trigger = map_facecard_53(verified_player_cards(sources[previous[0]]))
     if trigger is None:
         return {**info, "predicted_suit": None,
@@ -191,9 +194,12 @@ def facecard_53_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dic
     return {
         **info, **trigger,
         "source_round_number": previous[0],
+        "unverified_outcome_round_numbers": unknown_draw_rounds,
+        "draw_filter_verified": not unknown_draw_rounds,
         "votes": [{"offset": 1, "round_number": previous[0],
                    "suit": trigger["predicted_suit"], "card": trigger["trigger_card"],
-                   "mirrored": trigger["mirrored"]}],
+                   "mirrored": trigger["mirrored"],
+                   "unverified_outcome_round_numbers": unknown_draw_rounds}],
         "vote_counts": {}, "vote_count": 1, "partial_vote": False,
         "missing_source_round_numbers": [], "reason": "",
     }
@@ -419,6 +425,8 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
             "suit_counts": hot_state.get("suit_counts"),
             "count_spread": hot_state.get("count_spread"),
             "skip_reason": hot_state.get("reason", ""),
+            "unverified_outcome_round_numbers": hot_state.get("unverified_outcome_round_numbers", []),
+            "draw_filter_verified": hot_state.get("draw_filter_verified", True),
         })
     return previews
 
@@ -954,6 +962,10 @@ class Cycle18Engine:
             sources, votes = None, None
         result["source_round_numbers"] = sources if isinstance(sources, list) else [row.get("source_round_number")]
         result["votes"] = votes if isinstance(votes, list) else []
+        if result["votes"]:
+            result["unverified_outcome_round_numbers"] = (
+                result["votes"][0].get("unverified_outcome_round_numbers", []))
+            result["draw_filter_verified"] = not bool(result["unverified_outcome_round_numbers"])
         if result["votes"] and isinstance(result["votes"][0].get("cards"), list):
             counts = {suit: 0 for suit in SUIT_PRIORITY}
             for vote in result["votes"]:

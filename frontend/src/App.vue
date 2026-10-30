@@ -330,7 +330,7 @@ onBeforeUnmount(() => {
         <span class="diagnostic">{{ observing ? 'Сканирование активно: для смены фильтра сначала остановите его.' : (strategyDirty ? 'Выбор изменён — нажмите «Сохранить стратегию».' : 'Настройка хранится в базе данных бэкенда.') }}</span>
       </div>
       <p v-if="strategyNotice" class="strategy-notice">{{ strategyNotice }}</p>
-      <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — отдельная экспериментальная стратегия. Пропуски не считаются LOSE и не обнуляют шаг. Это историческое название, а не гарантированная вероятность.</p>
+      <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — экспериментальная стратегия. При неизвестном итоге Банкира прогноз рассчитывается условно: фильтр ничьих не подтверждён. Пропуски не считаются LOSE и не обнуляют шаг. Название не гарантирует точность.</p>
       <p v-if="activeStrategy === 'vote_3_10_24_31_40_step3_reverse'" class="diagnostic">Стратегия 5: после двух подтверждённых LOSE на 3-м шаге один раз преобразуем масти (текущий базовый прогноз + предыдущий базовый прогноз). Без подтверждений замена запрещена.</p>
       <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. Виртуальное голосование продолжает работать в паузе. В LIVE пропуск блокирует ставки по стратегии. Тест с первой раздачи не является прогнозом стратегии.</p>
     </section>
@@ -412,7 +412,7 @@ onBeforeUnmount(() => {
           <strong>{{ cycle18.ready ? 'Готов к прогнозированию' : 'Сбор истории' }}</strong>
         </div>
         <p v-if="activeStrategy === 'hot_suits_8_spread_6'" class="diagnostic">Алгоритм без преобразования мастей: перед раздачей N берём только 8 последних подряд завершённых раздач (N−1…N−8, временные разрывы не более 185 с). Считаем фактические ♥ ♦ ♣ ♠ во всех картах Игрока. Сигнал — самая частая масть, только при разнице MAX−MIN ≥ 6; равенства разрешаем в порядке ♥ → ♦ → ♣ → ♠. Иначе ПРОПУСК: шаг догона не меняется. Для 9 шагов укажи в калькуляторе соответствующий ряд ставок; выбор стратегии его автоматически не меняет. Это экспериментальное правило, не гарантия выигрыша.</p>
-        <p v-else-if="activeStrategy === 'facecards_53'" class="diagnostic">53%: 40 подтверждённых раздач, одна карта A/K/Q/J в прошлой руке Игрока, зеркало назначенной масти (только если вторая карта из трёх), пропуск 4 после X. При неполных картах или неподтверждённом итоге сигнала нет. Шаг и суммы остаются прежними.</p>
+        <p v-else-if="activeStrategy === 'facecards_53'" class="diagnostic">53%: 40 подтверждённых раздач, одна карта A/K/Q/J в прошлой руке Игрока, зеркало назначенной масти (если вторая из трёх), пропуск 4 после известной ничьей X. Без подтверждённого итога Банкира прогноз условный — не гарантируется правильность фильтра X. Шаг и суммы прежние.</p>
         <p v-else class="diagnostic">Подготовка: {{ cycle18.warmup_required ?? 20 }} уникальных подтверждённых рук. {{ activeStrategy === 'n18' ? 'Для игры N используем масть N−18.' : 'Для игры N голосуют масти N−3, N−10, N−24, N−31 и N−40 по исходной таблице. При равенстве: ♥ → ♦ → ♣ → ♠.' }} Пропущенный источник не заменяем соседним. Для голосования достаточно 3–4 проверенных источников только при строгом большинстве; при 5/5 действует прежнее правило равенства. Неполное голосование помечается отдельно. LIVE-ставка возможна только по подтверждённому прогнозу и открытому рынку.</p>
         <p v-if="currentForecast?.strategy_five_applied" class="diagnostic">Стратегия 5 · шаг 3: {{ suits[currentForecast.base_predicted_suit]?.[0] || '—' }} + {{ suits[currentForecast.strategy_five_previous_suit]?.[0] || '—' }} → {{ suits[currentForecast.predicted_suit]?.[0] || '—' }} · обратная таблица</p>
         <p v-if="activeStrategy === 'hot_suits_8_spread_6' && currentForecast" class="diagnostic">Текущая игра: {{ hotCountsDescription(currentForecast) }} · разброс {{ currentForecast.count_spread ?? '—' }} / 6. {{ currentForecast.available ? 'Сигнал: ' + (suits[currentForecast.predicted_suit]?.[1] || '—') : currentForecast.skip_reason || 'Ожидание полного окна' }}</p>
@@ -507,6 +507,7 @@ onBeforeUnmount(() => {
             <p v-if="currentForecast?.available && currentForecast.partial_vote" class="diagnostic">Частичное голосование: {{ currentForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(currentForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ currentForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else-if="activeStrategy === 'facecards_53'">Карта: {{ currentForecast?.votes?.[0]?.card || '—' }} · {{ currentForecast?.votes?.[0]?.mirrored ? 'зеркало' : 'без зеркала' }}</p>
+            <p v-if="activeStrategy === 'facecards_53' && currentForecast?.available && currentForecast?.unverified_outcome_round_numbers?.length" class="diagnostic">⚠ Условный прогноз: исходы №{{ currentForecast.unverified_outcome_round_numbers.join(', №') }} неизвестны. Нельзя исключить ничью X.</p>
              <p v-else>Источники: {{ sourceDescription(currentForecast) }}</p>
             <p v-if="currentForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(currentForecast) }}</p>
           </article>
@@ -523,6 +524,7 @@ onBeforeUnmount(() => {
             <p v-if="nextForecast?.available && nextForecast.partial_vote" class="diagnostic">Частичное голосование: {{ nextForecast.vote_count }}/5 подтверждённых источников. {{ missingSourcesDescription(nextForecast) }}</p>
             <p v-if="activeStrategy === 'n18'">Масть из раздачи №{{ nextForecast?.source_round_number || '—' }} (N−18)</p>
             <p v-else-if="activeStrategy === 'facecards_53'">Карта: {{ nextForecast?.votes?.[0]?.card || '—' }} · {{ nextForecast?.votes?.[0]?.mirrored ? 'зеркало' : 'без зеркала' }}</p>
+            <p v-if="activeStrategy === 'facecards_53' && nextForecast?.available && nextForecast?.unverified_outcome_round_numbers?.length" class="diagnostic">⚠ Условный прогноз: исходы №{{ nextForecast.unverified_outcome_round_numbers.join(', №') }} неизвестны. Нельзя исключить ничью X.</p>
              <p v-else>Источники: {{ sourceDescription(nextForecast) }}</p>
             <p v-if="nextForecast?.votes?.length > 1" class="diagnostic">{{ votesDescription(nextForecast) }}</p>
           </article>
