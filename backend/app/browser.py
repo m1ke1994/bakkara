@@ -995,24 +995,38 @@ class BrowserService:
         """Retain the old game page while the primary page advances to N+1."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 60
+        last_evidence: dict[str, Any] = {}
         try:
             while loop.time() < deadline and not page.is_closed():
                 snapshot = await self._inspect_game_dom(
                     settings.player_name_text, settings.banker_name_text, page=page)
+                last_evidence = {
+                    "player_cards": len(snapshot.get("cards") or []),
+                    "banker_cards": len(snapshot.get("banker_cards") or []),
+                    "banker_boxes": snapshot.get("banker_card_boxes", 0),
+                    "banker_pending": snapshot.get("banker_pending_card_slots", 0),
+                    "frames": snapshot.get("frame_count", 0),
+                    "caption": str(snapshot.get("finish_flag_text") or "")[:50],
+                }
                 if await self._confirm_outcome_from_snapshot(game, player_cards, snapshot, page=page):
                     return
                 await asyncio.sleep(0.15)
             self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
-                       "исход Банкира не подтверждён за 60 секунд; сохранён UNKNOWN.")
+                       f"исход Банкира не подтверждён за 60 секунд; UNKNOWN; "
+                       f"последний DOM: {last_evidence}.")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
-                       f"проверка исхода прервана ({type(exc).__name__}); сохранён UNKNOWN.")
+                       f"проверка исхода прервана ({type(exc).__name__}: {str(exc)[:140]}); UNKNOWN.")
         finally:
-            if not page.is_closed():
-                await page.close()
-            self._outcome_watchers.pop(game.game_id, None)
+            try:
+                if not page.is_closed():
+                    await page.close()
+            except Exception:
+                pass
+            finally:
+                self._outcome_watchers.pop(game.game_id, None)
 
     async def _handoff_outcome_page(self, game: Game, player_cards: list[dict[str, Any]]) -> None:
         """Move the primary observer to a fresh tab without losing the old DOM."""

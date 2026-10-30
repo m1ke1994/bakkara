@@ -907,7 +907,8 @@ class Cycle18Engine:
         pending_upcoming = [row for row in forecasts if row["result"] == "PENDING" and not row["target_game_id"]]
         audit_signature = (sid, strategy,
             tuple((row["game_id"], row["round_number"], row["cards_json"], row["calculation_status"],
-                   row["final_snapshot_reverified"], row["player_hand_final"], row["finished_at"]) for row in rows),
+                   row["final_snapshot_reverified"], row["player_hand_final"], row["finished_at"],
+                    row.get("banker_hand_final"), row.get("baccarat_outcome")) for row in rows),
             tuple((row["target_game_id"], row["predicted_suit"], row["result"]) for row in forecasts))
         if audit_signature != getattr(self, "_audit_signature", None):
             self._historical_audit = audit_history(self.path, sid, rows, strategy)
