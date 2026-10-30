@@ -13,7 +13,7 @@ from typing import Any
 
 from .history_audit import audit_history
 from .observation import evaluate_prediction, valid_card_rank
-from .suit_calculator import SUIT_SYMBOL_TO_NAME, calculate_cards_suit, normalize_suit
+from .suit_calculator import SUIT_SYMBOL_TO_NAME, calculate_cards_suit, calculate_suit, normalize_suit
 
 CYCLE = 18
 WARMUP = 20
@@ -25,11 +25,12 @@ STRATEGY_N18 = "n18"
 STRATEGY_VOTE = "vote_3_10_24_31_40"
 STRATEGY_VOTE_DRAW_12 = "vote_3_10_24_31_40_draw_diamond_12"
 STRATEGY_HOT_8 = "hot_suits_8_spread_6"
+STRATEGY_FIVE = "vote_3_10_24_31_40_step3_reverse"
 DRAW_DIAMOND_PAUSE_ROUNDS = 12
 HOT_WINDOW = 8
 HOT_MIN_SPREAD = 6
 HOT_MAX_GAP_SECONDS = 185
-VOTE_STRATEGIES = (STRATEGY_VOTE, STRATEGY_VOTE_DRAW_12)
+VOTE_STRATEGIES = (STRATEGY_VOTE, STRATEGY_VOTE_DRAW_12, STRATEGY_FIVE)
 AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES + (STRATEGY_HOT_8,)
 VOTE_OFFSETS = (3, 10, 24, 31, 40)
 SUIT_PRIORITY = ("hearts", "diamonds", "clubs", "spades")
@@ -42,6 +43,9 @@ STRATEGY_OPTIONS = (
     {"id": STRATEGY_HOT_8, "label": "Частые масти · 8 раздач / разница ≥6",
      "description": "Подсчёт реальных мастей восьми подряд завершённых рук; "
                     "сигнал только при разбросе частот от 6"},
+    {"id": STRATEGY_FIVE, "label": "Стратегия 5 · обратный 3-й шаг",
+     "description": "Голосование N−3/10/24/31/40; после двух подтверждённых LOSE "
+                    "на 3-м шаге преобразовать прогноз 3-го + прогноз 2-го; затем обычный алгоритм"},
 )
 
 
@@ -179,6 +183,9 @@ def predict_target(number: int, sources: dict[int, dict[str, Any]],
         if len(votes) != 1:
             return None
     elif len(votes) < 3:
+        return None
+    # Frozen five-source rule: missing source means no Strategy 5 signal.
+    if strategy == STRATEGY_FIVE and missing:
         return None
     counts = {suit: sum(vote["suit"] == suit for vote in votes) for suit in SUIT_PRIORITY}
     predicted = max(SUIT_PRIORITY, key=lambda suit: counts[suit])
@@ -367,6 +374,80 @@ def preview_two_rounds(current_round: int | None, sources: dict[int, dict[str, A
     return previews
 
 
+
+def strategy_five_past_outcome(db: sqlite3.Connection, sid: int, target: int,
+                               confirmed: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+    """Only previously published forecasts can count as a settled LOSE.
+
+    The Player hand must have been independently confirmed after publication;
+    historical backfills and guessed/missing cards are never counted.
+    """
+    records = db.execute(
+        "SELECT * FROM cycle18_forecasts WHERE session_id=? AND target_round_number=?",
+        (sid, target)).fetchall()
+    if len(records) != 1:
+        return None
+    prediction = dict(records[0])
+    hand = confirmed.get(target)
+    if (not hand or prediction["mode"] in ("FILTER", "MISSED")
+            or prediction["result"] not in ("PENDING", "WIN", "LOSE")
+            or prediction["target_game_id"] not in (None, hand["game_id"])):
+        return None
+    created = moment(prediction["created_at"])
+    finished = moment(hand.get("finished_at") or hand.get("observed_at"))
+    if not created or not finished or created >= finished:
+        return None
+    result = evaluate_prediction(
+        prediction["predicted_suit"], verified_player_cards(hand),
+        finished_confirmed=bool(hand.get("finished_at")),
+        player_hand_final=bool(hand.get("player_hand_final")),
+        final_snapshot_reverified=hand["final_snapshot_reverified"] == 1,
+    )
+    if result not in ("WIN", "LOSE"):
+        return None
+    if prediction["result"] in ("WIN", "LOSE") and prediction["result"] != result:
+        return None
+    prediction["settled_result"] = result
+    prediction["finished_moment"] = finished
+    return prediction
+
+
+def strategy_five_step_three(db: sqlite3.Connection, sid: int, target: int,
+                             base_suit: str, confirmed: dict[int, dict[str, Any]]
+                             ) -> tuple[str, bool, str | None]:
+    """At step 3: transform [current base prediction, preceding base prediction].
+
+    Only two timely, sequential, confirmed LOSE results authorize the
+    intervention. The fourth and subsequent steps use the usual majority.
+    """
+    second_number = ((target - 2) % ROUND_MAX) + 1
+    first_number = ((target - 3) % ROUND_MAX) + 1
+    older_number = ((target - 4) % ROUND_MAX) + 1
+    first = strategy_five_past_outcome(db, sid, first_number, confirmed)
+    second = strategy_five_past_outcome(db, sid, second_number, confirmed)
+    if not first or not second:
+        return base_suit, False, None
+    if first["settled_result"] != "LOSE" or second["settled_result"] != "LOSE":
+        return base_suit, False, None
+    if not 0 <= (second["finished_moment"] - first["finished_moment"]).total_seconds() <= 185:
+        return base_suit, False, None
+    older_recorded = db.execute(
+        "SELECT 1 FROM cycle18_forecasts WHERE session_id=? AND target_round_number=?",
+        (sid, older_number)).fetchone()
+    if older_recorded:
+        older = strategy_five_past_outcome(db, sid, older_number, confirmed)
+        if older is None:
+            return base_suit, False, None
+        older_gap = (first["finished_moment"] - older["finished_moment"]).total_seconds()
+        if 0 <= older_gap <= 185 and older["settled_result"] == "LOSE":
+            return base_suit, False, None
+    previous_base = second.get("base_predicted_suit") or second["predicted_suit"]
+    symbol = calculate_suit((base_suit, previous_base))
+    if symbol is None:
+        return base_suit, False, None
+    return SUIT_SYMBOL_TO_NAME[symbol], True, previous_base
+
+
 class Cycle18Engine:
     """A session is reset on every real observer start, not on each HTTP poll."""
 
@@ -407,6 +488,12 @@ class Cycle18Engine:
                 db.execute("ALTER TABLE cycle18_forecasts ADD COLUMN sources_json TEXT")
             if "votes_json" not in forecast_columns:
                 db.execute("ALTER TABLE cycle18_forecasts ADD COLUMN votes_json TEXT")
+            if "base_predicted_suit" not in forecast_columns:
+                db.execute("ALTER TABLE cycle18_forecasts ADD COLUMN base_predicted_suit TEXT")
+            if "strategy_five_applied" not in forecast_columns:
+                db.execute("ALTER TABLE cycle18_forecasts ADD COLUMN strategy_five_applied INTEGER NOT NULL DEFAULT 0")
+            if "strategy_five_previous_suit" not in forecast_columns:
+                db.execute("ALTER TABLE cycle18_forecasts ADD COLUMN strategy_five_previous_suit TEXT")
             db.execute("""CREATE TABLE IF NOT EXISTS bot_strategy_settings (
                 id INTEGER PRIMARY KEY CHECK(id=1),
                 strategy TEXT NOT NULL
@@ -555,16 +642,24 @@ class Cycle18Engine:
                 source_number = forecast["source_round_number"]
                 source = valid_hands[source_number]
                 pause = pause_for_round(target_number, pause_triggers)
+                base_suit = forecast["predicted_suit"]
+                chosen_suit, step_three, previous_base = (
+                    strategy_five_step_three(db, sid, target_number, base_suit, valid_hands)
+                    if strategy == STRATEGY_FIVE else (base_suit, False, None))
                 db.execute("""INSERT OR IGNORE INTO cycle18_forecasts
                     (session_id,source_game_id,anchor_game_id,source_round_number,
-                     target_round_number,predicted_suit,created_at,sources_json,votes_json,mode,reason)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                     target_round_number,predicted_suit,created_at,sources_json,votes_json,
+                     mode,reason,base_predicted_suit,strategy_five_applied,
+                     strategy_five_previous_suit)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (sid, source["game_id"], hand["game_id"],
-                     source_number, target_number, forecast["predicted_suit"],
+                     source_number, target_number, chosen_suit,
                      now.isoformat(),
                      json.dumps(forecast["source_round_numbers"]),
                      json.dumps(forecast["votes"], ensure_ascii=False),
-                     "FILTER" if pause else "UNLINKED", pause["reason"] if pause else ""))
+                     "FILTER" if pause else "UNLINKED", pause["reason"] if pause else "",
+                     base_suit if strategy == STRATEGY_FIVE else None,
+                     int(step_three), previous_base))
             # A completed hand always keeps its credit in the current session.
             # Neither missing physical round numbers nor future list shells
             # reset the counter. Old sessions are excluded by started_at.
@@ -706,7 +801,7 @@ class Cycle18Engine:
                 continue
             if previous and strategy != STRATEGY_HOT_8 and (
                 not self._close_in_time(previous, row)
-                or (strategy == STRATEGY_N18
+                or (strategy in (STRATEGY_N18, STRATEGY_FIVE)
                     and following(previous["target_round_number"]) != row["target_round_number"])
             ):
                 losing = 0
@@ -723,6 +818,17 @@ class Cycle18Engine:
         previews = (preview_two_rounds(current_number, valid_hands, strategy,
                                        observed_by_number)
                     if warmup_complete and not stopped_at else [])
+        if strategy == STRATEGY_FIVE:
+            # LIVE preview must agree with the immutable saved strategy signal.
+            saved_by_number = {row["target_round_number"]: row for row in forecasts
+                               if row["result"] == "PENDING"}
+            for preview in previews:
+                saved = saved_by_number.get(preview["target_round_number"])
+                if saved and preview["available"]:
+                    preview["predicted_suit"] = saved["predicted_suit"]
+                    preview["base_predicted_suit"] = saved.get("base_predicted_suit")
+                    preview["strategy_five_applied"] = bool(saved.get("strategy_five_applied"))
+                    preview["strategy_five_previous_suit"] = saved.get("strategy_five_previous_suit")
         if strategy == STRATEGY_VOTE_DRAW_12:
             for preview in previews:
                 pause = pause_for_round(preview["target_round_number"], pause_triggers)
@@ -790,6 +896,7 @@ class Cycle18Engine:
             "source_game_id", "anchor_game_id", "source_round_number",
             "target_round_number", "target_game_id", "predicted_suit",
             "created_at", "linked_at", "checked_at", "result", "mode", "reason", "step",
+            "base_predicted_suit", "strategy_five_applied", "strategy_five_previous_suit",
         )}
         try:
             sources = json.loads(row.get("sources_json") or "null")
