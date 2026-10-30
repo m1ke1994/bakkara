@@ -138,6 +138,13 @@ def test_draw_pause_is_exactly_four_physical_rounds_and_restarts_on_new_draw():
         assert predict_target(target, sources, STRATEGY_53) is None
 
 
+def test_strategy_53_uses_player_observation_time_when_banker_finishes_late():
+    sources = history()
+    # Banker for round 20 completes after round 21's Player hand.
+    sources[20]["finished_at"] = (BASE + timedelta(minutes=22)).isoformat()
+    assert predict_target(41, sources, STRATEGY_53)["predicted_suit"] == "clubs"
+
+
 def test_independent_strategy_selection_survives_restart(tmp_path):
     path = tmp_path / "observation.sqlite3"
     engine = Cycle18Engine(path)

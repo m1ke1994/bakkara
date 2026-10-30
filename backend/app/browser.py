@@ -946,7 +946,7 @@ class BrowserService:
                 or observed_url.path.rstrip("/") != expected_url.path.rstrip("/")):
             return None
         observed_player = snapshot.get("cards") or []
-        if (len(observed_player) == len(player_cards) and observed_player != player_cards):
+        if observed_player != player_cards:
             return None
         banker_cards = snapshot.get("banker_cards") or []
         resolved = resolved_baccarat_outcome(player_cards, banker_cards)
@@ -963,7 +963,7 @@ class BrowserService:
                     != expected_url.path.rstrip("/")):
                 return None
             reread_player = reread.get("cards") or []
-            if len(reread_player) == len(player_cards) and reread_player != player_cards:
+            if reread_player != player_cards:
                 return None
             snapshot = reread
         caption = str(snapshot.get("finish_flag_text") or "").strip().casefold()
@@ -1389,7 +1389,10 @@ class BrowserService:
                     .some(node => visible(node) && text(node).toLocaleLowerCase() === bankerName));
                   const bankerBoxes = [...(bankerSide?.querySelectorAll('.baccarat-player__card-box') || [])].filter(visible);
                   const banker_ranks = bankerBoxes.map(box => {
-                    const nodes = [box, ...box.querySelectorAll('*')];
+                    const nodes = [
+                      ...box.querySelectorAll('.baccarat-card__rank, [data-rank], [class*="card__value"], [class*="card-rank"]'),
+                      ...box.querySelectorAll('*'),
+                    ];
                     const node = nodes.find(node => visible(node) &&
                       (node.children.length === 0 || node.hasAttribute('data-rank')) &&
                       /^(?:A|[2-9]|10|J|Q|K)$/.test((node.getAttribute('data-rank') || text(node)).toUpperCase()));
@@ -1400,10 +1403,12 @@ class BrowserService:
                   let banker_pending_card_slots = 0;
                   for (const [index, box] of bankerBoxes.entries()) {
                     const rank = banker_ranks[index];
-                    const metadata = [box, ...box.querySelectorAll('*')].map(node => [
+                    // Ignore hidden backs of cards during Banker card flips.
+                    const metadata = [box, ...box.querySelectorAll('*')].filter(visible).map(node => [
                       node.getAttribute('class') || '', node.getAttribute('data-v-ico') || '',
                       node.getAttribute('data-suit') || '', node.getAttribute('href') || '',
-                      node.getAttribute('xlink:href') || '', node.textContent || '',
+                      node.getAttribute('xlink:href') || '',
+                      node.children.length === 0 ? text(node) : '',
                     ].join(' ')).join(' ').toLowerCase();
                     const suit = [
                       ['hearts', '♥', 'heart'], ['diamonds', '♦', 'diamond'],

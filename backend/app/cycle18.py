@@ -167,8 +167,10 @@ def facecard_53_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dic
         return {**info, "predicted_suit": None, "reason": "Нужны 40 подтверждённых подряд рук Игрока"}
     ordered = [sources[n] for n in reversed(previous)]
     for left, right in zip(ordered, ordered[1:]):
-        first = moment(left.get("finished_at") or left.get("observed_at"))
-        second = moment(right.get("finished_at") or right.get("observed_at"))
+        # Banker's result can be saved after the next Player hand.
+        # Use the verified Player observation time, not late Banker closure.
+        first = moment(left.get("observed_at") or left.get("finished_at"))
+        second = moment(right.get("observed_at") or right.get("finished_at"))
         if (first is None or second is None
                 or following(round_number(left.get("round_number")) or 0) != round_number(right.get("round_number"))
                 or not 0 <= (second - first).total_seconds() <= MAX_GAP_53):

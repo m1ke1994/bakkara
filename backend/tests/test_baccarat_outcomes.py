@@ -94,6 +94,31 @@ def test_strategy_53_waits_for_persisted_banker_outcome_then_survives_restart(tm
     assert ObservationStore(path).get("game-40")["baccarat_outcome"] == "BANKER"
 
 
+def test_banker_outcome_requires_exact_original_player_cards(tmp_path):
+    async def run():
+        service = object.__new__(BrowserService)
+        service.store = ObservationStore(tmp_path / "player-identity.sqlite3")
+        service.events = deque(maxlen=10)
+        service.state_version = 0
+        service.current_observation = {}
+        service._outcome_conflicts = set()
+        game = Game("hand-50", "https://example.test/hand-50", "", "50", "Идёт", 0)
+        player = hand("2", "3", "4")
+        banker = hand("A", "A", "3")
+        service.store.upsert(game, player, "CONFIRMED", "final Player", "CARDS_CONFIRMED",
+                             player_hand_final=True, final_snapshot_reverified=True)
+        for wrong in ([], hand("2", "3"), hand("2", "3", "5")):
+            result = await service._confirm_outcome_from_snapshot(
+                game, player, {"url": game.url, "cards": wrong, "banker_cards": banker})
+            assert result is None
+            assert service.store.get(game.game_id)["baccarat_outcome"] == "UNKNOWN"
+        valid = await service._confirm_outcome_from_snapshot(
+            game, player, {"url": game.url, "cards": player, "banker_cards": banker})
+        assert valid["baccarat_outcome"] == "PLAYER"
+
+    asyncio.run(run())
+
+
 def test_old_page_captures_late_banker_card_without_holding_next_page(tmp_path):
     async def run():
         class Page:
