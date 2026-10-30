@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 
 def audit_history(path, session_id, rows, strategy):
     from .cycle18 import (round_number, source_verified, predict_target, captured_cards,
-                          strategy_offsets, ROUND_MAX, hot_window_analysis, STRATEGY_HOT_8)
+                          strategy_offsets, ROUND_MAX, hot_window_analysis, STRATEGY_HOT_8,
+                          STRATEGY_FIVE)
     from .observation import evaluate_prediction
     counts = {}
     for row in rows:
@@ -31,19 +32,24 @@ def audit_history(path, session_id, rows, strategy):
             prediction = predict_target(number, sources, strategy) if counts[number] == 1 else None
             missing = [((number-offset-1) % ROUND_MAX)+1 for offset in strategy_offsets(strategy)
                        if ((number-offset-1) % ROUND_MAX)+1 not in sources]
-            suit = prediction["predicted_suit"] if prediction else None
+            saved = original.get(target["game_id"])
+            # Strategy 5 depends on the chronological LOSE state at publishing.
+            # Never pretend a retroactive base vote contains its step-3 filter.
+            suit = (saved["predicted_suit"] if saved else None) if strategy == STRATEGY_FIVE else (
+                prediction["predicted_suit"] if prediction else None)
             result = (evaluate_prediction(suit, captured_cards(target),
                 finished_confirmed=bool(target.get("finished_at")),
                 player_hand_final=bool(target.get("player_hand_final")),
                 final_snapshot_reverified=target.get("final_snapshot_reverified") == 1)
                 if suit else "UNKNOWN")
-            saved = original.get(target["game_id"])
             hot_reason = (hot_window_analysis(number, sources).get("reason", "")
                           if strategy == STRATEGY_HOT_8 and counts[number] == 1 else "")
             reason = ("Неоднозначный номер целевой раздачи" if counts[number] != 1 else
                       "Нет подтверждённых источников: " + ", ".join(map(str, missing)) if missing else
                       hot_reason if hot_reason else
                       "Окончательные карты цели не подтверждены" if not source_verified(target, strategy) else
+                      "Стратегия 5: сверка сохранённого прогноза" if saved and strategy == STRATEGY_FIVE else
+                      "Стратегия 5: не было своевременного прогноза; задний пересчёт невозможен" if strategy == STRATEGY_FIVE else
                       "Исторический пересчёт; исходный прогноз сохранён" if saved else
                       "Исторический пересчёт; своевременный прогноз не был записан")
             item = {"target_game_id": target["game_id"], "target_round_number": number,
