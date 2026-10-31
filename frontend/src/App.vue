@@ -346,6 +346,17 @@ onBeforeUnmount(() => {
         <p><strong>Стратегия №8:</strong> {{ eightPhaseLabel }} · виртуальных LOSE: {{ eightGate?.virtual_losses ?? 0 }}/3 · следующий денежный шаг: {{ eightGate?.step ?? 1 }}/9.</p>
         <p>Режим {{ live.mode }} · учтённых денежных шагов: {{ eightGate?.wagers ?? 0 }} · WIN {{ eightGate?.wins ?? 0 }} · LOSE {{ eightGate?.losses ?? 0 }}. В DEMO шаги моделируются; в LIVE учитываются только принятые и подтверждённые ставки.</p>
         <p>Перед LIVE сохраните в калькуляторе ровно 9 сумм. После девятого LOSE новые ставки блокируются до ручной проверки.</p>
+        <p v-if="live.mode === 'DEMO' && eightGate?.demo_plan_ready">ДЕМО, пересчёт по текущему сохранённому ряду: <strong>{{ eightGate.demo_profit }} ₽</strong>.</p>
+        <p v-else-if="live.mode === 'DEMO'">ДЕМО-прибыль появится после сохранения в калькуляторе ровно 9 ставок.</p>
+        <details v-if="eightGate?.recent_wagers?.length">
+          <summary>Шаги стратегии №8 (последние {{ eightGate.recent_wagers.length }})</summary>
+          <table class="history-table"><thead><tr><th>Раздача</th><th>Шаг</th><th>Сумма</th><th>Результат</th><th>Итог</th></tr></thead>
+          <tbody><tr v-for="bet in eightGate.recent_wagers" :key="bet.game_id">
+            <td>№{{ bet.round_number }}</td><td>{{ bet.step }}/9</td><td>{{ bet.amount ? bet.amount + ' ₽' : '—' }}</td>
+            <td :class="bet.result === 'WIN' ? 'win-text' : 'lose-text'">{{ bet.result }}</td>
+            <td>{{ bet.delta ? bet.delta + ' ₽' : '—' }}</td>
+          </tr></tbody></table>
+        </details>
       </div>
       <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — экспериментальная стратегия. При неизвестном итоге Банкира масть показывается только предварительно; сигнал и ставка ждут подтверждения четырёх исходов. Пропуски не считаются LOSE и не обнуляют шаг. Название не гарантирует точность.</p>
       <p v-if="activeStrategy === 'vote_3_10_24_31_40_step3_reverse'" class="diagnostic">Стратегия 5: после двух подтверждённых LOSE на 3-м шаге один раз преобразуем масти (текущий базовый прогноз + предыдущий базовый прогноз). Без подтверждений замена запрещена.</p>
