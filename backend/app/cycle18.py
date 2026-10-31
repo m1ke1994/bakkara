@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -864,19 +865,46 @@ class Cycle18Engine:
             # Reconstruct from immutable, verified forecasts and persisted attempts.
             # Do not use the general martingale step: it includes virtual LOSE.
             with sqlite3.connect(self.path) as gate_db:
-                gate_mode_row = gate_db.execute("SELECT mode FROM live_control WHERE id=1").fetchone()
+                tables = {row[0] for row in gate_db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                gate_mode_row = (gate_db.execute("SELECT mode FROM live_control WHERE id=1").fetchone()
+                                 if "live_control" in tables else None)
                 gate_mode = gate_mode_row[0] if gate_mode_row else "DEMO"
                 gate_db.row_factory = sqlite3.Row
-                attempts = {
+                attempts = ({
                     row["game_id"]: dict(row) for row in gate_db.execute(
                         "SELECT * FROM live_attempts WHERE strategy=? AND strategy_session_id=?",
                         (STRATEGY_EIGHT, sid)).fetchall()
-                }
+                } if "live_attempts" in tables else {})
+                saved_plan = (gate_db.execute(
+                    "SELECT payload FROM calculator_settings WHERE id=1").fetchone()
+                    if "calculator_settings" in tables else None)
             eight_progress = evaluate_eight(forecasts, attempts, mode=gate_mode)
             current_id = current.get("game_id") if current else None
             eight_gate = (eight_progress["before"].get(current_id)
                           or eight_progress["current"])
             eight_gate = {**eight_gate, "mode": gate_mode}
+            wager_history = [dict(item) for item in eight_progress["wager_history"]]
+            if gate_mode == "DEMO":
+                try:
+                    plan = json.loads(saved_plan["payload"]) if saved_plan else {}
+                    amounts = [Decimal(str(value)) for value in plan.get("row", [])]
+                    odds = Decimal(str(plan["odds"]))
+                    plan_ready = (int(plan.get("steps", 0)) == 9 and len(amounts) == 9
+                                  and odds > 1 and all(value > 0 for value in amounts))
+                except (ValueError, KeyError, TypeError, ArithmeticError):
+                    plan_ready = False
+                eight_gate["demo_plan_ready"] = plan_ready
+                if plan_ready:
+                    profit = Decimal("0")
+                    for wager in wager_history:
+                        stake = amounts[wager["step"] - 1]
+                        delta = (stake * (odds - 1) if wager["result"] == "WIN" else -stake)
+                        profit += delta
+                        wager["amount"] = str(stake)
+                        wager["delta"] = str(delta)
+                    eight_gate["demo_profit"] = str(profit.quantize(Decimal("0.01")))
+            eight_gate["recent_wagers"] = wager_history[-20:][::-1]
 
         checked = [row for row in forecasts if row["result"] in ("WIN", "LOSE")
                    and row["mode"] != "FILTER"]
