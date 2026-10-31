@@ -36,6 +36,10 @@ class LiveBets:
                 db.execute("ALTER TABLE live_attempts ADD COLUMN signal_source TEXT NOT NULL DEFAULT 'STRATEGY'")
             if "single_test_run_id" not in attempt_columns:
                 db.execute("ALTER TABLE live_attempts ADD COLUMN single_test_run_id TEXT")
+            if "strategy" not in attempt_columns:
+                db.execute("ALTER TABLE live_attempts ADD COLUMN strategy TEXT")
+            if "strategy_session_id" not in attempt_columns:
+                db.execute("ALTER TABLE live_attempts ADD COLUMN strategy_session_id INTEGER")
 
     def begin_single_stake_test(self) -> str:
         """Persist a one-attempt, 10 RUB test gate across process restarts."""
@@ -96,9 +100,13 @@ class LiveBets:
             return dict(row) if row else None
 
     def reserve(self, game_id: str, round_number: str, suit: str, amount: Decimal,
-                signal_source: str = "STRATEGY") -> bool:
+                signal_source: str = "STRATEGY", *, expected_step: int | None = None,
+                strategy: str | None = None, strategy_session_id: int | None = None) -> bool:
         if signal_source not in ("STRATEGY", "MANUAL_TEST"):
             raise ValueError("Недопустимый источник сигнала")
+        if expected_step is not None and (not 1 <= expected_step <= 9 or
+                                          strategy is None or strategy_session_id is None):
+            raise ValueError("Для шага стратегии требуется проверенная сессия и лимит 9")
         with sqlite3.connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             run_id, step = db.execute("SELECT single_test_run_id,step FROM live_control WHERE id=1").fetchone()
@@ -113,10 +121,13 @@ class LiveBets:
             if db.execute("SELECT 1 FROM live_attempts WHERE status IN ('PREPARING','SUBMITTING','UNKNOWN','ACCEPTED') "
                           "AND result IS NULL LIMIT 1").fetchone():
                 return False
-            db.execute("INSERT INTO live_attempts(game_id,round_number,suit,amount,step,status,signal_source,single_test_run_id,created_at) "
-                       "VALUES(?,?,?,?,?,'PREPARING',?,?,?)",
+            if expected_step is not None:
+                step = expected_step
+                db.execute("UPDATE live_control SET step=? WHERE id=1", (step,))
+            db.execute("INSERT INTO live_attempts(game_id,round_number,suit,amount,step,status,signal_source,single_test_run_id,created_at,strategy,strategy_session_id) "
+                       "VALUES(?,?,?,?,?,'PREPARING',?,?,?,?,?)",
                        (game_id,round_number,suit,str(amount),step,signal_source,run_id,
-                        datetime.now(timezone.utc).isoformat()))
+                        datetime.now(timezone.utc).isoformat(),strategy,strategy_session_id))
             return True
 
     def update(self, game_id: str, status: str, detail: str = ""):
