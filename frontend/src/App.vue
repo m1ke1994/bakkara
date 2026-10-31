@@ -408,9 +408,9 @@ onBeforeUnmount(() => {
         <p v-else-if="live.mode === 'DEMO'">ДЕМО-прибыль появится после сохранения в калькуляторе ровно 9 ставок.</p>
         <details v-if="eightGate?.recent_wagers?.length">
           <summary>Шаги стратегии №8 (последние {{ eightGate.recent_wagers.length }})</summary>
-          <table class="history-table"><thead><tr><th>Раздача</th><th>Шаг</th><th>Сумма</th><th>Результат</th><th>Итог</th></tr></thead>
+          <table class="history-table"><thead><tr><th>Раздача</th><th>Прогноз масти</th><th>Шаг</th><th>Сумма</th><th>Результат</th><th>Итог</th></tr></thead>
           <tbody><tr v-for="bet in eightGate.recent_wagers" :key="bet.game_id">
-            <td>№{{ bet.round_number }}</td><td>{{ bet.step }}/9</td><td>{{ bet.amount ? bet.amount + ' ₽' : '—' }}</td>
+            <td>№{{ bet.round_number }}</td><td :class="isRedSuit(bet.predicted_suit) ? 'red-suit' : 'black-suit'">{{ suits[bet.predicted_suit]?.[0] || '—' }}</td><td>{{ bet.step }}/9</td><td>{{ bet.amount ? bet.amount + ' ₽' : '—' }}</td>
             <td :class="bet.result === 'WIN' ? 'win-text' : 'lose-text'">{{ bet.result }}</td>
             <td>{{ bet.delta ? bet.delta + ' ₽' : '—' }}</td>
           </tr></tbody></table>
