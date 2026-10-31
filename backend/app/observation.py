@@ -1028,14 +1028,19 @@ class ObservationStore:
         with sqlite3.connect(self.path, timeout=3) as db:
             db.row_factory = sqlite3.Row
             row = db.execute("""SELECT round_number,cards_json,player_hand_final,
-                final_snapshot_reverified,baccarat_outcome,banker_cards_json
+                final_snapshot_reverified,baccarat_outcome,banker_cards_json,
+                banker_hand_final,player_score,banker_score,outcome_confirmed_at
                 FROM observations WHERE game_id=?""", (game_id,)).fetchone()
             if (row is None or row["round_number"] != round_number
                     or not row["player_hand_final"] or row["final_snapshot_reverified"] != 1
                     or json.loads(row["cards_json"]) != player_cards):
                 return None
             if (row["baccarat_outcome"] != outcome
-                    or json.loads(row["banker_cards_json"] or "[]") != banker_cards):
+                    or json.loads(row["banker_cards_json"] or "[]") != banker_cards
+                    or not row["banker_hand_final"]
+                    or row["player_score"] != str(player_points)
+                    or row["banker_score"] != str(banker_points)
+                    or not row["outcome_confirmed_at"]):
                 now = datetime.now(timezone.utc).isoformat()
                 db.execute("""UPDATE observations SET baccarat_outcome=?,banker_cards_json=?,
                     banker_hand_final=1,player_score=?,banker_score=?,

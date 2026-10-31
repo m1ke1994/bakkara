@@ -1,5 +1,6 @@
 """Card-derived Baccarat outcomes and the independent Banker observer."""
 import asyncio
+import sqlite3
 from collections import deque
 
 import pytest
@@ -153,6 +154,24 @@ def test_outcome_is_stored_on_exact_verified_game_and_survives_restart(tmp_path)
     assert corrected["baccarat_outcome"] == "UNKNOWN"
     assert corrected["banker_hand_final"] is False
     assert corrected["banker_cards"] == []
+
+
+def test_reconfirmation_repairs_incomplete_outcome_metadata(tmp_path):
+    path = tmp_path / "history.sqlite3"
+    store = ObservationStore(path)
+    game = Game("hand-42", "https://example.test/hand-42", "", "42", "Завершена", 0)
+    player, banker = hand("9", "9"), hand("K", "6")
+    store.upsert(game, player, "CONFIRMED", "final Player", "CARDS_CONFIRMED",
+                 player_hand_final=True, final_snapshot_reverified=True)
+    assert store.confirm_baccarat_outcome(game.game_id, game.round_number, player, banker)
+    with sqlite3.connect(path) as db:
+        db.execute("""UPDATE observations SET banker_hand_final=0, banker_score='',
+            outcome_confirmed_at=NULL WHERE game_id=?""", (game.game_id,))
+    assert store.confirm_baccarat_outcome(game.game_id, game.round_number, player, banker)
+    saved = ObservationStore(path).get(game.game_id)
+    assert saved["banker_hand_final"] is True
+    assert saved["banker_score"] == "6"
+    assert saved["outcome_confirmed_at"]
 
 
 def test_strategy_53_waits_for_persisted_banker_outcome_then_survives_restart(tmp_path):
