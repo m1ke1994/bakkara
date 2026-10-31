@@ -170,7 +170,7 @@ def test_two_to_three_card_dom_update_reaches_history_state_api_and_prediction(t
                 )
 
             await page.route("http://127.0.0.1:8010/api/state", serve_api)
-            await page.route("http://127.0.0.1:8010/api/history?limit=200", serve_history)
+            await page.route("http://127.0.0.1:8010/api/history?limit=10000", serve_history)
             await page.goto("http://127.0.0.1:5174/", wait_until="domcontentloaded")
             history_table = page.get_by_role("table", name="История наблюдений")
             row_cells = history_table.locator("tbody tr").first.locator("td")
@@ -181,7 +181,9 @@ def test_two_to_three_card_dom_update_reaches_history_state_api_and_prediction(t
             card_lines = [await card.bounding_box() for card in await player_cards.all()]
             assert max(line["y"] for line in card_lines) - min(line["y"] for line in card_lines) < 1
             assert await row_cells.nth(3).inner_text() == "♣"
-            assert await row_cells.count() == 4  # Legacy links are not cycle18 forecasts.
+            assert await row_cells.nth(4).inner_text() == "—"  # No forecast saved for this game.
+            assert await row_cells.nth(5).inner_text() == "—"  # No LIVE bet was placed.
+            assert await row_cells.count() == 6  # Forecast and actual LIVE bet are separate columns.
             assert await history_table.locator("tbody tr").count() == 1
             await chromium.close()
 
@@ -283,7 +285,7 @@ def test_a_b_c_prediction_chain_reaches_api_and_rendered_history(tmp_path, monke
                 )
 
             await page.route("http://127.0.0.1:8010/api/state", serve_api)
-            await page.route("http://127.0.0.1:8010/api/history?limit=200", serve_history)
+            await page.route("http://127.0.0.1:8010/api/history?limit=10000", serve_history)
             await page.goto("http://127.0.0.1:5174/", wait_until="domcontentloaded")
             history_table = page.get_by_role("table", name="История наблюдений")
             b_row = history_table.locator("tbody tr").filter(has=page.locator('a[href*="screen-b"]'))
@@ -294,7 +296,10 @@ def test_a_b_c_prediction_chain_reaches_api_and_rendered_history(tmp_path, monke
             assert (await cards.nth(1).inner_text()).startswith("10")
             cells = b_row.locator("td")
             assert await cells.nth(3).locator(".calculated-suit").count() == 1
-            assert await cells.count() == 4  # The legacy WIN is API history, not an executed cycle18 signal.
+            assert "♠" in await cells.nth(4).inner_text()  # Old pre-hand incoming prediction.
+            assert "старый прогноз" in await cells.nth(4).inner_text()
+            assert await cells.nth(5).inner_text() == "—"
+            assert await cells.count() == 6  # The legacy WIN is API history, not an executed cycle18 signal.
             assert await history_table.locator("tbody tr").count() == 2
             await chromium.close()
 
