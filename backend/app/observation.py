@@ -1092,7 +1092,78 @@ class ObservationStore:
         return dict(self._record(row), **self._incoming_predictions([game_id]).get(game_id, {}),
                     **self._outgoing_predictions([game_id]).get(game_id, {}))
 
+    @staticmethod
+    def _batched_game_ids(game_ids: list[str], size: int = 400):
+        """Avoid SQLite variable limits when retrieving 10,000 history entries."""
+        for start in range(0, len(game_ids), size):
+            yield game_ids[start:start + size]
+
+    def _saved_forecasts_for_history(self, game_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Read only actually saved predictions for the exact target game ID.
+
+        Do not reconstruct a prediction from the final cards, the current
+        strategy, a round number or an audit backfill. When the forecast was
+        created after the hand finished, it is not a historical pre-hand signal.
+        """
+        if not game_ids:
+            return {}
+        snapshots: dict[str, dict[str, Any]] = {}
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "cycle18_forecasts" in tables and "cycle18_sessions" in tables:
+                for group in self._batched_game_ids(game_ids):
+                    placeholders = ",".join("?" for _ in group)
+                    saved = db.execute(f"""
+                        SELECT f.target_game_id, f.predicted_suit, f.result,
+                               f.mode, f.created_at, f.session_id,
+                               s.strategy, o.finished_at AS target_finished_at,
+                               o.observed_at AS target_observed_at
+                        FROM cycle18_forecasts f
+                        JOIN cycle18_sessions s ON s.id=f.session_id
+                        JOIN observations o ON o.game_id=f.target_game_id
+                        WHERE f.target_game_id IN ({placeholders})
+                          AND f.mode NOT IN ('MISSED', 'UNLINKED')
+                          AND f.predicted_suit IS NOT NULL
+                        ORDER BY f.created_at ASC, f.session_id ASC
+                    """, group).fetchall()
+                    for row in saved:
+                        game_id = row["target_game_id"]
+                        if game_id in snapshots:
+                            continue  # Preserve the first recorded pre-hand forecast.
+                        created = row["created_at"]
+                        finished = row["target_finished_at"] or row["target_observed_at"]
+                        if not created or not finished or created > finished:
+                            continue
+                        snapshots[game_id] = {
+                            "forecast_suit": row["predicted_suit"],
+                            "forecast_source": "STRATEGY",
+                            "forecast_strategy": row["strategy"],
+                            "forecast_result": row["result"],
+                            "forecast_mode": row["mode"],
+                            "forecast_created_at": created,
+                        }
+            if "live_attempts" in tables:
+                for group in self._batched_game_ids(game_ids):
+                    placeholders = ",".join("?" for _ in group)
+                    bets = db.execute(f"""
+                        SELECT game_id,suit,amount,step,status,result,signal_source
+                        FROM live_attempts WHERE game_id IN ({placeholders})
+                    """, group).fetchall()
+                    for bet in bets:
+                        snapshots.setdefault(bet["game_id"], {}).update({
+                            "bet_suit": bet["suit"],
+                            "bet_amount": bet["amount"],
+                            "bet_step": bet["step"],
+                            "bet_status": bet["status"],
+                            "bet_result": bet["result"],
+                            "bet_source": bet["signal_source"],
+                        })
+        return snapshots
+
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
+        limit = min(10_000, max(1, int(limit)))
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute("""SELECT game_id,url,round_number,discovered_at,finished_at,cards_json,
@@ -1105,8 +1176,28 @@ class ObservationStore:
         ids = [row["game_id"] for row in rows]
         incoming = self._incoming_predictions(ids)
         outgoing = self._outgoing_predictions(ids)
-        return [dict(self._record(row), **incoming.get(row["game_id"], {}),
-                     **outgoing.get(row["game_id"], {})) for row in rows]
+        saved = self._saved_forecasts_for_history(ids)
+        history_rows = []
+        for row in rows:
+            game_id = row["game_id"]
+            item = dict(self._record(row), **incoming.get(game_id, {}),
+                        **outgoing.get(game_id, {}))
+            item.update({
+                "forecast_suit": None, "forecast_source": None,
+                "forecast_strategy": None, "forecast_result": None,
+                "forecast_mode": None, "forecast_created_at": None,
+                "bet_suit": None, "bet_amount": None, "bet_step": None,
+                "bet_status": None, "bet_result": None, "bet_source": None,
+            })
+            item.update(saved.get(game_id, {}))
+            # Older versions stored a separate N -> N+1 forecast chain.
+            # Label that provenance instead of pretending it is the current vote.
+            if not item["forecast_suit"] and item.get("incoming_prediction"):
+                item["forecast_suit"] = item["incoming_prediction"]
+                item["forecast_source"] = "LEGACY"
+                item["forecast_result"] = item.get("prediction_result")
+            history_rows.append(item)
+        return history_rows
 
     def finished_game_ids(self) -> set[str]:
         """IDs with a confirmed final Player hand; incomplete finished rows are recoverable."""
@@ -1196,9 +1287,12 @@ class ObservationStore:
             if game_ids is None:
                 rows = db.execute("SELECT * FROM predictions").fetchall()
             else:
-                placeholders = ",".join("?" for _ in game_ids)
-                rows = db.execute(f"SELECT * FROM predictions WHERE target_game_id IN ({placeholders})",
-                                  game_ids).fetchall()
+                rows = []
+                for group in self._batched_game_ids(game_ids):
+                    placeholders = ",".join("?" for _ in group)
+                    rows.extend(db.execute(
+                        f"SELECT * FROM predictions WHERE target_game_id IN ({placeholders})",
+                        group).fetchall())
         return {row["target_game_id"]: {
             "source_game_id": row["source_game_id"],
             "source_round_number": row["source_round_number"],
@@ -1223,9 +1317,12 @@ class ObservationStore:
             if game_ids is None:
                 rows = db.execute("SELECT * FROM predictions").fetchall()
             else:
-                placeholders = ",".join("?" for _ in game_ids)
-                rows = db.execute(f"SELECT * FROM predictions WHERE source_game_id IN ({placeholders})",
-                                  game_ids).fetchall()
+                rows = []
+                for group in self._batched_game_ids(game_ids):
+                    placeholders = ",".join("?" for _ in group)
+                    rows.extend(db.execute(
+                        f"SELECT * FROM predictions WHERE source_game_id IN ({placeholders})",
+                        group).fetchall())
         return {row["source_game_id"]: {
             "outgoing_prediction": row["predicted_suit"],
             "outgoing_target_game_id": row["target_game_id"],
