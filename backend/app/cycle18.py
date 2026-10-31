@@ -15,6 +15,7 @@ from .history_audit import audit_history
 from .observation import evaluate_prediction, valid_card_rank
 from .suit_calculator import SUIT_SYMBOL_TO_NAME, calculate_cards_suit, calculate_suit, normalize_suit
 from .strategy_53 import MAX_GAP_53, PAUSE_53, WARMUP_53, map_facecard_53
+from .strategy_eight import STRATEGY_EIGHT, evaluate_eight
 
 CYCLE = 18
 WARMUP = 20
@@ -32,7 +33,7 @@ DRAW_DIAMOND_PAUSE_ROUNDS = 12
 HOT_WINDOW = 8
 HOT_MIN_SPREAD = 6
 HOT_MAX_GAP_SECONDS = 185
-VOTE_STRATEGIES = (STRATEGY_VOTE, STRATEGY_VOTE_DRAW_12, STRATEGY_FIVE)
+VOTE_STRATEGIES = (STRATEGY_VOTE, STRATEGY_VOTE_DRAW_12, STRATEGY_FIVE, STRATEGY_EIGHT)
 AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES + (STRATEGY_HOT_8, STRATEGY_53)
 VOTE_OFFSETS = (3, 10, 24, 31, 40)
 SUIT_PRIORITY = ("hearts", "diamonds", "clubs", "spades")
@@ -48,6 +49,9 @@ STRATEGY_OPTIONS = (
     {"id": STRATEGY_FIVE, "label": "Стратегия 5 · обратный 3-й шаг",
      "description": "Голосование N−3/10/24/31/40; после двух подтверждённых LOSE "
                     "на 3-м шаге преобразовать прогноз 3-го + прогноз 2-го; затем обычный алгоритм"},
+    {"id": STRATEGY_EIGHT, "label": "Стратегия №8 · вход после 3 LOSE",
+     "description": "Голосование N−3/10/24/31/40; 3 виртуальных LOSE до входа; "
+                    "максимум 9 денежных шагов. После WIN снова ждать 3 LOSE."},
     {"id": STRATEGY_53, "label": "53%",
      "description": "16 соответствий A/K/Q/J; зеркало для средней из трёх; пропуск 4 игр после X; прогрев 40"},
 )
@@ -853,6 +857,27 @@ class Cycle18Engine:
                 for row in forecasts
             ])
 
+
+        eight_progress = None
+        eight_gate = None
+        if strategy == STRATEGY_EIGHT:
+            # Reconstruct from immutable, verified forecasts and persisted attempts.
+            # Do not use the general martingale step: it includes virtual LOSE.
+            with sqlite3.connect(self.path) as gate_db:
+                gate_mode_row = gate_db.execute("SELECT mode FROM live_control WHERE id=1").fetchone()
+                gate_mode = gate_mode_row[0] if gate_mode_row else "DEMO"
+                gate_db.row_factory = sqlite3.Row
+                attempts = {
+                    row["game_id"]: dict(row) for row in gate_db.execute(
+                        "SELECT * FROM live_attempts WHERE strategy=? AND strategy_session_id=?",
+                        (STRATEGY_EIGHT, sid)).fetchall()
+                }
+            eight_progress = evaluate_eight(forecasts, attempts, mode=gate_mode)
+            current_id = current.get("game_id") if current else None
+            eight_gate = (eight_progress["before"].get(current_id)
+                          or eight_progress["current"])
+            eight_gate = {**eight_gate, "mode": gate_mode}
+
         checked = [row for row in forecasts if row["result"] in ("WIN", "LOSE")
                    and row["mode"] != "FILTER"]
         wins = sum(row["result"] == "WIN" for row in checked)
@@ -898,6 +923,19 @@ class Cycle18Engine:
                     preview["base_predicted_suit"] = saved.get("base_predicted_suit")
                     preview["strategy_five_applied"] = bool(saved.get("strategy_five_applied"))
                     preview["strategy_five_previous_suit"] = saved.get("strategy_five_previous_suit")
+        if strategy == STRATEGY_EIGHT:
+            for preview in previews:
+                if preview["phase"] == "CURRENT":
+                    preview["entry_paused"] = not eight_gate["bet_allowed"]
+                    preview["virtual_losses"] = eight_gate["virtual_losses"]
+                    preview["real_step"] = eight_gate["step"]
+                    preview["entry_phase"] = eight_gate["phase"]
+                    preview["available"] = bool(preview["available"] and eight_gate["bet_allowed"])
+                    if preview["entry_paused"]:
+                        preview["reason"] = ("Ждём 3 виртуальных LOSE подряд" if eight_gate["phase"] == "WAITING"
+                                             else "Достигнут лимит 9 шагов; требуется ручная проверка")
+                else:
+                    preview["entry_phase"] = "PROVISIONAL"
         if strategy == STRATEGY_VOTE_DRAW_12:
             for preview in previews:
                 pause = pause_for_round(preview["target_round_number"], pause_triggers)
@@ -923,6 +961,7 @@ class Cycle18Engine:
             "captured_count": captured_total, "verified_count": verified_total,
             "ready": warmup_complete and not stopped_at,
             "pause_enabled": strategy == STRATEGY_VOTE_DRAW_12,
+            "strategy_eight": eight_gate,
             "pause_triggers": pause_triggers[-25:],
             "filter_skipped_count": sum(row["mode"] == "FILTER" for row in forecasts),
             "filter_skipped_wins": sum(row["mode"] == "FILTER" and row["result"] == "WIN" for row in forecasts),
@@ -999,6 +1038,7 @@ class Cycle18Engine:
             "confirmed_warmup_count": 0,
             "captured_count": 0, "verified_count": 0,
             "pause_enabled": strategy == STRATEGY_VOTE_DRAW_12,
+            "strategy_eight": None,
             "pause_triggers": [], "filter_skipped_count": 0,
             "filter_skipped_wins": 0, "filter_skipped_losses": 0,
             "unconfirmed_forecasts": [],
