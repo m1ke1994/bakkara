@@ -970,7 +970,8 @@ class BrowserService:
                 return None
             reread_player = reread.get("cards") or []
             if reread_player != player_cards:
-                return None
+                if not (allow_missing_player and not reread_player and reread.get("finished")):
+                    return None
             snapshot = reread
         caption = str(snapshot.get("finish_flag_text") or "").strip().casefold()
         explicit = ("DRAW" if caption in ("ничья", "draw", "tie") else
@@ -997,12 +998,22 @@ class BrowserService:
                        f"карты Игрока и Банкира подтверждены.")
         return result
 
-    async def _watch_outcome(self, game: Game, player_cards: list[dict[str, Any]], page: Page) -> None:
-        """Retain the old game page while the primary page advances to N+1."""
+    async def _watch_outcome(
+        self, game: Game, player_cards: list[dict[str, Any]], page: Page,
+        *, verified_before_handoff: bool = False,
+    ) -> None:
+        """Keep old game DOM until Banker completes, without delaying next round."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 60
         last_evidence: dict[str, Any] = {}
-        original_player_seen = False
+        # The primary scanner already verified the Player cards in this exact
+        # page before handing it to the watcher; they may vanish immediately.
+        actual = urlparse(getattr(page, "url", ""))
+        expected = urlparse(game.url)
+        original_player_seen = bool(
+            verified_before_handoff and actual.netloc == expected.netloc
+            and actual.path.rstrip("/") == expected.path.rstrip("/")
+        )
         try:
             while loop.time() < deadline and not page.is_closed():
                 snapshot = await self._inspect_game_dom(
@@ -1058,7 +1069,8 @@ class BrowserService:
                     await next_page.bring_to_front()
                 finally:
                     self._opening_primary_page = False
-            task = asyncio.create_task(self._watch_outcome(game, list(player_cards), old_page))
+            task = asyncio.create_task(self._watch_outcome(
+                game, list(player_cards), old_page, verified_before_handoff=True))
             self._outcome_watchers[game.game_id] = (old_page, task)
             self.event("INFO", f"Раздача №{game.round_number}: наблюдаем Банкира в сохранённой вкладке; "
                        "основная вкладка переходит к следующей игре.")

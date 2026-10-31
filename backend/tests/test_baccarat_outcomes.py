@@ -242,6 +242,58 @@ def test_banker_only_snapshot_without_prior_player_identity_is_not_trusted(tmp_p
     asyncio.run(run())
 
 
+
+def test_banker_dom_available_immediately_after_player_disappears_at_handoff(tmp_path):
+    """There may be no Player node left on the first outcome-watcher poll."""
+    async def run():
+        class Page:
+            def __init__(self, url):
+                self.url = url
+                self.closed = False
+            def is_closed(self):
+                return self.closed
+            async def close(self):
+                self.closed = True
+            async def bring_to_front(self):
+                pass
+
+        class Context:
+            async def new_page(self):
+                return Page("about:blank")
+
+        game = Game("hand-650", "https://example.test/hand-650", "", "650", "Идёт", 0)
+        player = hand("2", "3", "4")
+        banker = hand("A", "A", "3")
+        service = object.__new__(BrowserService)
+        service.store = ObservationStore(tmp_path / "early-disappear.sqlite3")
+        service.store.upsert(game, player, "CONFIRMED", "Final Player", "CARDS_CONFIRMED",
+                             player_hand_final=True, final_snapshot_reverified=True)
+        old = Page(game.url)
+        service.page = old
+        service.context = Context()
+        service.page_lock = asyncio.Lock()
+        service.events = deque(maxlen=20)
+        service.state_version = 0
+        service.current_observation = {"game_id": game.game_id}
+        service._outcome_watchers = {}
+        service._opening_primary_page = False
+
+        async def inspect(_player, _banker, *, page):
+            assert page is old
+            return {"url": game.url, "cards": [], "banker_cards": banker,
+                    "finished": True, "finish_flag_text": "Победа"}
+
+        service._inspect_game_dom = inspect
+        await service._handoff_outcome_page(game, player)
+        task = service._outcome_watchers[game.game_id][1]
+        await asyncio.wait_for(task, timeout=2)
+        saved = service.store.get(game.game_id)
+        assert saved["baccarat_outcome"] == "PLAYER"
+        assert saved["banker_cards"] == banker
+
+    asyncio.run(run())
+
+
 def test_old_page_captures_late_banker_card_without_holding_next_page(tmp_path):
     async def run():
         class Page:
