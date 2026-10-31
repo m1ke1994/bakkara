@@ -1,4 +1,9 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+from app.live_bets import LiveBets
+from app.observation import ObservationStore
+from app.cycle18 import Cycle18Engine
 
 from app.cycle18 import AVAILABLE_STRATEGIES, STRATEGY_EIGHT, strategy_offsets, strategy_warmup
 from app.strategy_eight import MAX_STEPS, evaluate_eight
@@ -84,3 +89,32 @@ def test_live_inconsistent_settlement_blocks_future_money():
     status = evaluate_eight(rows, attempts, mode="LIVE")
     assert status["current"]["phase"] == "BLOCKED"
     assert not status["current"]["bet_allowed"]
+
+
+
+def test_strategy_eight_can_refresh_without_live_tables(tmp_path):
+    path = tmp_path / "only-observer.sqlite3"
+    ObservationStore(path)
+    engine = Cycle18Engine(path)
+    engine.save_strategy(STRATEGY_EIGHT)
+    engine.start_session()
+    snapshot = engine.refresh()
+    assert snapshot["strategy"] == STRATEGY_EIGHT
+    assert snapshot["strategy_eight"]["phase"] == "WAITING"
+    assert snapshot["strategy_eight"]["mode"] == "DEMO"
+    assert snapshot["strategy_eight"]["demo_plan_ready"] is False
+
+
+def test_live_attempts_persist_strategy_and_correct_step(tmp_path):
+    ledger = LiveBets(tmp_path / "ledger.sqlite3")
+    ledger.mode("LIVE")
+    assert ledger.reserve("game-4", "4", "hearts", Decimal("15"),
+                          expected_step=1, strategy=STRATEGY_EIGHT, strategy_session_id=7)
+    saved = ledger.get_attempt("game-4")
+    assert saved["strategy"] == STRATEGY_EIGHT
+    assert saved["strategy_session_id"] == 7
+    assert saved["step"] == 1
+    ledger.update("game-4", "ACCEPTED")
+    assert ledger.settle("game-4", "LOSE", 9)
+    assert ledger.snapshot()["step"] == 2
+    assert not ledger.settle("game-4", "WIN", 9)
