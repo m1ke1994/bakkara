@@ -1193,9 +1193,13 @@ class ObservationStore:
             # Older versions stored a separate N -> N+1 forecast chain.
             # Label that provenance instead of pretending it is the current vote.
             if not item["forecast_suit"] and item.get("incoming_prediction"):
-                item["forecast_suit"] = item["incoming_prediction"]
-                item["forecast_source"] = "LEGACY"
-                item["forecast_result"] = item.get("prediction_result")
+                created = item.get("prediction_created_at")
+                finished = item.get("finished_at") or item.get("observed_at")
+                if created and finished and created <= finished:
+                    item["forecast_suit"] = item["incoming_prediction"]
+                    item["forecast_source"] = "LEGACY"
+                    item["forecast_result"] = item.get("prediction_result")
+                    item["forecast_created_at"] = created
             history_rows.append(item)
         return history_rows
 
@@ -1300,6 +1304,7 @@ class ObservationStore:
             "target_round_number": row["target_round_number"],
             "predicted_suit": row["predicted_suit"],
             "incoming_prediction": row["predicted_suit"],
+            "prediction_created_at": row["created_at"],
             "actual_player_cards": json.loads(row["actual_player_cards"] or "null"),
             "prediction_result": row["prediction_result"],
             "prediction_reason": row["reason"],
