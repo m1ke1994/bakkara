@@ -458,7 +458,9 @@ class BrowserService:
             return
 
         first_round_test = bool(config.get("warmup_test"))
-        if first_round_test and self.cycle_engine.get_strategy()["selected"] == STRATEGY_EIGHT:
+        selected_strategy = (self.cycle_engine.get_strategy().get("selected")
+                             if callable(getattr(self.cycle_engine, "get_strategy", None)) else None)
+        if first_round_test and selected_strategy == STRATEGY_EIGHT:
             self.event("WARNING", "Стратегия №8: ручной тест первой раздачи отключите перед LIVE; "
                        "он обходит обязательные три виртуальных LOSE.")
             return
