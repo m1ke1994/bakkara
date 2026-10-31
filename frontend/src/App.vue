@@ -87,13 +87,15 @@ const strategyNotice = ref('')
 const strategyInfo = computed(() => state.value.strategy || {})
 const activeStrategy = computed(() => cycle18.value.session_id
   ? cycle18.value.strategy : (strategyInfo.value.selected || 'n18'))
-const strategyLabel = computed(() => activeStrategy.value === 'n18'
+const strategyLabel = computed(() => activeStrategy.value === 'vote_3_10_24_31_40_after_3_losses'
+  ? 'Стратегия №8 · вход после 3 LOSE' : activeStrategy.value === 'n18'
   ? 'Цикл N−18' : activeStrategy.value === 'facecards_53'
     ? '53%' : activeStrategy.value === 'hot_suits_8_spread_6'
     ? 'Частые масти · 8 раздач / разница ≥6' : activeStrategy.value.endsWith('_draw_diamond_12')
       ? 'Голосование + ничья ♦ / пропуск 12' : activeStrategy.value === 'vote_3_10_24_31_40_step3_reverse'
         ? 'Стратегия 5 · обратный 3-й шаг' : 'Голосование N−3/10/24/31/40')
-const strategyShortLabel = computed(() => activeStrategy.value === 'n18' ? 'цикл 18'
+const strategyShortLabel = computed(() => activeStrategy.value === 'vote_3_10_24_31_40_after_3_losses' ? 'стратегия 8'
+  : activeStrategy.value === 'n18' ? 'цикл 18'
   : activeStrategy.value === 'facecards_53' ? '53%'
   : activeStrategy.value === 'hot_suits_8_spread_6' ? 'частые масти'
   : activeStrategy.value === 'vote_3_10_24_31_40_step3_reverse' ? 'стратегия 5' : '5 циклов')
@@ -104,6 +106,7 @@ const strategyOptions = [
   { id: 'vote_3_10_24_31_40_draw_diamond_12', label: 'Голосование + ничья ♦ / пропуск 12', detail: 'После подтверждённой ничьей с ♦ у Игрока не ставить в 12 следующих раздачах; новые ничьи внутри паузы не продлевают её' },
   { id: 'hot_suits_8_spread_6', label: 'Частые масти · 8 раздач / разница ≥6', detail: 'Без таблицы преобразования: 8 подряд финальных рук Игрока, сумма фактических мастей, разброс ≥6. Иначе пропуск, шаг догона сохраняется.' },
   { id: 'vote_3_10_24_31_40_step3_reverse', label: 'Стратегия 5 · обратный 3-й шаг', detail: 'После двух подтверждённых LOSE на третьем шаге: таблица[прогноз шага 3 + прогноз шага 2]. С четвёртого шага — обычное голосование N−3/10/24/31/40. Подготовка 40 рук.' },
+  { id: 'vote_3_10_24_31_40_after_3_losses', label: 'Стратегия №8 · вход после 3 LOSE', detail: 'Голосование N−3/10/24/31/40. Ожидаем 3 подтверждённых виртуальных LOSE, затем максимум 9 денежных шагов. После WIN ожидание начинается снова. После 9 LOSE — остановка.' },
   { id: 'facecards_53', label: '53%', detail: 'Одна A/K/Q/J из предыдущей руки Игрока; зеркало выходной масти для средней из трёх; пропуск 4 после ничьей; прогрев 40.' },
 ]
 const sourceDescription = forecast => (forecast?.source_round_numbers || [forecast?.source_round_number])
@@ -124,12 +127,14 @@ const missingSourcesDescription = forecast => (forecast?.missing_sources || [])
 const forecastUnavailableTitle = forecast => {
   if (activeStrategy.value === 'facecards_53' && forecast?.pause_remaining) return 'Пауза после ничьей X'
   if (activeStrategy.value === 'facecards_53' && forecast?.provisional_suit) return 'Ожидаем исходы Банкира'
+  if (forecast?.entry_paused) return 'Прогноз есть · денежный вход запрещён'
   if (forecast?.filter_paused) return 'Фильтр: пропуск ставки'
   if (forecast?.missing_sources?.length) return 'Ожидаем подтверждения источника'
   if (forecast?.skip_reason) return 'Пропуск по условиям стратегии'
   return 'Прогноз пока недоступен'
 }
 const forecastUnavailableDescription = forecast => {
+  if (forecast?.entry_paused) return forecast.reason || 'Ожидаем три виртуальных LOSE'
   if (forecast?.filter_paused) return forecast.reason || 'Действует пауза фильтра'
   if (forecast?.missing_sources?.length) return missingSourcesDescription(forecast)
   // A fully verified 8-hand window with spread < 6 is a SKIP, not missing data.
@@ -137,6 +142,8 @@ const forecastUnavailableDescription = forecast => {
 }
 
 const cycleStats = computed(() => cycle18.value.statistics || {})
+const eightGate = computed(() => cycle18.value.strategy_eight || null)
+const eightPhaseLabel = computed(() => ({ WAITING: 'Ожидаем виртуальные LOSE', BETTING: 'Вход разрешён', EXHAUSTED: 'Лимит 9 шагов исчерпан', BLOCKED: 'Несовпадение LIVE-истории: блокировка' }[eightGate.value?.phase] || 'Ожидание'))
 const currentForecast = computed(() => cycle18.value.ready
   ? cycle18.value.live_preview?.find(item => item.phase === 'CURRENT') : null)
 const nextForecast = computed(() => cycle18.value.ready
@@ -314,8 +321,8 @@ onBeforeUnmount(() => {
       </nav>
     </header>
     <section class="events" aria-label="Текущий режим работы">
-      <div class="section-title"><h2>Режим: ДЕМО</h2><span class="standalone-label">Только наблюдение</span></div>
-      <p class="diagnostic">Калькулятор и наблюдение работают без денежных действий. Отправка реальных ставок в этой версии отсутствует.</p>
+      <div class="section-title"><h2>Режим: {{ live.mode }}</h2><span class="standalone-label">{{ live.mode === "DEMO" ? "Без денежных отправок" : "Реальный купон букмекера" }}</span></div>
+      <p class="diagnostic">{{ live.mode === "DEMO" ? "Виртуальные прогнозы и расчёты без реальных ставок." : "LIVE может отправлять настоящие ставки. При неизвестном принятии ставки повторная отправка заблокирована." }}</p>
     </section>
     <section class="cards">
       <article><span>Сервер</span><strong :class="badge(state.backend)">{{ label('backend', state.backend) }}</strong></article>
@@ -335,6 +342,11 @@ onBeforeUnmount(() => {
         <span class="diagnostic">{{ observing ? 'Сканирование активно: для смены фильтра сначала остановите его.' : (strategyDirty ? 'Выбор изменён — нажмите «Сохранить стратегию».' : 'Настройка хранится в базе данных бэкенда.') }}</span>
       </div>
       <p v-if="strategyNotice" class="strategy-notice">{{ strategyNotice }}</p>
+      <div v-if="activeStrategy === 'vote_3_10_24_31_40_after_3_losses'" class="diagnostic" data-testid="strategy-eight-status">
+        <p><strong>Стратегия №8:</strong> {{ eightPhaseLabel }} · виртуальных LOSE: {{ eightGate?.virtual_losses ?? 0 }}/3 · следующий денежный шаг: {{ eightGate?.step ?? 1 }}/9.</p>
+        <p>Режим {{ live.mode }} · учтённых денежных шагов: {{ eightGate?.wagers ?? 0 }} · WIN {{ eightGate?.wins ?? 0 }} · LOSE {{ eightGate?.losses ?? 0 }}. В DEMO шаги моделируются; в LIVE учитываются только принятые и подтверждённые ставки.</p>
+        <p>Перед LIVE сохраните в калькуляторе ровно 9 сумм. После девятого LOSE новые ставки блокируются до ручной проверки.</p>
+      </div>
       <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — экспериментальная стратегия. При неизвестном итоге Банкира масть показывается только предварительно; сигнал и ставка ждут подтверждения четырёх исходов. Пропуски не считаются LOSE и не обнуляют шаг. Название не гарантирует точность.</p>
       <p v-if="activeStrategy === 'vote_3_10_24_31_40_step3_reverse'" class="diagnostic">Стратегия 5: после двух подтверждённых LOSE на 3-м шаге один раз преобразуем масти (текущий базовый прогноз + предыдущий базовый прогноз). Без подтверждений замена запрещена.</p>
       <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. Виртуальное голосование продолжает работать в паузе. В LIVE пропуск блокирует ставки по стратегии. Тест с первой раздачи не является прогнозом стратегии.</p>
@@ -512,6 +524,7 @@ onBeforeUnmount(() => {
               {{ suits[currentForecast.predicted_suit]?.[0] }} <small>{{ suits[currentForecast.predicted_suit]?.[1] }}</small>
             </div>
             <div v-else class="forecast-unavailable">{{ forecastUnavailableTitle(currentForecast) }}</div>
+             <p v-if="currentForecast?.entry_paused && currentForecast?.predicted_suit" class="diagnostic">Виртуальный прогноз (без ставки): {{ suits[currentForecast.predicted_suit]?.[0] }} · {{ suits[currentForecast.predicted_suit]?.[1] }}</p>
             <p v-if="currentForecast && !currentForecast.available" class="diagnostic">{{ forecastUnavailableDescription(currentForecast) }}</p>
             <p v-if="activeStrategy === 'hot_suits_8_spread_6' && currentForecast?.suit_counts" class="diagnostic">
               Частоты мастей: {{ hotCountsDescription(currentForecast) }} · разброс {{ currentForecast.count_spread }} (нужно ≥6).
