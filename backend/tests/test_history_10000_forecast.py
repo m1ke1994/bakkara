@@ -20,13 +20,13 @@ def make_archive(tmp_path, count=1250):
                 cards_json, completeness, player_hand_final, final_snapshot_reverified,
                 calculated_suit, calculation_status)
                VALUES (?,?,?,?,?,?,?,'CONFIRMED',1,1,'hearts','complete')""",
-            (
+            [(
                 f"round-{i}", f"https://example.invalid/baccara/{i}", str(i),
                 (start + timedelta(minutes=i - 1)).isoformat(),
                 (start + timedelta(minutes=i)).isoformat(),
                 (start + timedelta(minutes=i)).isoformat(),
                 '[{"rank":"A","suit":"hearts"},{"rank":"2","suit":"spades"}]'
-            ) for i in range(1, count + 1)
+            ) for i in range(1, count + 1)]
         )
         cursor = db.execute(
             "INSERT INTO cycle18_sessions(started_at,stopped_at,strategy) VALUES(?,?,?)",
