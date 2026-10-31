@@ -89,6 +89,7 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
                 continue
         wagers += 1
         wager_history.append({"game_id": game_id, "round_number": forecast.get("target_round_number"),
+                              "predicted_suit": forecast.get("predicted_suit"),
                               "step": step, "result": result})
         if result == "WIN":
             wins += 1
