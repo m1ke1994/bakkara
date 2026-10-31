@@ -310,7 +310,12 @@ def test_empty_rescan_does_not_erase_known_cards_and_saves_game_metadata(tmp_pat
     assert (record['player_score'], record['banker_score']) == ('7', '4')
     assert record['time'] == '00:05'
     assert record['scan_result'] == 'CARDS_NOT_FOUND'
-    assert store.get(game.game_id) == record
+    # History now includes additional persisted forecast/bet columns.
+    # The lightweight single-game getter retains its previous contract.
+    current = store.get(game.game_id)
+    assert all(current[key] == value for key, value in record.items() if key in current)
+    assert record["forecast_suit"] is None
+    assert record["bet_suit"] is None
 
 
 def test_finished_but_incomplete_hand_remains_recoverable_until_final_cards(tmp_path):
