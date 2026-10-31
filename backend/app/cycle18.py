@@ -575,6 +575,8 @@ class Cycle18Engine:
             db.execute("INSERT OR IGNORE INTO bot_strategy_settings(id,strategy) VALUES(1,?)",
                        (STRATEGY_N18,))
             db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_target ON cycle18_forecasts(session_id,target_round_number)")
+            # Archive lookups join by exact target_game_id across all sessions.
+            db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_game ON cycle18_forecasts(target_game_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_status ON cycle18_forecasts(session_id,result)")
 
     def get_strategy(self) -> dict[str, Any]:
