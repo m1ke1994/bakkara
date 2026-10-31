@@ -95,7 +95,9 @@ def test_unconfirmed_hand_or_time_gap_blocks_signal():
     h[40]["final_snapshot_reverified"] = 0
     assert predict_target(41, h, STRATEGY_53) is None
     h = history()
-    h[27]["finished_at"] = (BASE + timedelta(minutes=27, seconds=190)).isoformat()
+    # A genuine gap in Player observation time must block the signal.
+    # Banker's finished_at can legitimately be written much later.
+    h[27]["observed_at"] = (BASE + timedelta(minutes=27, seconds=190)).isoformat()
     assert predict_target(41, h, STRATEGY_53) is None
 
 

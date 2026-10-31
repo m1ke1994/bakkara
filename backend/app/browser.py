@@ -937,9 +937,14 @@ class BrowserService:
 
     async def _confirm_outcome_from_snapshot(
         self, game: Game, player_cards: list[dict[str, Any]], snapshot: dict[str, Any],
-        *, page: Page | None = None,
+        *, page: Page | None = None, allow_missing_player: bool = False,
     ) -> dict[str, Any] | None:
-        """Persist only a complete Banker hand from the same game URL."""
+        """Persist complete Banker cards only when the game identity was verified.
+
+        The watcher may lose Player markup AFTER seeing the exact saved Player
+        hand in this same un-navigated page. A terminal Banker-only snapshot
+        is then acceptable; mismatching partial Player cards never are.
+        """
         observed_url = urlparse(snapshot.get("url") or game.url)
         expected_url = urlparse(game.url)
         if (observed_url.netloc != expected_url.netloc
@@ -947,7 +952,8 @@ class BrowserService:
             return None
         observed_player = snapshot.get("cards") or []
         if observed_player != player_cards:
-            return None
+            if not (allow_missing_player and not observed_player and snapshot.get("finished")):
+                return None
         banker_cards = snapshot.get("banker_cards") or []
         resolved = resolved_baccarat_outcome(player_cards, banker_cards)
         if resolved is None:
@@ -996,10 +1002,15 @@ class BrowserService:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 60
         last_evidence: dict[str, Any] = {}
+        original_player_seen = False
         try:
             while loop.time() < deadline and not page.is_closed():
                 snapshot = await self._inspect_game_dom(
                     settings.player_name_text, settings.banker_name_text, page=page)
+                # Do not trust a Banker-only DOM after navigation or without
+                # first seeing the exact original Player hand in this page.
+                if (snapshot.get("cards") or []) == player_cards:
+                    original_player_seen = True
                 last_evidence = {
                     "player_cards": len(snapshot.get("cards") or []),
                     "banker_cards": len(snapshot.get("banker_cards") or []),
@@ -1008,7 +1019,10 @@ class BrowserService:
                     "frames": snapshot.get("frame_count", 0),
                     "caption": str(snapshot.get("finish_flag_text") or "")[:50],
                 }
-                if await self._confirm_outcome_from_snapshot(game, player_cards, snapshot, page=page):
+                if await self._confirm_outcome_from_snapshot(
+                    game, player_cards, snapshot, page=page,
+                    allow_missing_player=original_player_seen,
+                ):
                     return
                 await asyncio.sleep(0.15)
             self.event("WARNING", f"Раздача №{game.round_number}, ID {game.game_id}: "
@@ -1524,14 +1538,23 @@ class BrowserService:
         )
         totals = {name: sum(frame.get("counts", {}).get(name, 0) for frame in frames) for name in count_names}
         player_frames = [frame for frame in frames if frame.get("counts", {}).get("player_fields")]
-        # Each frame result is an atomic synchronous JS snapshot. Keep the most
-        # complete one intact; never combine card positions captured in different frames.
-        data_frame = max(player_frames, key=lambda frame: (
-            frame.get("counts", {}).get("player_card_boxes", 0),
-            frame.get("counts", {}).get("player_card_ranks", 0)
-            + frame.get("counts", {}).get("player_card_suits", 0),
-            frame.get("captured_at_ms", 0),
-        ), default=None)
+        banker_frames = [frame for frame in frames if frame.get("counts", {}).get("banker_names")]
+        # Keep each atomic frame intact. On a finished game the Player widget
+        # can disappear before the Banker result is displayed. Use Banker-only
+        # data then, but never merge Player and Banker from different frames.
+        if player_frames:
+            data_frame = max(player_frames, key=lambda frame: (
+                frame.get("counts", {}).get("player_card_boxes", 0),
+                frame.get("counts", {}).get("player_card_ranks", 0)
+                + frame.get("counts", {}).get("player_card_suits", 0),
+                frame.get("captured_at_ms", 0),
+            ))
+        else:
+            data_frame = max(banker_frames, key=lambda frame: (
+                len(frame.get("banker_cards") or []),
+                frame.get("banker_card_boxes", 0),
+                frame.get("captured_at_ms", 0),
+            ), default=None)
         diagnostic_frame = data_frame or next((frame for frame in frames if frame.get("fragment")), None)
         selected_counts = (data_frame or {}).get("counts", {})
         if not selected_counts.get("player_fields"):

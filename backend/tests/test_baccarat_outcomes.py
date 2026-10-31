@@ -176,6 +176,72 @@ def test_banker_outcome_requires_exact_original_player_cards(tmp_path):
     asyncio.run(run())
 
 
+
+def test_banker_only_terminal_snapshot_accepted_after_original_player_seen(tmp_path):
+    """DOM hides Player after it was confirmed; late Banker result is still usable."""
+    async def run():
+        class Page:
+            url = "https://example.test/hand-600"
+            closed = False
+            def is_closed(self):
+                return self.closed
+            async def close(self):
+                self.closed = True
+        game = Game("hand-600", Page.url, "", "600", "Идёт", 0)
+        player = hand("2", "3", "4")
+        banker = hand("A", "A", "3")
+        service = object.__new__(BrowserService)
+        service.store = ObservationStore(tmp_path / "hidden-player.sqlite3")
+        service.store.upsert(game, player, "CONFIRMED", "Player final", "CARDS_CONFIRMED",
+                             player_hand_final=True, final_snapshot_reverified=True)
+        service.events = deque(maxlen=20)
+        service.state_version = 0
+        service.current_observation = {"game_id": game.game_id}
+        service._outcome_conflicts = set()
+        service._outcome_watchers = {}
+        page = Page()
+        seen = 0
+
+        async def inspect(_player, _banker, *, page):
+            nonlocal seen
+            seen += 1
+            if seen == 1:
+                return {"url": game.url, "cards": player, "banker_cards": [], "finished": False}
+            return {"url": game.url, "cards": [], "banker_cards": banker,
+                    "finished": True, "finish_flag_text": "Победа"}
+
+        service._inspect_game_dom = inspect
+        await asyncio.wait_for(service._watch_outcome(game, player, page), 3)
+        saved = service.store.get(game.game_id)
+        assert saved["baccarat_outcome"] == "PLAYER"
+        assert saved["banker_cards"] == banker
+        assert saved["banker_hand_final"] is True
+        assert seen >= 2 and page.closed
+
+    asyncio.run(run())
+
+
+def test_banker_only_snapshot_without_prior_player_identity_is_not_trusted(tmp_path):
+    async def run():
+        service = object.__new__(BrowserService)
+        service.store = ObservationStore(tmp_path / "unverified-page.sqlite3")
+        service.events = deque(maxlen=10)
+        service.state_version = 0
+        service.current_observation = None
+        game = Game("hand-601", "https://example.test/hand-601", "", "601", "Идёт", 0)
+        player = hand("2", "3", "4")
+        banker = hand("A", "A", "3")
+        service.store.upsert(game, player, "CONFIRMED", "Player final", "CARDS_CONFIRMED",
+                             player_hand_final=True, final_snapshot_reverified=True)
+        result = await service._confirm_outcome_from_snapshot(
+            game, player, {"url": game.url, "cards": [], "banker_cards": banker,
+                           "finished": True}, allow_missing_player=False)
+        assert result is None
+        assert service.store.get(game.game_id)["baccarat_outcome"] == "UNKNOWN"
+
+    asyncio.run(run())
+
+
 def test_old_page_captures_late_banker_card_without_holding_next_page(tmp_path):
     async def run():
         class Page:
