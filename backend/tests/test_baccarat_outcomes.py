@@ -72,6 +72,39 @@ def test_chromium_banker_dom_three_cards_ignores_hidden_suit_faces():
 
 
 
+def test_chromium_reads_banker_only_terminal_dom_after_player_hidden():
+    """The 53% outcome observer must still parse Banker when Player is gone."""
+    async def run():
+        service = object.__new__(BrowserService)
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            service.page = page
+            try:
+                await page.set_content("""
+                    <style>.baccarat-player,.baccarat-player__cards,
+                    .baccarat-player__card-box {display:block}</style>
+                    <div class="baccarat-player">
+                      <span class="baccarat-player__name">Банкир</span>
+                      <ul class="baccarat-player__cards">
+                        <li class="baccarat-player__card-box suit-hearts"><span class="baccarat-card__rank">A</span></li>
+                        <li class="baccarat-player__card-box suit-clubs"><span class="baccarat-card__rank">A</span></li>
+                        <li class="baccarat-player__card-box suit-diamonds"><span class="baccarat-card__rank">5</span></li>
+                      </ul>
+                    </div>
+                    <span class="baccarat-panel__caption">Ничья</span>
+                """)
+                result = await service._inspect_game_dom("Игрок", "Банкир")
+                assert result["cards"] == []
+                assert result["banker_cards"] == hand("A", "A", "5")
+                assert result["banker_card_boxes"] == 3
+                assert result["finished"] is True
+            finally:
+                await browser.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("player,banker,outcome,scores", [
     (hand("9", "9"), hand("K", "6"), "PLAYER", (8, 6)),
     (hand("3", "4"), hand("2", "3", "A"), "PLAYER", (7, 6)),
