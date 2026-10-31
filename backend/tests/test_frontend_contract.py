@@ -27,6 +27,10 @@ def test_history_hides_win_lose_until_cycle18_ready_and_shows_only_cycle18_outco
     assert '№ раздачи</th>' in app
     assert 'Карты Игрока</th>' in app
     assert 'Расчётная масть</th>' in app
+    assert 'Масть прогноза</th>' in app
+    assert 'LIVE-ставка</th>' in app
+    assert 'item.forecast_suit' in app
+    assert 'item.bet_suit' in app
     assert 'WIN / LOSE ({{ strategyShortLabel }})</th>' in app
     assert 'item.player_cards' in app
     assert 'history-card-line' in app
@@ -78,17 +82,20 @@ def test_dashboard_has_two_numbered_suit_forecasts_immediately_above_history():
     assert 'История виртуальных результатов' not in template
 
 
-def test_history_supports_search_and_up_to_three_hundred_rows_without_live_poll_bloat():
+def test_history_supports_search_and_up_to_ten_thousand_rows_without_live_poll_bloat():
     app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
     main = (Path(__file__).resolve().parents[1] / 'app' / 'main.py').read_text(encoding='utf-8')
     cycle = (Path(__file__).resolve().parents[1] / 'app' / 'cycle18.py').read_text(encoding='utf-8')
-    assert 'api}/api/history?limit=300' in app
+    assert 'api}/api/history?limit=${isFull ? HISTORY_LIMIT : HISTORY_PAGE_SIZE}' in app
+    assert 'HISTORY_LIMIT = 10_000' in app
+    assert 'HISTORY_PAGE_SIZE = 200' in app
     assert 'historySearch' in app
-    assert 'v-for="item in filteredHistory"' in app
+    assert 'v-for="item in visibleHistory"' in app
     assert 'history-full-scroll' in app
-    assert 'async def history(limit: int = 300)' in main
-    assert 'safe_limit = min(300, max(1, limit))' in main
-    assert '[-300:][::-1]' in cycle
+    assert 'downloadHistoryCsv' in app
+    assert 'async def history(limit: int = 10_000)' in main
+    assert 'safe_limit = min(10_000, max(1, limit))' in main
+    assert '[-300:][::-1]' in cycle  # The frequent LIVE state poll stays small.
 
 
 def test_saved_strategy_has_draw_diamond_filter_and_selects_40_hand_voting():
