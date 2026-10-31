@@ -36,6 +36,7 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
     virtual_losses = 0
     step = 1
     wagers = wins = losses = entries = 0
+    wager_history: list[dict[str, Any]] = []
     prior: dict[str, dict[str, Any]] = {}
     previous_virtual_time = None
 
@@ -87,6 +88,8 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
                 phase = "BLOCKED"
                 continue
         wagers += 1
+        wager_history.append({"game_id": game_id, "round_number": forecast.get("target_round_number"),
+                              "step": step, "result": result})
         if result == "WIN":
             wins += 1
             phase = "WAITING"
@@ -98,4 +101,5 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
             step += 1
             if step > MAX_STEPS:
                 phase = "EXHAUSTED"
-    return {"before": prior, "current": state(), "mode": mode}
+    return {"before": prior, "current": state(), "mode": mode,
+            "wager_history": wager_history}
