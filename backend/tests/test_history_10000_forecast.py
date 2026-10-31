@@ -36,7 +36,7 @@ def make_archive(tmp_path, count=1250):
         # Exactly linked, saved predictions: one real, one discovered after
         # the round ended, and one virtual skip. The same ID must be used.
         for i, predicted, mode, minutes_offset in [
-            (1, "spades", "LIVE", -0.5),
+            (1, "diamonds", "LIVE", -0.5),
             (2, "diamonds", "BACKFILL", 2),
             (3, "clubs", "FILTER", -0.5),
         ]:
@@ -48,20 +48,20 @@ def make_archive(tmp_path, count=1250):
                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (sid, f"source-{i}", f"anchor-{i}", i - 1, i, f"round-{i}",
                  predicted, (start + timedelta(minutes=i + minutes_offset)).isoformat(),
-                 "WIN" if i == 3 else "LOSE", mode)
+                 "LOSE", mode)
             )
         db.execute(
             """INSERT INTO predictions
                (source_game_id,source_round_number,target_game_id,target_round_number,
                 predicted_suit,prediction_result,created_at)
                VALUES(?,?,?,?,?,?,?)""",
-            ("round-3", "3", "round-4", "4", "diamonds", "WIN",
+            ("round-3", "3", "round-4", "4", "diamonds", "LOSE",
              (start + timedelta(minutes=3, seconds=30)).isoformat())
         )
         db.execute(
             """INSERT INTO live_attempts
                (game_id,round_number,suit,amount,step,status,result,signal_source)
-               VALUES('round-1','1','spades','15',1,'ACCEPTED','LOSE','STRATEGY')"""
+               VALUES('round-1','1','diamonds','15',1,'ACCEPTED','LOSE','STRATEGY')"""
         )
     return store
 
@@ -81,11 +81,11 @@ def test_history_uses_saved_pre_hand_predictions_and_separates_live_bet(tmp_path
 
     original = history["round-1"]
     assert original["calculated_suit"] == "hearts"
-    assert original["forecast_suit"] == "spades"
+    assert original["forecast_suit"] == "diamonds"
     assert original["forecast_source"] == "STRATEGY"
     assert original["forecast_strategy"] == STRATEGY_EIGHT
     assert original["forecast_result"] == "LOSE"
-    assert original["bet_suit"] == "spades"
+    assert original["bet_suit"] == "diamonds"
     assert original["bet_status"] == "ACCEPTED"
     assert original["bet_step"] == 1
     assert original["bet_amount"] == "15"
