@@ -1,6 +1,6 @@
 <script setup>
 import StakePlanner from './StakePlanner.vue'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { shouldApplySnapshot } from './stateVersion.js'
 
 const api = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8010'
@@ -151,9 +151,14 @@ const nextForecast = computed(() => cycle18.value.ready
 // Read-only outcomes: the selected strategy and the backend provide all WIN/LOSE data.
 const verifiedPredictionRows = computed(() => (cycle18.value.recent || [])
   .filter(item => ['WIN', 'LOSE'].includes(item.result)))
+const HISTORY_LIMIT = 10_000
+const HISTORY_PAGE_SIZE = 200
 const historyRows = ref([])
 const historyLoaded = ref(false)
+const historyLoading = ref(false)
+const historyVisibleCount = ref(HISTORY_PAGE_SIZE)
 const historySearch = ref('')
+watch(historySearch, () => { historyVisibleCount.value = HISTORY_PAGE_SIZE })
 const fullHistory = computed(() => historyLoaded.value
   ? historyRows.value : (state.value.observation?.history || []))
 const latest53Hand = computed(() => fullHistory.value[0] || null)
@@ -166,17 +171,70 @@ const filteredHistory = computed(() => {
     || String(item.game_id || '').toLowerCase().includes(term)
     || (item.player_cards || []).some(card =>
       (card.rank + (suits[card.suit]?.[0] || '')).toLowerCase().includes(term))
+    || [item.forecast_suit, item.calculated_suit, item.bet_suit]
+      .some(suit => suit && (suit.toLowerCase().includes(term)
+        || (suits[suit]?.[0] || '').includes(term)))
   ) : fullHistory.value
 })
-async function refreshHistory() {
+const visibleHistory = computed(() => filteredHistory.value.slice(0, historyVisibleCount.value))
+const historyOrderKey = item => String(item.observed_at || item.last_scanned_at || item.discovered_at || '')
+async function refreshHistory(full = false) {
+  if (historyLoading.value) return
+  historyLoading.value = true
   try {
-    const response = await fetch(`${api}/api/history?limit=300`)
+    // The initial request loads the complete archive. Regular updates read
+    // only the newest 200 entries, never 10,000 every 10 seconds.
+    const isFull = full || !historyLoaded.value
+    const response = await fetch(`${api}/api/history?limit=${isFull ? HISTORY_LIMIT : HISTORY_PAGE_SIZE}`)
     if (!response.ok) return
     const rows = await response.json()
     if (!Array.isArray(rows)) return
-    historyRows.value = rows
+    if (isFull) {
+      historyRows.value = rows
+    } else {
+      const merged = new Map(historyRows.value.map(item => [item.game_id, item]))
+      for (const item of rows) merged.set(item.game_id, item)
+      historyRows.value = [...merged.values()]
+        .sort((a, b) => historyOrderKey(b).localeCompare(historyOrderKey(a))
+          || String(b.discovered_at || '').localeCompare(String(a.discovered_at || '')))
+        .slice(0, HISTORY_LIMIT)
+    }
     historyLoaded.value = true
   } catch { /* Live state stays functional even if history API is temporarily unavailable. */ }
+  finally { historyLoading.value = false }
+}
+function downloadHistoryCsv() {
+  if (!fullHistory.value.length) return
+  const columns = [
+    ['Дата и время', item => item.observed_at || item.discovered_at],
+    ['Номер раздачи', item => item.round_number],
+    ['ID игры', item => item.game_id],
+    ['Карты Игрока', item => (item.player_cards || []).map(card => card.rank + (suits[card.suit]?.[0] || '')).join(' ')],
+    ['Расчётная масть', item => suits[item.calculated_suit]?.[0] || ''],
+    ['Масть прогноза', item => suits[item.forecast_suit]?.[0] || ''],
+    ['Источник прогноза', item => item.forecast_source || ''],
+    ['Стратегия', item => item.forecast_strategy || ''],
+    ['Результат прогноза', item => item.forecast_result || ''],
+    ['Масть LIVE-ставки', item => suits[item.bet_suit]?.[0] || ''],
+    ['Шаг LIVE', item => item.bet_step ?? ''],
+    ['Сумма LIVE', item => item.bet_amount || ''],
+    ['Статус LIVE', item => item.bet_status || ''],
+    ['Результат LIVE', item => item.bet_result || ''],
+  ]
+  const csvCell = value => {
+    let text = String(value ?? '')
+    if (/^[=+@\-\t\r]/.test(text)) text = "'" + text
+    return '"' + text.replaceAll('"', '""') + '"'
+  }
+  const lines = [columns.map(([title]) => csvCell(title)).join(';'),
+    ...fullHistory.value.map(item => columns.map(([, get]) => csvCell(get(item))).join(';'))]
+  const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = 'bakkara-history-10000.csv'
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 const outcomesById = computed(() => {
   const outcomes = new Map()
@@ -290,7 +348,7 @@ async function clearHistory() {
   await command('/api/observations', 'DELETE')
   historyRows.value = []
   historyLoaded.value = true
-  await refreshHistory()
+  await refreshHistory(true)
 }
 async function clearLogs() {
   await command('/api/logs', 'DELETE')
@@ -299,9 +357,9 @@ let timer
 let historyTimer
 onMounted(() => {
   load()
-  refreshHistory()
+  refreshHistory(true)
   timer = window.setInterval(load, 500)
-  historyTimer = window.setInterval(refreshHistory, 10000)
+  historyTimer = window.setInterval(() => refreshHistory(), 10000)
 })
 onBeforeUnmount(() => {
   clearInterval(timer)
@@ -571,27 +629,41 @@ onBeforeUnmount(() => {
         <p v-if="!cycle18.ready" class="diagnostic">Прогнозы появятся после {{ cycle18.warmup_required ?? 20 }} подтверждённых игр в сохранённой сессии.</p>
     </section>
     <section class="events history-panel" id="history">
-      <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Последние {{ fullHistory.length }} подтверждённых раздач · доступно до 300 записей.</p></div><div class="history-actions"><button class="secondary" @click="refreshHistory">Обновить</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div></div>
-      <label class="field history-search">Поиск по номеру, ID или картам
+      <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Загружено {{ fullHistory.length }} раздач (лимит 10 000) · отображается {{ visibleHistory.length }} из {{ filteredHistory.length }}. {{ historyLoading ? 'Обновление…' : '' }}</p></div><div class="history-actions"><button class="secondary" :disabled="historyLoading" @click="refreshHistory(true)">Обновить всю историю</button><button class="secondary" :disabled="!fullHistory.length" @click="downloadHistoryCsv">Скачать CSV (с прогнозом)</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить историю</button></div></div>
+      <label class="field history-search">Поиск по номеру, ID, картам и мастям
         <input v-model="historySearch" type="search" placeholder="Например: 600 или A♥" />
       </label>
       <p v-if="!fullHistory.length">Сохранённых наблюдений пока нет.</p>
       <p v-else-if="!filteredHistory.length" class="diagnostic">По указанному запросу раздач не найдено.</p>
       <div v-else class="history-table-scroll history-full-scroll">
         <table class="history-table" aria-label="История наблюдений">
-           <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th v-if="activeStrategy === 'facecards_53'" scope="col">Карты Банкира</th><th v-if="activeStrategy === 'facecards_53'" scope="col">Исход баккары</th><th scope="col">Расчётная масть</th><th v-if="cycle18.ready" scope="col">WIN / LOSE ({{ strategyShortLabel }})</th></tr></thead>
+           <thead><tr><th scope="col">Время</th><th scope="col">№ раздачи</th><th scope="col">Карты Игрока</th><th v-if="activeStrategy === 'facecards_53'" scope="col">Карты Банкира</th><th v-if="activeStrategy === 'facecards_53'" scope="col">Исход баккары</th><th scope="col">Расчётная масть</th><th scope="col">Масть прогноза</th><th scope="col">LIVE-ставка</th><th v-if="cycle18.ready" scope="col">WIN / LOSE ({{ strategyShortLabel }})</th></tr></thead>
           <tbody>
-            <tr v-for="item in filteredHistory" :key="item.game_id">
+            <tr v-for="item in visibleHistory" :key="item.game_id">
               <td class="history-time">{{ formatObservedAt(item.observed_at || item.last_scanned_at || item.discovered_at) }}</td>
               <td class="history-round"><strong><a v-if="item.game_url || item.url" :href="item.game_url || item.url" target="_blank" rel="noopener noreferrer" :title="`Открыть игру ${item.game_id}`">{{ item.round_number || '—' }}</a><span v-else>{{ item.round_number || '—' }}</span></strong></td>
               <td><div v-if="item.player_cards?.length" class="history-card-line"><span v-for="(card, index) in item.player_cards" :key="card.position || index" class="history-card" :class="isRedSuit(card.suit) ? 'red-suit' : 'black-suit'">{{ card.rank }}{{ suits[card.suit]?.[0] || '' }}</span></div><span v-else class="prediction-none">—</span></td>
                <td v-if="activeStrategy === 'facecards_53'">{{ item.banker_hand_final ? cardLine(item.banker_cards) : 'ожидаем' }}</td>
                <td v-if="activeStrategy === 'facecards_53'">{{ baccaratLabel(item.baccarat_outcome) }}</td>
               <td><span v-if="item.calculated_suit" class="calculated-suit" :class="isRedSuit(item.calculated_suit) ? 'red-suit' : 'black-suit'" title="Масть, рассчитанная из карт этой раздачи">{{ suits[item.calculated_suit]?.[0] || '—' }}</span><span v-else class="prediction-none">—</span></td>
+              <td class="history-forecast-cell">
+                <span v-if="item.forecast_suit" class="forecast-history-suit" :class="isRedSuit(item.forecast_suit) ? 'red-suit' : 'black-suit'" :title="`Прогноз, записанный до этой раздачи · ${item.forecast_strategy || (item.forecast_source === 'LEGACY' ? 'старый алгоритм' : 'стратегия неизвестна')}`">{{ suits[item.forecast_suit]?.[0] || '—' }}</span>
+                <span v-else class="prediction-none" title="Прогноз до этой раздачи не сохранён">—</span>
+                <small v-if="item.forecast_source === 'LEGACY'" class="history-forecast-note">старый прогноз</small>
+                <small v-else-if="item.forecast_source === 'STRATEGY'" class="history-forecast-note" :title="item.forecast_strategy || ''">{{ item.forecast_mode === 'FILTER' ? 'виртуально' : 'стратегия' }} · {{ item.forecast_result || '—' }}</small>
+              </td>
+              <td class="history-forecast-cell">
+                <span v-if="item.bet_suit" :class="isRedSuit(item.bet_suit) ? 'red-suit' : 'black-suit'" :title="`Статус ${item.bet_status || '—'}; шаг ${item.bet_step || '—'}`">{{ suits[item.bet_suit]?.[0] || '—' }}</span><span v-else class="prediction-none">—</span>
+                <small v-if="item.bet_suit" class="history-forecast-note">{{ item.bet_step ? 'шаг ' + item.bet_step + ' · ' : '' }}{{ item.bet_status || '—' }}</small>
+              </td>
               <td v-if="cycle18.ready"><span v-if="outcomeFor(item.game_id) && ['WIN', 'LOSE'].includes(outcomeFor(item.game_id).result)" class="prediction-result" :class="`prediction-${outcomeFor(item.game_id).result.toLowerCase()}`" :title="`${strategyLabel}: прогноз ${suits[outcomeFor(item.game_id).predicted_suit]?.[1] || '—'}`">{{ outcomeFor(item.game_id).result }}</span><span v-else-if="outcomeFor(item.game_id)?.result === 'PENDING'" class="prediction-pending">Ожидаем карт</span></td>
             </tr>
           </tbody>
         </table>
+      </div>
+      <div v-if="visibleHistory.length < filteredHistory.length" class="history-actions">
+        <button class="secondary" @click="historyVisibleCount = Math.min(filteredHistory.length, historyVisibleCount + HISTORY_PAGE_SIZE)">Показать ещё {{ Math.min(HISTORY_PAGE_SIZE, filteredHistory.length - visibleHistory.length) }}</button>
+        <span class="diagnostic">Поиск выполняется по всем загруженным раздачам.</span>
       </div>
     </section>
     <section class="events" id="events"><div class="section-title"><h2>События</h2><button class="secondary" :disabled="busy" @click="clearLogs">Очистить логи</button></div><p v-if="!state.events.length">Событий пока нет.</p><ol v-else><li v-for="event in state.events" :key="event.at"><time>{{ new Date(event.at).toLocaleTimeString('ru-RU') }}</time><b>{{ label('level', event.level) }}</b> {{ event.message }}</li></ol></section>
@@ -735,6 +807,9 @@ onBeforeUnmount(() => {
 .history-full-scroll { max-height: 78vh; min-height: 340px; }
 .history-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .history-search { max-width: 450px; margin: 14px 0; }
+.history-forecast-cell { white-space: nowrap; }
+.forecast-history-suit { font-weight: 750; font-size: 1.13rem; }
+.history-forecast-note { display: block; opacity: .8; font-size: .73rem; }
 .standalone-label {
   font-size: .76rem;
   font-weight: 700;
