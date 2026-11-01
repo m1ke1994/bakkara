@@ -30,12 +30,13 @@ STRATEGY_VOTE_DRAW_12 = "vote_3_10_24_31_40_draw_diamond_12"
 STRATEGY_HOT_8 = "hot_suits_8_spread_6"
 STRATEGY_FIVE = "vote_3_10_24_31_40_step3_reverse"
 STRATEGY_53 = "facecards_53"
+STRATEGY_SECOND_CARD = "second_player_card"
 DRAW_DIAMOND_PAUSE_ROUNDS = 12
 HOT_WINDOW = 8
 HOT_MIN_SPREAD = 6
 HOT_MAX_GAP_SECONDS = 185
 VOTE_STRATEGIES = (STRATEGY_VOTE, STRATEGY_VOTE_DRAW_12, STRATEGY_FIVE, STRATEGY_EIGHT)
-AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES + (STRATEGY_HOT_8, STRATEGY_53)
+AVAILABLE_STRATEGIES = (STRATEGY_N18,) + VOTE_STRATEGIES + (STRATEGY_HOT_8, STRATEGY_53, STRATEGY_SECOND_CARD)
 VOTE_OFFSETS = (3, 10, 24, 31, 40)
 SUIT_PRIORITY = ("hearts", "diamonds", "clubs", "spades")
 STRATEGY_OPTIONS = (
@@ -55,15 +56,22 @@ STRATEGY_OPTIONS = (
                     "максимум 9 денежных шагов. После WIN снова ждать 3 LOSE."},
     {"id": STRATEGY_53, "label": "53%",
      "description": "16 соответствий A/K/Q/J; зеркало для средней из трёх; пропуск 4 игр после X; прогрев 40"},
+    {"id": STRATEGY_SECOND_CARD, "label": "Вторая карта · масть N−1",
+     "description": "Берём масть второй карты Игрока из предыдущей подтверждённой раздачи; "
+                    "каждая следующая раздача — новый прогноз; подготовка 40 рук"},
 )
 
 
 def strategy_warmup(strategy: str) -> int:
-    return WARMUP_53 if strategy == STRATEGY_53 else HOT_WINDOW if strategy == STRATEGY_HOT_8 else 40 if strategy in VOTE_STRATEGIES else WARMUP
+    return (WARMUP_53 if strategy == STRATEGY_53 else HOT_WINDOW if strategy == STRATEGY_HOT_8
+            else 40 if strategy in VOTE_STRATEGIES or strategy == STRATEGY_SECOND_CARD else WARMUP)
 
 
 def strategy_offsets(strategy: str) -> tuple[int, ...]:
-    return tuple(range(1, WARMUP_53 + 1)) if strategy == STRATEGY_53 else tuple(range(1, HOT_WINDOW + 1)) if strategy == STRATEGY_HOT_8 else VOTE_OFFSETS if strategy in VOTE_STRATEGIES else (CYCLE,)
+    return (tuple(range(1, WARMUP_53 + 1)) if strategy == STRATEGY_53
+            else tuple(range(1, HOT_WINDOW + 1)) if strategy == STRATEGY_HOT_8
+            else VOTE_OFFSETS if strategy in VOTE_STRATEGIES
+            else (1,) if strategy == STRATEGY_SECOND_CARD else (CYCLE,))
 
 
 def pause_for_round(target_number: int, trigger_rounds: list[int]) -> dict[str, Any] | None:
@@ -103,7 +111,7 @@ def verified_player_cards(row: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 def source_verified(row: dict[str, Any] | None, strategy: str) -> bool:
     """The hot-suit strategy must not depend on calculated_suit/suit_map."""
-    if strategy in (STRATEGY_HOT_8, STRATEGY_53):
+    if strategy in (STRATEGY_HOT_8, STRATEGY_53, STRATEGY_SECOND_CARD):
         return bool(verified_player_cards(row))
     return bool(verified_suit(row)) if row else False
 
@@ -218,6 +226,37 @@ def facecard_53_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dic
     }
 
 
+def second_card_analysis(number: int, sources: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+    """N uses the second card of the verified N-1 Player hand, never N itself.
+
+    For two cards this is the last card; for three cards it is the middle one.
+    Do not apply the suit transformation table or inspect Banker cards.
+    """
+    source_number = ((number - 2) % ROUND_MAX) + 1
+    source = sources.get(source_number)
+    if not source or round_number(source.get("round_number")) != source_number:
+        return None
+    cards = verified_player_cards(source)
+    if len(cards) not in (2, 3):
+        return None
+    symbol = normalize_suit(cards[1].get("suit"))
+    if symbol is None:
+        return None
+    chosen = SUIT_SYMBOL_TO_NAME[symbol]
+    return {
+        "predicted_suit": chosen,
+        "source_round_number": source_number,
+        "source_round_numbers": [source_number],
+        "votes": [{
+            "offset": 1, "round_number": source_number, "suit": chosen,
+            "card": f"{cards[1]['rank']}{symbol}", "card_position": 2,
+        }],
+        "vote_count": 1,
+        "partial_vote": False,
+        "missing_source_round_numbers": [],
+    }
+
+
 def predict_target(number: int, sources: dict[int, dict[str, Any]],
                    strategy: str = STRATEGY_N18) -> dict[str, Any] | None:
     """One advance prediction from exact, verified physical source rounds.
@@ -230,6 +269,8 @@ def predict_target(number: int, sources: dict[int, dict[str, Any]],
     """
     if not 1 <= number <= ROUND_MAX:
         return None
+    if strategy == STRATEGY_SECOND_CARD:
+        return second_card_analysis(number, sources)
     if strategy == STRATEGY_HOT_8:
         result = hot_window_analysis(number, sources)
         return result if result["predicted_suit"] else None
