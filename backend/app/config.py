@@ -13,6 +13,9 @@ class Settings:
     host: str = os.getenv("BACKEND_HOST", "127.0.0.1")
     port: int = int(os.getenv("BACKEND_PORT", "8010"))
     frontend_origin: str = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5174")
+    public_origin: str = os.getenv("BAKKARA_PUBLIC_ORIGIN", "https://sistem-loyality.ru")
+    public_read_only: bool = os.getenv("BAKKARA_PUBLIC_READ_ONLY", "0") == "1"
+    browser_headless: bool = os.getenv("BROWSER_HEADLESS", "0") == "1"
     target_url: str = os.getenv("TARGET_URL", "")
     auth_poll_seconds: float = float(os.getenv("AUTH_POLL_SECONDS", "2"))
     currency_selector: str = os.getenv("AUTH_CURRENCY_SELECTOR", "")
@@ -22,7 +25,7 @@ class Settings:
         for item in os.getenv("AUTH_CURRENCY_SELECTOR_FALLBACKS", "").split("||")
         if item.strip()
     )
-    profile_dir: Path = ROOT / "browser_profile"
+    profile_dir: Path = Path(os.getenv("BROWSER_PROFILE_DIR", str(ROOT / "browser_profile"))).expanduser()
     observation_db: Path = Path(os.getenv("OBSERVATION_DB", str(ROOT / "observations.sqlite3")))
     game_list_url: str = os.getenv("GAME_LIST_URL", os.getenv("TARGET_URL", ""))
     observation_poll_seconds: float = float(os.getenv("OBSERVATION_POLL_SECONDS", "1"))

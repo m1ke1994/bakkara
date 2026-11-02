@@ -71,6 +71,9 @@ class LiveBets:
             return control
 
     def mode(self, value: str):
+        from .config import settings
+        if settings.public_read_only and value == "LIVE":
+            raise ValueError("LIVE недоступен без букмекерского аккаунта")
         if value not in ("DEMO", "LIVE"):
             raise ValueError("Неизвестный режим")
         with sqlite3.connect(self.path) as db:

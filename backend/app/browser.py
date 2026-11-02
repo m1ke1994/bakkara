@@ -448,6 +448,9 @@ class BrowserService:
         if not hasattr(self, "live_bets") or getattr(self, "cycle_engine", None) is None:
             return
         config = self.live_bets.snapshot()
+        if settings.public_read_only and config["mode"] == "LIVE":
+            self.event("WARNING", "LIVE отключён: нет входа в букмекерский аккаунт.")
+            return
         if config["mode"] != "LIVE":
             if config.get("warmup_test"):
                 self.event("WARNING", "Тест первой раздачи включён, но режим ДЕМО. "
@@ -731,12 +734,13 @@ class BrowserService:
                 return
             self.status = "STARTING"
             self.authorization = "UNKNOWN"
-            self.event("INFO", "Запускаем видимый Chromium с отдельным профилем Bakkara.")
+            self.event("INFO", "Запускаем Chromium " + ("без окна." if settings.browser_headless else "в окне."))
             try:
                 settings.profile_dir.mkdir(parents=True, exist_ok=True)
                 self.playwright = await async_playwright().start()
                 self.context = await self.playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(settings.profile_dir), headless=False, viewport=None
+                    user_data_dir=str(settings.profile_dir), headless=settings.browser_headless,
+                    viewport={"width": 1440, "height": 900} if settings.browser_headless else None
                 )
                 # Install before navigation so early Canvas2D draw calls are captured.
                 await self.context.add_init_script(script=INIT_SCRIPT)
@@ -749,8 +753,9 @@ class BrowserService:
                 self.event("INFO", "Один браузерный таб: история не открывается параллельно LIVE.")
                 self.status = "WAITING_AUTH"
                 self.authorization = "UNCONFIRMED"
-                self.diagnostic = "Страница открыта. Войдите вручную в окне Chromium."
-                self.event("INFO", "Целевая страница открыта; ожидаем вход вручную.")
+                self.diagnostic = ("Публичная страница открыта. Проверяем доступность игр." if settings.public_read_only
+                                   else "Страница открыта. Войдите вручную в окне Chromium.")
+                self.event("INFO", self.diagnostic)
                 self.monitor_task = asyncio.create_task(self._monitor_auth())
             except Exception as exc:
                 await self._close_locked()
@@ -788,7 +793,8 @@ class BrowserService:
         async with self.lock:
             if not authorization_allows_observation(self.authorization) or self.page is None:
                 self.observation_status = "WAITING_AUTH"
-                self.observation_diagnostic = "Для сканирования войдите на сайт в открытом окне браузера."
+                self.observation_diagnostic = ("Нет доступа к публичной странице баккары." if settings.public_read_only
+                                               else "Для сканирования войдите на сайт в открытом окне браузера.")
                 self.event("WARNING", self.observation_diagnostic)
                 return
             if self.observation_task and not self.observation_task.done():
@@ -2865,7 +2871,11 @@ class BrowserService:
                 previous = self.authorization
                 self.authorization = result
                 self.diagnostic = diagnostic
-                if result == "AUTHORIZED":
+                if result == "PUBLIC_VIEW":
+                    self.status = "PUBLIC_VIEW"
+                    if previous != "PUBLIC_VIEW":
+                        self.event("INFO", "Публичное наблюдение: аккаунт БК не требуется.")
+                elif result == "AUTHORIZED":
                     self.status = "AUTHORIZED"
                     if previous != "AUTHORIZED":
                         self.event("INFO", "Авторизация подтверждена.")
@@ -2958,6 +2968,8 @@ class BrowserService:
                     pass
         # Missing balance/profile markup can be transient during rendering or
         # navigation. Only an explicit login surface proves the session ended.
+        if settings.public_read_only:
+            return "PUBLIC_VIEW", "Публичная страница: DEMO без аккаунта букмекера."
         result = classify_auth_probe(balance_marker=False, login_surface=False)
         return result, "Признак авторизации временно не найден. Повторяем проверку."
 

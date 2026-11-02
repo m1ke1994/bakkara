@@ -14,4 +14,4 @@ def classify_auth_probe(*, balance_marker: bool, login_surface: bool, check_erro
 
 def authorization_allows_observation(state: str) -> bool:
     """Allow read-only page navigation on ambiguous markers, never on known logout/error."""
-    return state in {"AUTHORIZED", "TEMPORARILY_UNCONFIRMED"}
+    return state in {"AUTHORIZED", "TEMPORARILY_UNCONFIRMED", "PUBLIC_VIEW"}
