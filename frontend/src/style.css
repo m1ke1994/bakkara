@@ -116,3 +116,14 @@ b { margin-right: 6px; font-size: .75rem; }
 .strategy-option small { color: #adbeda; font-size: .8rem; }
 .strategy-save-controls { align-items: center; }
 .strategy-notice { color: #7bebb0; font-weight: 700; }
+
+/* Production dashboard polish (isolated to the deployment branch) */
+.auth-loading{display:grid;place-items:center;min-height:100vh;font-size:1.05rem;color:#b6d7ed}
+.dashboard-user{align-self:center;font-size:.8rem;color:#8bd5ed;font-weight:700;padding:0 8px;word-break:break-all}
+.dashboard-header{padding-top:16px;border-bottom-color:#294562}
+.dashboard-header h1{font-weight:800}
+.strategy-option{transition:border-color .18s ease, background .18s ease;box-shadow:inset 0 1px 0 #ffffff06}
+.strategy-option:hover{border-color:#5a93b3;background:#162a41}
+.strategy-option-selected{box-shadow:inset 0 0 0 1px #57c1de2a}
+button:focus-visible,.quick-nav a:focus-visible{outline:2px solid #71d8f4;outline-offset:3px}
+@media(max-width:760px){.dashboard-user{flex-basis:100%}.quick-nav{align-items:center}}

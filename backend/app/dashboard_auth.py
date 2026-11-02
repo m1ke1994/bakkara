@@ -1,5 +1,6 @@
 """Dashboard access for the dedicated production branch."""
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -93,7 +94,7 @@ def verify(token, now=None):
         data = json.loads(decode(payload))
         if data["email"] in USERS and isinstance(data["exp"], int) and data["exp"] > (int(time.time()) if now is None else now):
             return data["email"]
-    except (ValueError, KeyError, TypeError, UnicodeError):
+    except (ValueError, KeyError, TypeError, UnicodeError, binascii.Error):
         pass
     return None
 

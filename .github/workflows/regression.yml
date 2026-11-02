@@ -1,7 +1,7 @@
 name: Baccarat regression checks
 on:
   push:
-    branches: [main]
+    branches: [main, Tedeev_Aslan_bakkara]
   workflow_dispatch:
 jobs:
   backend:

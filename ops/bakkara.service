@@ -1,0 +1,25 @@
+[Unit]
+Description=Bakkara Production Dashboard and Headless Observer
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=bakkara
+Group=bakkara
+WorkingDirectory=/opt/bakkara/backend
+EnvironmentFile=/opt/bakkara/.env
+Environment=HOME=/var/lib/bakkara
+ExecStart=/opt/bakkara/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8010 --workers 1
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/bakkara
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

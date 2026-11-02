@@ -5,3 +5,11 @@ __pycache__/
 browser_profile/
 frontend/node_modules/
 frontend/dist/
+
+# Persistent production data and credentials
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+.env.production
+secrets/

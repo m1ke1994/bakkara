@@ -1,7 +1,7 @@
 name: Baccarat cycle-18 checks
 on:
   pull_request:
-    branches: [main]
+    branches: [main, Tedeev_Aslan_bakkara]
   push:
     branches: [main]
 jobs:
