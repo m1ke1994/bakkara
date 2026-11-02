@@ -1,4 +1,4 @@
-const api = import.meta.env?.VITE_API_BASE_URL || 'http://127.0.0.1:8010'
+const api = import.meta.env?.VITE_API_BASE_URL ?? (import.meta.env?.PROD ? '' : 'http://127.0.0.1:8010')
 
 async function request(method, plan) {
   const controller = new AbortController()
