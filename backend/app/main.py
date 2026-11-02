@@ -3,9 +3,11 @@ import asyncio
 import logging
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from . import dashboard_auth
 
 from .browser import browser_service
 from .config import settings
@@ -18,6 +20,11 @@ stake_plan_store = StakePlanStore(settings.observation_db)
 browser_service.cycle_engine = cycle18_engine
 browser_service.live_plan_store = stake_plan_store
 live_bet_store = browser_service.live_bets
+
+
+class LoginInput(BaseModel):
+    email: str
+    password: str
 
 
 class StrategySelection(BaseModel):
@@ -41,6 +48,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    dashboard_auth.validate()
     try:
         yield
     finally:
@@ -49,7 +57,57 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="BAKKARA BOT API", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=[settings.frontend_origin],
+                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def protect_dashboard_api(request: Request, call_next):
+    if not dashboard_auth.enabled() or request.method == "OPTIONS":
+        return await call_next(request)
+    public = {"/api/health", "/api/auth/me", "/api/auth/login", "/api/auth/logout"}
+    if request.url.path not in public and not dashboard_auth.verify(request.cookies.get(dashboard_auth.COOKIE)):
+        return JSONResponse({"detail": "Требуется вход"}, status_code=401)
+    if request.method not in ("GET", "HEAD"):
+        if request.headers.get("origin") != settings.public_origin.rstrip("/"):
+            return JSONResponse({"detail": "Недопустимый источник запроса"}, status_code=403)
+    return await call_next(request)
+
+
+@app.get("/api/auth/me")
+async def dashboard_me(request: Request):
+    if not dashboard_auth.enabled():
+        return {"required": False, "authenticated": True, "email": None}
+    email = dashboard_auth.verify(request.cookies.get(dashboard_auth.COOKIE))
+    return {"required": True, "authenticated": bool(email), "email": email}
+
+
+@app.post("/api/auth/login")
+async def dashboard_login(credentials: LoginInput, response: Response, request: Request):
+    if not dashboard_auth.enabled():
+        raise HTTPException(409, "Авторизация в панели отключена")
+    ip = request.client.host if request.client else "unknown"
+    if not dashboard_auth.login_allowed(ip):
+        raise HTTPException(429, "Слишком много попыток входа")
+    email = dashboard_auth.authenticate(credentials.email, credentials.password)
+    if email is None:
+        dashboard_auth.login_failed(ip)
+        raise HTTPException(401, "Неверный логин или пароль")
+    dashboard_auth.login_succeeded(ip)
+    response.set_cookie(dashboard_auth.COOKIE, dashboard_auth.issue(email),
+                        max_age=dashboard_auth.MAX_AGE, path="/", secure=True,
+                        httponly=True, samesite="strict")
+    response.headers["Cache-Control"] = "no-store"
+    return {"required": True, "authenticated": True, "email": email}
+
+
+@app.post("/api/auth/logout")
+async def dashboard_logout(response: Response):
+    response.delete_cookie(dashboard_auth.COOKIE, path="/", secure=True,
+                           httponly=True, samesite="strict")
+    response.headers["Cache-Control"] = "no-store"
+    return {"required": True, "authenticated": False}
+
 
 
 @app.get("/api/health")
@@ -77,6 +135,7 @@ async def state():
     snapshot['cycle18'] = await asyncio.to_thread(cycle18_engine.refresh, snapshot.get('observation', {}).get('current'))
     snapshot['strategy'] = await asyncio.to_thread(cycle18_engine.get_strategy)
     snapshot['live'] = await asyncio.to_thread(live_bet_store.snapshot)
+    snapshot['public_read_only'] = settings.public_read_only
     return snapshot
 
 
