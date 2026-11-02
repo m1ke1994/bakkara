@@ -1,0 +1,16 @@
+# Replace the temporary ACME-only HTTP host AFTER HTTPS works.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name sistem-loyality.ru;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /etc/letsencrypt/bakkara-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://sistem-loyality.ru$request_uri;
+    }
+}
