@@ -1,9 +1,41 @@
 <script setup>
 import StakePlanner from './StakePlanner.vue'
+import LoginScreen from './LoginScreen.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { shouldApplySnapshot } from './stateVersion.js'
 
-const api = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8010'
+const api = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.PROD ? '' : 'http://127.0.0.1:8010')
+const authChecked = ref(false)
+const authenticated = ref(false)
+const signedInUser = ref('')
+const loginError = ref('')
+async function checkAuth() {
+  try {
+    const res = await fetch(`${api}/api/auth/me`)
+    if (!res.ok) throw new Error('Не удаётся проверить вход')
+    const data = await res.json()
+    authenticated.value = Boolean(data.authenticated)
+    signedInUser.value = data.email || ''
+    loginError.value = ''
+  } catch (exc) { authenticated.value = false; loginError.value = exc.message }
+  finally { authChecked.value = true }
+}
+async function afterLogin(email) {
+  authenticated.value = true
+  signedInUser.value = email || ''
+  loginError.value = ''
+  await load()
+  await refreshHistory(true)
+}
+async function logoutDashboard() {
+  await fetch(`${api}/api/auth/logout`, { method: 'POST' }).catch(() => {})
+  authenticated.value = false
+  signedInUser.value = ''
+  historyRows.value = []
+  historyLoaded.value = false
+  state.value = { ...state.value, events: [], observation: { history: [], games: [] } }
+}
+
 const scanResultNames = {
   SCANNING: '\u0421\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f',
   CARDS_CONFIRMED: '\u041a\u0430\u0440\u0442\u044b \u0441\u0447\u0438\u0442\u0430\u043d\u044b, \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u0435 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e',
@@ -22,6 +54,7 @@ const busy = ref(false)
 const probingMarket = ref(false)
 const marketProbe = ref(null)
 const live = computed(() => state.value.live || { mode: 'DEMO', step: 1 })
+const publicReadOnly = computed(() => Boolean(state.value.public_read_only))
 async function changeMode(mode) {
   if (busy.value || observing.value) return
   busy.value = true
@@ -249,7 +282,7 @@ const outcomeLabel = result => result === 'WIN' || result === 'LOSE' ? result : 
 const badge = value => String(value || 'UNKNOWN').toLowerCase().replaceAll('_', '-')
 const running = computed(() => !['STOPPED', 'ERROR'].includes(state.value.browser))
 const observing = computed(() => !['STOPPED', 'ERROR'].includes(state.value.observation?.status))
-const canObserve = computed(() => ['AUTHORIZED', 'TEMPORARILY_UNCONFIRMED'].includes(state.value.authorization))
+const canObserve = computed(() => ['AUTHORIZED', 'TEMPORARILY_UNCONFIRMED', 'PUBLIC_VIEW'].includes(state.value.authorization))
 const names = {
   backend: { CHECKING: 'Проверяется', OK: 'Работает', OFFLINE: 'Недоступен' },
   browser: { ACCESS_DENIED: 'Доступ запрещён сайтом', STOPPED: 'Остановлен', STARTING: 'Запускается', WAITING_AUTH: 'Ожидает входа', AUTHORIZED: 'Авторизован', AUTH_TEMPORARY: 'Проверяем вход', AUTH_LOST: 'Требуется вход', AUTH_CHECK_ERROR: 'Ошибка проверки входа', ERROR: 'Ошибка' },
@@ -283,8 +316,10 @@ function formatObservedAt(value) {
 }
 
 async function load() {
+  if (!authenticated.value) return
   try {
     const response = await fetch(`${api}/api/state`)
+    if (response.status === 401) { authenticated.value = false; return }
     if (!response.ok) throw new Error()
     applySnapshot(await response.json())
     error.value = ''
@@ -358,11 +393,11 @@ async function clearLogs() {
 }
 let timer
 let historyTimer
-onMounted(() => {
-  load()
-  refreshHistory(true)
-  timer = window.setInterval(load, 500)
-  historyTimer = window.setInterval(() => refreshHistory(), 10000)
+onMounted(async () => {
+  await checkAuth()
+  if (authenticated.value) { await load(); await refreshHistory(true) }
+  timer = window.setInterval(() => { if (authenticated.value) load() }, 1000)
+  historyTimer = window.setInterval(() => { if (authenticated.value) refreshHistory() }, 10000)
 })
 onBeforeUnmount(() => {
   clearInterval(timer)
@@ -371,10 +406,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main>
+  <main v-if="!authChecked" class="auth-loading">Подключение к Bakkara Control…</main>
+  <LoginScreen v-else-if="!authenticated" :api="api" :initial-error="loginError" @authorized="afterLogin" />
+  <main v-else>
     <header class="dashboard-header">
       <div><p class="eyebrow">BAKKARA / LIVE ANALYTICS</p><h1>Панель наблюдения <span class="header-spark">✦</span></h1><p>Карты Игрока, прогнозы выбранной стратегии и история раздач.</p></div>
-      <nav class="quick-nav" aria-label="Разделы панели"><a href="#calculator">Калькулятор</a>
+      <nav class="quick-nav" aria-label="Разделы панели"><span class="dashboard-user">{{ signedInUser }}</span><button type="button" class="secondary" @click="logoutDashboard">Выйти</button><a href="#calculator">Калькулятор</a>
         <a href="#observation">Наблюдение</a>
         <a href="#forecasts">Прогнозы</a>
         <a href="#history">История</a>
@@ -429,7 +466,7 @@ onBeforeUnmount(() => {
     <StakePlanner />
     <section class="events" id="live-mode-notice" aria-label="Режим работы">
       <div class="section-title"><h2>Режим работы</h2><span class="standalone-label">{{ live.mode }}</span></div>
-      <div class="controls"><button type="button" :class="live.mode === 'DEMO' ? 'active-mode' : 'secondary'" :disabled="busy || observing || live.mode === 'DEMO'" @click="changeMode('DEMO')">ДЕМО</button><button type="button" :class="live.mode === 'LIVE' ? 'active-mode' : 'secondary'" :disabled="busy || observing || live.mode === 'LIVE'" @click="changeMode('LIVE')">LIVE</button></div>
+      <div class="controls"><button type="button" :class="live.mode === 'DEMO' ? 'active-mode' : 'secondary'" :disabled="busy || observing || live.mode === 'DEMO'" @click="changeMode('DEMO')">ДЕМО</button><button type="button" :class="live.mode === 'LIVE' ? 'active-mode' : 'secondary'" :disabled="busy || observing || live.mode === 'LIVE' || publicReadOnly" @click="changeMode('LIVE')">LIVE</button></div>
       <div class="controls">
         <label class="diagnostic">
           <input type="checkbox" :checked="Boolean(live.coupon_test_filter)"
