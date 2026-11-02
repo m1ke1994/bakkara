@@ -1,0 +1,46 @@
+# Separate Compose project, independent of Ydro/TrackNode. No published ports.
+# Run: docker compose -p bakkara -f ops/docker-compose.existing-nginx.yml up -d --build
+services:
+  bakkara-api:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.backend
+    container_name: bakkara-api
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    env_file:
+      - ../.env
+    environment:
+      BROWSER_HEADLESS: "1"
+      BAKKARA_PUBLIC_READ_ONLY: "1"
+      BAKKARA_AUTH_ENABLED: "1"
+      BROWSER_PROFILE_DIR: /data/chromium
+      OBSERVATION_DB: /data/observations.sqlite3
+    volumes:
+      - ../data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/api/health',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - ydro_network
+
+  bakkara-ui:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.frontend
+    container_name: bakkara-ui
+    restart: unless-stopped
+    depends_on:
+      bakkara-api:
+        condition: service_healthy
+    networks:
+      - ydro_network
+
+networks:
+  ydro_network:
+    external: true
+    name: ydro_yadro_network
