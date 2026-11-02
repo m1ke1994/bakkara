@@ -285,8 +285,8 @@ const observing = computed(() => !['STOPPED', 'ERROR'].includes(state.value.obse
 const canObserve = computed(() => ['AUTHORIZED', 'TEMPORARILY_UNCONFIRMED', 'PUBLIC_VIEW'].includes(state.value.authorization))
 const names = {
   backend: { CHECKING: 'Проверяется', OK: 'Работает', OFFLINE: 'Недоступен' },
-  browser: { ACCESS_DENIED: 'Доступ запрещён сайтом', STOPPED: 'Остановлен', STARTING: 'Запускается', WAITING_AUTH: 'Ожидает входа', AUTHORIZED: 'Авторизован', AUTH_TEMPORARY: 'Проверяем вход', AUTH_LOST: 'Требуется вход', AUTH_CHECK_ERROR: 'Ошибка проверки входа', ERROR: 'Ошибка' },
-  authorization: { ACCESS_DENIED: 'Доступ запрещён сайтом', UNKNOWN: 'Не проверена', UNCONFIRMED: 'Ожидает подтверждения', AUTHORIZED: 'Подтверждена', TEMPORARILY_UNCONFIRMED: 'Временно не подтверждена', AUTH_LOST: 'Потеряна', CHECK_ERROR: 'Ошибка проверки', AUTH_CHECK_ERROR: 'Ошибка проверки' },
+  browser: { ACCESS_DENIED: 'Доступ запрещён сайтом', STOPPED: 'Остановлен', STARTING: 'Запускается', WAITING_AUTH: 'Ожидает входа', AUTHORIZED: 'Авторизован', AUTH_TEMPORARY: 'Проверяем вход', AUTH_LOST: 'Требуется вход', AUTH_CHECK_ERROR: 'Ошибка проверки входа', PUBLIC_VIEW: 'Публичный доступ', ERROR: 'Ошибка' },
+  authorization: { ACCESS_DENIED: 'Доступ запрещён сайтом', UNKNOWN: 'Не проверена', UNCONFIRMED: 'Ожидает подтверждения', AUTHORIZED: 'Подтверждена', TEMPORARILY_UNCONFIRMED: 'Временно не подтверждена', AUTH_LOST: 'Потеряна', CHECK_ERROR: 'Ошибка проверки', AUTH_CHECK_ERROR: 'Ошибка проверки', PUBLIC_VIEW: 'Публичные игры доступны' },
   observation: { ACCESS_DENIED: 'Доступ запрещён сайтом', STOPPED: 'Остановлено', WAITING_AUTH: 'Ожидает авторизации', AUTH_TEMPORARY: 'Временно приостановлено', AUTH_LOST: 'Требуется проверить вход', AUTH_CHECK_ERROR: 'Повторная проверка входа', WAITING_GAME: 'Поиск игры', PAGE_LOADING: 'Загрузка игры', GAME_OPENED: 'Игра открыта', WAITING_CARDS: 'Ожидание карт Игрока', TWO_CARDS_VISIBLE: 'Обнаружены две карты', THREE_CARDS_VISIBLE: 'Обнаружены три карты', ROUND_FINISHED: 'Игра завершена', RETURNING_TO_LIST: 'Возврат к списку', NAVIGATION_ERROR: 'Ошибка перехода', DOM_ERROR: 'Ошибка чтения страницы', HISTORY_ERROR: 'Ошибка сохранения истории', ERROR: 'Ошибка' },
   level: { INFO: 'Информация', WARNING: 'Предупреждение', ERROR: 'Ошибка' },
 }
@@ -420,7 +420,8 @@ onBeforeUnmount(() => {
     </header>
     <section class="events" aria-label="Текущий режим работы">
       <div class="section-title"><h2>Режим: {{ live.mode }}</h2><span class="standalone-label">{{ live.mode === "DEMO" ? "Без денежных отправок" : "Реальный купон букмекера" }}</span></div>
-      <p class="diagnostic">{{ live.mode === "DEMO" ? "Виртуальные прогнозы и расчёты без реальных ставок." : "LIVE может отправлять настоящие ставки. При неизвестном принятии ставки повторная отправка заблокирована." }}</p>
+      <p v-if="publicReadOnly" class="diagnostic">Публичный режим без входа в БК · сканирование и DEMO доступны · отправка реальных LIVE-ставок отключена.</p>
+      <p v-else class="diagnostic">{{ live.mode === "DEMO" ? "Виртуальные прогнозы и расчёты без реальных ставок." : "LIVE может отправлять настоящие ставки. При неизвестном принятии ставки повторная отправка заблокирована." }}</p>
     </section>
     <section class="cards">
       <article><span>Сервер</span><strong :class="badge(state.backend)">{{ label('backend', state.backend) }}</strong></article>
