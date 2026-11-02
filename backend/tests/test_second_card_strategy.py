@@ -38,7 +38,7 @@ def add_final(store, number, suits):
 
 def test_registered_saved_and_exact_one_round_source(tmp_path):
     assert STRATEGY_SECOND_CARD in AVAILABLE_STRATEGIES
-    assert strategy_warmup(STRATEGY_SECOND_CARD) == 40
+    assert strategy_warmup(STRATEGY_SECOND_CARD) == 1
     assert strategy_offsets(STRATEGY_SECOND_CARD) == (1,)
     engine = Cycle18Engine(tmp_path / "records.sqlite3")
     saved = engine.save_strategy(STRATEGY_SECOND_CARD)
@@ -91,32 +91,43 @@ def test_demo_confirmed_win_lose_and_live_ready_preview(tmp_path):
     store, engine = ObservationStore(path), Cycle18Engine(path)
     engine.save_strategy(STRATEGY_SECOND_CARD)
     engine.start_session()
-    for number in range(1, 40):
-        add_final(store, number, ("hearts", "clubs"))
-        state = engine.refresh()
-        assert not state["ready"]
-        assert state["upcoming"] == []
-    add_final(store, 40, ("spades", "clubs"))
+
+    before = engine.refresh({"game_id": "round-1", "round_number": "1"})
+    assert before["ready"] is False
+    assert before["warmup_required"] == 1
+    assert before["warmup_count"] == 0
+    assert before["live_preview"] == []
+    assert before["upcoming"] == []
+
+    # The first completed two-card hand instantly generates round 2's signal.
+    add_final(store, 1, ("spades", "clubs"))
     state = engine.refresh()
     assert state["ready"]
-    assert state["warmup_count"] == 40
-    assert state["upcoming"][0]["target_round_number"] == 41
-    assert state["upcoming"][0]["source_round_numbers"] == [40]
+    assert state["warmup_count"] == 1
+    assert state["upcoming"][0]["target_round_number"] == 2
+    assert state["upcoming"][0]["source_round_numbers"] == [1]
     assert state["upcoming"][0]["predicted_suit"] == "clubs"
-    assert engine.refresh({"game_id": "round-41", "round_number": "41"})["live_preview"][0]["predicted_suit"] == "clubs"
-    # After final cards, only actual confirmed cards settle this forecast.
-    add_final(store, 41, ("hearts", "diamonds"))
+    state = engine.refresh({"game_id": "round-2", "round_number": "2"})
+    assert state["live_preview"][0]["available"]
+    assert state["live_preview"][0]["predicted_suit"] == "clubs"
+
+    # Next result settles LOSE and immediately creates the next prediction.
+    add_final(store, 2, ("hearts", "diamonds"))
     state = engine.refresh()
     assert state["statistics"]["checked_count"] == 1
     assert state["statistics"]["losses"] == 1
     assert state["statistics"]["next_step"] == 2
-    assert state["upcoming"][0]["target_round_number"] == 42
+    assert state["upcoming"][0]["target_round_number"] == 3
     assert state["upcoming"][0]["predicted_suit"] == "diamonds"
-    add_final(store, 42, ("diamonds", "spades", "hearts"))
+
+    # WIN checks all final Player cards, while the next forecast uses card 2.
+    add_final(store, 3, ("diamonds", "spades", "hearts"))
     state = engine.refresh()
     assert state["statistics"]["wins"] == 1
     assert state["statistics"]["losses"] == 1
     assert state["statistics"]["next_step"] == 1
+    assert state["upcoming"][0]["target_round_number"] == 4
+    assert state["upcoming"][0]["predicted_suit"] == "spades"
 
 
 def test_live_reuses_existing_acceptance_and_settlement_gate(tmp_path):
@@ -125,20 +136,65 @@ def test_live_reuses_existing_acceptance_and_settlement_gate(tmp_path):
     ledger = LiveBets(path)
     engine.save_strategy(STRATEGY_SECOND_CARD)
     engine.start_session()
-    for number in range(1, 41):
-        add_final(store, number, ("hearts", "clubs"))
-        engine.refresh()
     ledger.mode("LIVE")
-    state = engine.refresh({"game_id": "round-41", "round_number": "41"})
+
+    # No LIVE signal before any confirmed hand.
+    assert engine.refresh({"game_id": "round-1", "round_number": "1"})["ready"] is False
+
+    add_final(store, 1, ("hearts", "clubs"))
+    state = engine.refresh({"game_id": "round-2", "round_number": "2"})
     forecast = state["live_preview"][0]
     assert state["strategy"] == STRATEGY_SECOND_CARD
     assert state["ready"] and forecast["available"]
+    assert forecast["target_round_number"] == 2
     assert forecast["predicted_suit"] == "clubs"
-    # This verifies the persistent gate, not the external bookmaker coupon.
-    assert ledger.reserve("round-41", "41", "clubs", Decimal("10"))
-    assert not ledger.reserve("round-41", "41", "clubs", Decimal("10"))
-    assert not ledger.reserve("round-42", "42", "clubs", Decimal("10"))
-    ledger.update("round-41", "ACCEPTED")
-    assert ledger.settle("round-41", "LOSE", 9)
+
+    # Verify existing persistent LIVE gate, not bookmaker integration.
+    assert ledger.reserve("round-2", "2", "clubs", Decimal("10"))
+    assert not ledger.reserve("round-2", "2", "clubs", Decimal("10"))
+    assert not ledger.reserve("round-3", "3", "clubs", Decimal("10"))
+    ledger.update("round-2", "ACCEPTED")
+    assert ledger.settle("round-2", "LOSE", 9)
     assert ledger.snapshot()["step"] == 2
-    assert ledger.reserve("round-42", "42", "clubs", Decimal("20"))
+    assert ledger.reserve("round-3", "3", "clubs", Decimal("20"))
+
+
+def test_incomplete_first_hand_cannot_unlock_prediction(tmp_path):
+    path = tmp_path / "incomplete.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.save_strategy(STRATEGY_SECOND_CARD)
+    engine.start_session()
+    game = Game("round-1", "https://example.test/baccarat/1",
+                "00:00", "1", "LIVE", 1)
+    store.upsert(game, [
+        {"position": 1, "rank": "7", "suit": "hearts"},
+        {"position": 2, "rank": "K", "suit": "clubs"},
+    ], "PARTIAL", "Ещё ожидается третья карта", "CARDS_FOUND",
+        finished_confirmed=False, final_snapshot_reverified=False,
+        player_hand_final=False)
+    state = engine.refresh({"game_id": "round-2", "round_number": "2"})
+    assert not state["ready"]
+    assert state["warmup_count"] == 0
+    assert state["upcoming"] == []
+    assert state["live_preview"] == []
+    # Final confirmation with three cards changes source card 2.
+    add_final(store, 1, ("hearts", "diamonds", "spades"))
+    state = engine.refresh({"game_id": "round-2", "round_number": "2"})
+    assert state["ready"]
+    assert state["warmup_count"] == 1
+    assert state["live_preview"][0]["available"]
+    assert state["live_preview"][0]["predicted_suit"] == "diamonds"
+
+
+def test_no_forecast_if_immediately_previous_round_missing(tmp_path):
+    path = tmp_path / "gap.sqlite3"
+    store, engine = ObservationStore(path), Cycle18Engine(path)
+    engine.save_strategy(STRATEGY_SECOND_CARD)
+    engine.start_session()
+    add_final(store, 1, ("hearts", "clubs"))
+    state = engine.refresh({"game_id": "round-3", "round_number": "3"})
+    assert state["ready"]
+    assert state["live_preview"][0]["target_round_number"] == 3
+    assert not state["live_preview"][0]["available"]
+    assert state["live_preview"][0]["missing_sources"][0]["round_number"] == 2
+    assert not any(x["target_round_number"] == 3 for x in state["upcoming"])

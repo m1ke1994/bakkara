@@ -58,13 +58,15 @@ STRATEGY_OPTIONS = (
      "description": "16 соответствий A/K/Q/J; зеркало для средней из трёх; пропуск 4 игр после X; прогрев 40"},
     {"id": STRATEGY_SECOND_CARD, "label": "Вторая карта · масть N−1",
      "description": "Берём масть второй карты Игрока из предыдущей подтверждённой раздачи; "
-                    "каждая следующая раздача — новый прогноз; подготовка 40 рук"},
+                    "каждая следующая раздача — новый прогноз; старт после первой подтверждённой руки"},
 )
 
 
 def strategy_warmup(strategy: str) -> int:
-    return (WARMUP_53 if strategy == STRATEGY_53 else HOT_WINDOW if strategy == STRATEGY_HOT_8
-            else 40 if strategy in VOTE_STRATEGIES or strategy == STRATEGY_SECOND_CARD else WARMUP)
+    return (1 if strategy == STRATEGY_SECOND_CARD
+            else WARMUP_53 if strategy == STRATEGY_53
+            else HOT_WINDOW if strategy == STRATEGY_HOT_8
+            else 40 if strategy in VOTE_STRATEGIES else WARMUP)
 
 
 def strategy_offsets(strategy: str) -> tuple[int, ...]:
