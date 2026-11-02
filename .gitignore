@@ -13,3 +13,6 @@ frontend/dist/
 *.db-*
 .env.production
 secrets/
+# Docker production persistent browser state and SQLite
+/data/
+data/
