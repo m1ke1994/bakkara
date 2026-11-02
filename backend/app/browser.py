@@ -1653,7 +1653,9 @@ class BrowserService:
             result, diagnostic = "CHECK_ERROR", f"Не удалось перепроверить авторизацию перед переходом ({type(exc).__name__})."
         self.authorization = result
         self.diagnostic = diagnostic
-        if result == "AUTHORIZED":
+        if result == "PUBLIC_VIEW":
+            self.status = "PUBLIC_VIEW"
+        elif result == "AUTHORIZED":
             self.status = "AUTHORIZED"
         elif result == "TEMPORARILY_UNCONFIRMED":
             self.status = "AUTH_TEMPORARY"
