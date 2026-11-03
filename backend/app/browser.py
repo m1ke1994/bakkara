@@ -584,8 +584,10 @@ class BrowserService:
         if not hasattr(self, "live_bets") or getattr(self, "cycle_engine", None) is None:
             return
         config = self.live_bets.snapshot()
-        if config["mode"] == "LIVE" and getattr(self, "store", None) is not None:
-            await self._reconcile_second_card_accepted()
+        reconcile = getattr(self, "_reconcile_second_card_accepted", None)
+        if (config["mode"] == "LIVE" and getattr(self, "store", None) is not None
+                and callable(reconcile)):
+            await reconcile()
             config = self.live_bets.snapshot()
         if config["mode"] != "LIVE":
             if config.get("warmup_test"):
