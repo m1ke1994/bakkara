@@ -84,6 +84,12 @@ def test_no_duplicate_or_unconfirmed_bets_and_no_retry_after_exhaustion():
     rows = history(["LOSE"] * 6, numbers=[1439, 1440, 1, 2, 3, 4])
     attempts = {"game-2": accepted(2, "LOSE", 1),
                 "game-3": accepted(3, "LOSE", 2)}
+    # Round numbers wrap at 1440; placement time must follow the actual
+    # chronological forecast, not the numeric round index.
+    attempts["game-2"]["created_at"] = (
+        datetime.fromisoformat(rows[3]["created_at"]) + timedelta(seconds=5)).isoformat()
+    attempts["game-3"]["created_at"] = (
+        datetime.fromisoformat(rows[4]["created_at"]) + timedelta(seconds=5)).isoformat()
     gate = evaluate_eight(rows, attempts, mode="LIVE", wait_losses=3,
                           max_steps=2, strict_consecutive=True)
     assert gate["before"]["game-2"]["bet_allowed"]
@@ -98,6 +104,7 @@ def test_no_duplicate_or_unconfirmed_bets_and_no_retry_after_exhaustion():
 
 def test_save_threshold_and_frozen_active_session(tmp_path):
     path = tmp_path / "saved.sqlite3"
+    ObservationStore(path)
     engine = Cycle18Engine(path)
     config = engine.save_strategy(STRATEGY_SECOND_CARD, entry_losses=3)
     assert config["selected"] == STRATEGY_SECOND_CARD
