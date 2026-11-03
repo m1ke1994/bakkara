@@ -710,7 +710,7 @@ class BrowserService:
                 return
             suit = forecast["predicted_suit"]
             signal_source = "STRATEGY"
-            if cycle.get("entry_losses", 0) > 0:
+            if cycle.get("strategy") in (STRATEGY_SECOND_CARD, STRATEGY_EIGHT):
                 eight_gate = cycle.get("entry_gate")
                 eight_session = cycle.get("session_id")
                 if not (eight_gate and eight_gate.get("bet_allowed")
