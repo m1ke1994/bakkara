@@ -954,7 +954,8 @@ class Cycle18Engine:
                 except (ValueError, KeyError, TypeError):
                     max_steps = 8
             eight_progress = evaluate_eight(forecasts, attempts, mode=gate_mode,
-                                            wait_losses=entry_losses, max_steps=max_steps)
+                                            wait_losses=entry_losses, max_steps=max_steps,
+                                            strict_consecutive=(strategy == STRATEGY_SECOND_CARD))
             current_id = current.get("game_id") if current else None
             eight_gate = (eight_progress["before"].get(current_id)
                           or eight_progress["current"])
