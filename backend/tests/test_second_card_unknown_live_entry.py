@@ -134,7 +134,7 @@ def test_selected_second_card_unknown_accepts_exactly_one_verified_strategy_wage
     assert attempt["strategy"] == STRATEGY_SECOND_CARD
     assert attempt["strategy_session_id"] == 123
     assert sum("LIVE_PRESTART_VERIFIED" in s for _, s in messages) == 2
-    assert any("новая попытка не создана" in s for _, s in messages)
+    assert any("LIVE_BLOCKED_BY_ATTEMPT" in s and "№523" in s for _, s in messages)
 
 
 @pytest.mark.parametrize("scenario", [
