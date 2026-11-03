@@ -1057,15 +1057,19 @@ class BrowserService:
         self.event("INFO", "Наблюдение остановлено.")
 
     async def clear_history(self) -> dict[str, Any]:
-        """Stop writes, clear only observation data, and retain browser/auth state."""
+        """Stop writes and clear all local game and wager history, retaining authorization."""
         async with self.lock:
             await self.stop_observation()
             self.store.clear_all()
+            ledger = getattr(self, "live_bets", None)
+            if ledger is not None:
+                await asyncio.to_thread(ledger.clear_all)
+            self._last_live_blocker_notice = None
             self.current_observation = None
             self.game_diagnostics = []
             self._active_chain_source_id = None
             self.observation_status = "STOPPED"
-            self.observation_diagnostic = "История наблюдений очищена."
+            self.observation_diagnostic = "История раздач и LIVE-попыток очищена; шаг 1, режим DEMO."
             return self.snapshot()
 
     def clear_logs(self) -> dict[str, Any]:
