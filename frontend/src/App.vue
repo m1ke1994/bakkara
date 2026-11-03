@@ -375,7 +375,7 @@ async function saveStrategy() {
   }
 }
 async function clearHistory() {
-  if (!window.confirm('\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0432\u0441\u044e \u0438\u0441\u0442\u043e\u0440\u0438\u044e \u043d\u0430\u0431\u043b\u044e\u0434\u0435\u043d\u0438\u0439, \u043a\u0430\u0440\u0442\u044b, \u043f\u0440\u043e\u0433\u043d\u043e\u0437\u044b \u0438 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u044b WIN/LOSE?')) return
+  if (!window.confirm('Удалить ВСЁ: карты, прогнозы, историю DEMO и LIVE-ставок, включая незавершённые ACCEPTED/UNKNOWN? Сканирование остановится, шаг сбросится на 1, режим станет DEMO. Это НЕ отменяет уже принятые ставки у букмекера.')) return
   await command('/api/observations', 'DELETE')
   historyRows.value = []
   historyLoaded.value = true
