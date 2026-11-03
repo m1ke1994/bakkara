@@ -4,6 +4,8 @@ from collections import deque
 
 from app.browser import BrowserService
 from app.main import app
+from app.live_bets import LiveBets
+from decimal import Decimal
 from app.observation import Game, ObservationStore
 
 
@@ -128,3 +130,30 @@ def test_clear_actions_have_distinct_delete_api_routes():
     routes = {(route.path, method) for route in app.routes for method in getattr(route, "methods", set())}
     assert ("/api/observations", "DELETE") in routes
     assert ("/api/logs", "DELETE") in routes
+
+
+def test_clear_history_resets_all_live_attempts_and_mode(tmp_path):
+    async def run():
+        service = service_with_store(tmp_path / "history.sqlite3")
+        service.live_bets = LiveBets(service.store.path)
+        service.live_bets.mode("LIVE")
+        assert service.live_bets.reserve("524", "524", "hearts", Decimal("10"))
+        service.live_bets.update("524", "ACCEPTED")
+        assert service.live_bets.snapshot()["blocked"]
+        assert service.live_bets.pending_accepted()
+
+        result = await service.clear_history()
+
+        assert service.live_bets.pending_accepted() == []
+        assert service.live_bets.pending_blocker() is None
+        control = service.live_bets.snapshot()
+        assert control["attempt"] is None
+        assert control["step"] == 1
+        assert control["mode"] == "DEMO"
+        assert control["blocked"] is False
+        assert result["observation"]["history"] == []
+        assert service.authorization == "AUTHORIZED"
+        with sqlite3.connect(service.store.path) as db:
+            assert db.execute("SELECT COUNT(*) FROM live_attempts").fetchone()[0] == 0
+
+    asyncio.run(run())
