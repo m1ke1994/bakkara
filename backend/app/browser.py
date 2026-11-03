@@ -458,11 +458,12 @@ class BrowserService:
             return
 
         first_round_test = bool(config.get("warmup_test"))
-        selected_strategy = (self.cycle_engine.get_strategy().get("selected")
-                             if callable(getattr(self.cycle_engine, "get_strategy", None)) else None)
-        if first_round_test and selected_strategy == STRATEGY_EIGHT:
-            self.event("WARNING", "Стратегия №8: ручной тест первой раздачи отключите перед LIVE; "
-                       "он обходит обязательные три виртуальных LOSE.")
+        strategy_config = (self.cycle_engine.get_strategy()
+                           if callable(getattr(self.cycle_engine, "get_strategy", None)) else {})
+        selected_strategy = strategy_config.get("selected")
+        if first_round_test and int(strategy_config.get("entry_losses") or 0) > 0:
+            self.event("WARNING", "Тест первой раздачи отключите перед LIVE: "
+                       "он обходит обязательное ожидание виртуальных LOSE.")
             return
         eight_gate = None
         eight_session = None
@@ -525,9 +526,10 @@ class BrowserService:
                     reason = (f"подготовлено {cycle.get('warmup_count', 'неизвестно')}/"
                               f"{cycle.get('warmup_required', 'неизвестно')} рук")
                 elif missing and missing.get("entry_paused"):
-                    gate = cycle.get("strategy_eight") or {}
-                    reason = (f"Стратегия №8: {missing.get('reason')}; "
-                              f"виртуальных LOSE {gate.get('virtual_losses', 0)}/3.")
+                    gate = cycle.get("entry_gate") or {}
+                    reason = (f"Порог LIVE: {missing.get('reason')}; "
+                              f"виртуальных LOSE {gate.get('virtual_losses', 0)}/"
+                              f"{gate.get('required_losses', 0)}.")
                 elif missing and missing.get("filter_paused"):
                     reason = missing.get("reason") or "Фильтр активен: текущая раздача пропускается."
                     self.event("INFO", f"FILTER_DRAW_DIAMOND_12 Раздача №{game.round_number}: {reason}.")
@@ -557,12 +559,12 @@ class BrowserService:
                 return
             suit = forecast["predicted_suit"]
             signal_source = "STRATEGY"
-            if cycle.get("strategy") == STRATEGY_EIGHT:
-                eight_gate = cycle.get("strategy_eight")
+            if cycle.get("entry_losses", 0) > 0:
+                eight_gate = cycle.get("entry_gate")
                 eight_session = cycle.get("session_id")
                 if not (eight_gate and eight_gate.get("bet_allowed")
                         and eight_gate.get("phase") == "BETTING" and eight_session):
-                    self.event("WARNING", "Стратегия №8: подтверждённого разрешения на ставку нет.")
+                    self.event("WARNING", "Порог LIVE: подтверждённого разрешения на ставку нет.")
                     return
             if forecast.get("partial_vote"):
                 self.event("WARNING", f"PREDICTION_SOURCE_CHECK Раздача №{game.round_number}, "
@@ -585,8 +587,9 @@ class BrowserService:
                        f"ID {game.game_id}: {suit}.")
         plan = await asyncio.to_thread(self.live_plan_store.load)
         if eight_gate is not None:
-            if len(plan.row) != 9 or plan.steps != 9:
-                self.event("WARNING", "Стратегия №8: в калькуляторе нужно сохранить ровно 9 шагов. "
+            limit = int(eight_gate["max_steps"])
+            if len(plan.row) != limit or plan.steps != limit:
+                self.event("WARNING", f"Порог LIVE: в калькуляторе требуется {limit} шагов. "
                            "LIVE-ставка заблокирована; существующий ряд не изменяем.")
                 return
             step = int(eight_gate["step"])
@@ -603,7 +606,7 @@ class BrowserService:
         if not self.live_bets.reserve(game.game_id, game.round_number, suit, amount,
                                       signal_source=signal_source,
                                       expected_step=step if eight_gate is not None else None,
-                                      strategy=STRATEGY_EIGHT if eight_gate is not None else None,
+                                      strategy=cycle["strategy"] if eight_gate is not None else None,
                                       strategy_session_id=eight_session):
             current = self.live_bets.snapshot()
             self.event("WARNING", f"LIVE №{game.round_number}: новая попытка не создана. "

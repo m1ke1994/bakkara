@@ -22,6 +22,7 @@ live_bet_store = browser_service.live_bets
 
 class StrategySelection(BaseModel):
     strategy: str
+    entry_losses: int | None = None
 
 
 class ModeSelection(BaseModel):
@@ -126,7 +127,8 @@ async def save_strategy(selection: StrategySelection):
         raise HTTPException(status_code=409, detail="Остановите сканирование перед сменой фильтра")
     await asyncio.to_thread(cycle18_engine.stop_session)
     try:
-        return await asyncio.to_thread(cycle18_engine.save_strategy, selection.strategy)
+        return await asyncio.to_thread(cycle18_engine.save_strategy, selection.strategy,
+                                       selection.entry_losses)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:

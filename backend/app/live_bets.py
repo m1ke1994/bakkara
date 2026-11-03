@@ -104,9 +104,9 @@ class LiveBets:
                 strategy: str | None = None, strategy_session_id: int | None = None) -> bool:
         if signal_source not in ("STRATEGY", "MANUAL_TEST"):
             raise ValueError("Недопустимый источник сигнала")
-        if expected_step is not None and (not 1 <= expected_step <= 9 or
+        if expected_step is not None and (not 1 <= expected_step <= 20 or
                                           strategy is None or strategy_session_id is None):
-            raise ValueError("Для шага стратегии требуется проверенная сессия и лимит 9")
+            raise ValueError("Для шага стратегии требуется проверенная сессия и лимит 20")
         with sqlite3.connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             run_id, step = db.execute("SELECT single_test_run_id,step FROM live_control WHERE id=1").fetchone()

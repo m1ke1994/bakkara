@@ -51,9 +51,9 @@ STRATEGY_OPTIONS = (
     {"id": STRATEGY_FIVE, "label": "Стратегия 5 · обратный 3-й шаг",
      "description": "Голосование N−3/10/24/31/40; после двух подтверждённых LOSE "
                     "на 3-м шаге преобразовать прогноз 3-го + прогноз 2-го; затем обычный алгоритм"},
-    {"id": STRATEGY_EIGHT, "label": "Стратегия №8 · вход после 3 LOSE",
-     "description": "Голосование N−3/10/24/31/40; 3 виртуальных LOSE до входа; "
-                    "максимум 9 денежных шагов. После WIN снова ждать 3 LOSE."},
+    {"id": STRATEGY_EIGHT, "label": "Стратегия №8 · вход после N LOSE",
+     "description": "Голосование N−3/10/24/31/40; количество виртуальных LOSE задаётся при сохранении; "
+                    "максимум 9 денежных шагов. После WIN снова ждать N LOSE."},
     {"id": STRATEGY_53, "label": "53%",
      "description": "16 соответствий A/K/Q/J; зеркало для средней из трёх; пропуск 4 игр после X; прогрев 40"},
     {"id": STRATEGY_SECOND_CARD, "label": "Вторая карта · масть N−1",
@@ -600,6 +600,9 @@ class Cycle18Engine:
             session_columns = {row[1] for row in db.execute("PRAGMA table_info(cycle18_sessions)")}
             if "strategy" not in session_columns:
                 db.execute("ALTER TABLE cycle18_sessions ADD COLUMN strategy TEXT NOT NULL DEFAULT 'n18'")
+            if "entry_losses" not in session_columns:
+                db.execute("ALTER TABLE cycle18_sessions ADD COLUMN entry_losses INTEGER NOT NULL DEFAULT 0")
+                db.execute("UPDATE cycle18_sessions SET entry_losses=3 WHERE strategy=?", (STRATEGY_EIGHT,))
             forecast_columns = {row[1] for row in db.execute("PRAGMA table_info(cycle18_forecasts)")}
             if "sources_json" not in forecast_columns:
                 db.execute("ALTER TABLE cycle18_forecasts ADD COLUMN sources_json TEXT")
@@ -617,6 +620,10 @@ class Cycle18Engine:
             )""")
             db.execute("INSERT OR IGNORE INTO bot_strategy_settings(id,strategy) VALUES(1,?)",
                        (STRATEGY_N18,))
+            settings_columns = {row[1] for row in db.execute("PRAGMA table_info(bot_strategy_settings)")}
+            if "entry_losses" not in settings_columns:
+                db.execute("ALTER TABLE bot_strategy_settings ADD COLUMN entry_losses INTEGER NOT NULL DEFAULT 0")
+                db.execute("UPDATE bot_strategy_settings SET entry_losses=3 WHERE strategy=?", (STRATEGY_EIGHT,))
             db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_target ON cycle18_forecasts(session_id,target_round_number)")
             # Archive lookups join by exact target_game_id across all sessions.
             db.execute("CREATE INDEX IF NOT EXISTS idx_cycle18_forecast_game ON cycle18_forecasts(target_game_id)")
@@ -624,20 +631,30 @@ class Cycle18Engine:
 
     def get_strategy(self) -> dict[str, Any]:
         with sqlite3.connect(self.path) as db:
-            row = db.execute("SELECT strategy FROM bot_strategy_settings WHERE id=1").fetchone()
-            session = db.execute("SELECT strategy FROM cycle18_sessions WHERE stopped_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+            row = db.execute("SELECT strategy,entry_losses FROM bot_strategy_settings WHERE id=1").fetchone()
+            session = db.execute("SELECT strategy,entry_losses FROM cycle18_sessions WHERE stopped_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
         selected = row[0] if row and row[0] in AVAILABLE_STRATEGIES else STRATEGY_N18
         return {"selected": selected, "active": session[0] if session else None,
+                "entry_losses": int(row[1]) if row else 0,
+                "active_entry_losses": int(session[1]) if session else None,
                 "options": list(STRATEGY_OPTIONS)}
 
-    def save_strategy(self, strategy: str) -> dict[str, Any]:
+    def save_strategy(self, strategy: str, entry_losses: int | None = None) -> dict[str, Any]:
         if strategy not in AVAILABLE_STRATEGIES:
             raise ValueError("Неизвестный фильтр прогнозирования")
+        if entry_losses is not None and (isinstance(entry_losses, bool)
+                or not isinstance(entry_losses, int) or not 0 <= entry_losses <= 30):
+            raise ValueError("Ожидание проигрышей должно быть целым числом от 0 до 30")
         with sqlite3.connect(self.path, timeout=5) as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM cycle18_sessions WHERE stopped_at IS NULL LIMIT 1").fetchone():
                 raise RuntimeError("Остановите сканирование перед сменой фильтра")
-            db.execute("UPDATE bot_strategy_settings SET strategy=? WHERE id=1", (strategy,))
+            previous = db.execute("SELECT strategy,entry_losses FROM bot_strategy_settings WHERE id=1").fetchone()
+            if entry_losses is None:
+                entry_losses = (int(previous[1]) if previous and previous[0] == strategy
+                                else 3 if strategy == STRATEGY_EIGHT else 0)
+            db.execute("UPDATE bot_strategy_settings SET strategy=?,entry_losses=? WHERE id=1",
+                       (strategy, entry_losses))
         return self.get_strategy()
 
     def start_session(self, *, resume: bool = False) -> int:
@@ -645,13 +662,14 @@ class Cycle18Engine:
         now = now_dt.isoformat()
         with sqlite3.connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
-            selected = db.execute("SELECT strategy FROM bot_strategy_settings WHERE id=1").fetchone()
+            selected = db.execute("SELECT strategy,entry_losses FROM bot_strategy_settings WHERE id=1").fetchone()
             strategy = selected[0] if selected else STRATEGY_N18
+            entry_losses = int(selected[1]) if selected else 0
             if resume:
                 last = db.execute(
-                    "SELECT id,strategy,stopped_at,started_at FROM cycle18_sessions "
+                    "SELECT id,strategy,stopped_at,started_at,entry_losses FROM cycle18_sessions "
                     "ORDER BY id DESC LIMIT 1").fetchone()
-                if last and last[1] == strategy:
+                if last and last[1] == strategy and last[4] == entry_losses:
                     ended = moment(last[2])
                     # Reopening an existing session preserves its 40-hand
                     # preparation and forecasts without forging card data.
@@ -661,8 +679,8 @@ class Cycle18Engine:
                                    (last[0],))
                         return int(last[0])
             db.execute("UPDATE cycle18_sessions SET stopped_at=? WHERE stopped_at IS NULL", (now,))
-            cursor = db.execute("INSERT INTO cycle18_sessions(started_at,strategy) VALUES(?,?)",
-                                (now, strategy))
+            cursor = db.execute("INSERT INTO cycle18_sessions(started_at,strategy,entry_losses) VALUES(?,?,?)",
+                                (now, strategy, entry_losses))
             return int(cursor.lastrowid)
 
     def stop_session(self) -> None:
@@ -686,6 +704,7 @@ class Cycle18Engine:
             if not session:
                 return self._empty(self.get_strategy()["selected"])
             strategy = session["strategy"] if session["strategy"] in AVAILABLE_STRATEGIES else STRATEGY_N18
+            entry_losses = int(session["entry_losses"])
             warmup_required = strategy_warmup(strategy)
             sid, started_at = int(session["id"]), moment(session["started_at"])
             stopped_at = moment(session["stopped_at"])
@@ -906,7 +925,8 @@ class Cycle18Engine:
 
         eight_progress = None
         eight_gate = None
-        if strategy == STRATEGY_EIGHT:
+        entry_gate = None
+        if entry_losses > 0:
             # Reconstruct from immutable, verified forecasts and persisted attempts.
             # Do not use the general martingale step: it includes virtual LOSE.
             with sqlite3.connect(self.path) as gate_db:
@@ -919,23 +939,34 @@ class Cycle18Engine:
                 attempts = ({
                     row["game_id"]: dict(row) for row in gate_db.execute(
                         "SELECT * FROM live_attempts WHERE strategy=? AND strategy_session_id=?",
-                        (STRATEGY_EIGHT, sid)).fetchall()
+                        (strategy, sid)).fetchall()
                 } if "live_attempts" in tables else {})
                 saved_plan = (gate_db.execute(
                     "SELECT payload FROM calculator_settings WHERE id=1").fetchone()
                     if "calculator_settings" in tables else None)
-            eight_progress = evaluate_eight(forecasts, attempts, mode=gate_mode)
+            if strategy == STRATEGY_EIGHT:
+                max_steps = 9
+            else:
+                try:
+                    max_steps = int(json.loads(saved_plan["payload"])["steps"]) if saved_plan else 8
+                    if not 1 <= max_steps <= 20:
+                        max_steps = 8
+                except (ValueError, KeyError, TypeError):
+                    max_steps = 8
+            eight_progress = evaluate_eight(forecasts, attempts, mode=gate_mode,
+                                            wait_losses=entry_losses, max_steps=max_steps)
             current_id = current.get("game_id") if current else None
             eight_gate = (eight_progress["before"].get(current_id)
                           or eight_progress["current"])
             eight_gate = {**eight_gate, "mode": gate_mode}
+            entry_gate = eight_gate
             wager_history = [dict(item) for item in eight_progress["wager_history"]]
             if gate_mode == "DEMO":
                 try:
                     plan = json.loads(saved_plan["payload"]) if saved_plan else {}
                     amounts = [Decimal(str(value)) for value in plan.get("row", [])]
                     odds = Decimal(str(plan["odds"]))
-                    plan_ready = (int(plan.get("steps", 0)) == 9 and len(amounts) == 9
+                    plan_ready = (int(plan.get("steps", 0)) == max_steps and len(amounts) == max_steps
                                   and odds > 1 and all(value > 0 for value in amounts))
                 except (ValueError, KeyError, TypeError, ArithmeticError):
                     plan_ready = False
@@ -950,6 +981,8 @@ class Cycle18Engine:
                         wager["delta"] = str(delta)
                     eight_gate["demo_profit"] = str(profit.quantize(Decimal("0.01")))
             eight_gate["recent_wagers"] = wager_history[-20:][::-1]
+            if strategy != STRATEGY_EIGHT:
+                eight_gate = None
 
         checked = [row for row in forecasts if row["result"] in ("WIN", "LOSE")
                    and row["mode"] != "FILTER"]
@@ -996,17 +1029,18 @@ class Cycle18Engine:
                     preview["base_predicted_suit"] = saved.get("base_predicted_suit")
                     preview["strategy_five_applied"] = bool(saved.get("strategy_five_applied"))
                     preview["strategy_five_previous_suit"] = saved.get("strategy_five_previous_suit")
-        if strategy == STRATEGY_EIGHT:
+        if entry_gate is not None:
             for preview in previews:
                 if preview["phase"] == "CURRENT":
-                    preview["entry_paused"] = not eight_gate["bet_allowed"]
-                    preview["virtual_losses"] = eight_gate["virtual_losses"]
-                    preview["real_step"] = eight_gate["step"]
-                    preview["entry_phase"] = eight_gate["phase"]
-                    preview["available"] = bool(preview["available"] and eight_gate["bet_allowed"])
+                    preview["entry_paused"] = not entry_gate["bet_allowed"]
+                    preview["virtual_losses"] = entry_gate["virtual_losses"]
+                    preview["real_step"] = entry_gate["step"]
+                    preview["entry_phase"] = entry_gate["phase"]
+                    preview["available"] = bool(preview["available"] and entry_gate["bet_allowed"])
                     if preview["entry_paused"]:
-                        preview["reason"] = ("Ждём 3 виртуальных LOSE подряд" if eight_gate["phase"] == "WAITING"
-                                             else "Достигнут лимит 9 шагов; требуется ручная проверка")
+                        preview["reason"] = (f"Ждём {entry_losses} виртуальных LOSE подряд"
+                                             if entry_gate["phase"] == "WAITING"
+                                             else f"Достигнут лимит {entry_gate['max_steps']} шагов или обнаружена ошибка LIVE; требуется ручная проверка")
                 else:
                     preview["entry_phase"] = "PROVISIONAL"
         if strategy == STRATEGY_VOTE_DRAW_12:
@@ -1034,6 +1068,8 @@ class Cycle18Engine:
             "captured_count": captured_total, "verified_count": verified_total,
             "ready": warmup_complete and not stopped_at,
             "pause_enabled": strategy == STRATEGY_VOTE_DRAW_12,
+            "entry_losses": entry_losses,
+            "entry_gate": entry_gate,
             "strategy_eight": eight_gate,
             "pause_triggers": pause_triggers[-25:],
             "filter_skipped_count": sum(row["mode"] == "FILTER" for row in forecasts),
@@ -1112,6 +1148,8 @@ class Cycle18Engine:
             "captured_count": 0, "verified_count": 0,
             "pause_enabled": strategy == STRATEGY_VOTE_DRAW_12,
             "strategy_eight": None,
+            "entry_gate": None,
+            "entry_losses": 0,
             "pause_triggers": [], "filter_skipped_count": 0,
             "filter_skipped_wins": 0, "filter_skipped_losses": 0,
             "unconfirmed_forecasts": [],

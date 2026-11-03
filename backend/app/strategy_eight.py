@@ -1,4 +1,4 @@
-"""Strategy 8: three verified virtual LOSE before a nine-step entry.
+"""Strategy-entry gate: configurable verified virtual LOSE before money entry.
 
 This evaluator is pure. It never places bets or treats an unaccepted LIVE
 attempt as a loss. Rows must be in physical round order, from one session.
@@ -24,14 +24,19 @@ def _time(value: Any) -> datetime | None:
 
 
 def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str, Any]],
-                   *, mode: str = "DEMO") -> dict[str, Any]:
+                   *, mode: str = "DEMO", wait_losses: int = WAIT_LOSSES,
+                   max_steps: int = MAX_STEPS) -> dict[str, Any]:
     """Replay ONLY settled, non-filtered forecasts; return entry state per game.
 
     DEMO treats a forecast in an active series as a simulated wager.
     LIVE advances a series only on a matched ACCEPTED and settled attempt.
     """
     if mode not in ("DEMO", "LIVE"):
-        raise ValueError("Unknown strategy eight mode")
+        raise ValueError("Unknown strategy gate mode")
+    if isinstance(wait_losses, bool) or not isinstance(wait_losses, int) or not 1 <= wait_losses <= 30:
+        raise ValueError("Wait losses must be from 1 to 30")
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 20:
+        raise ValueError("Max steps must be from 1 to 20")
     phase = "WAITING"
     virtual_losses = 0
     step = 1
@@ -42,9 +47,10 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
 
     def state() -> dict[str, Any]:
         return {"phase": phase, "virtual_losses": virtual_losses, "step": step,
-                "bet_allowed": phase == "BETTING" and 1 <= step <= MAX_STEPS,
+                "bet_allowed": phase == "BETTING" and 1 <= step <= max_steps,
                 "wagers": wagers, "wins": wins, "losses": losses,
-                "entries": entries, "max_steps": MAX_STEPS}
+                "entries": entries, "max_steps": max_steps,
+                "required_losses": wait_losses}
 
     for forecast in forecasts:
         game_id = forecast.get("target_game_id")
@@ -65,13 +71,13 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
                 virtual_losses = 0
             virtual_losses = virtual_losses + 1 if result == "LOSE" else 0
             previous_virtual_time = final_at
-            if virtual_losses >= WAIT_LOSSES:
+            if virtual_losses >= wait_losses:
                 phase = "BETTING"
                 step = 1
                 entries += 1
             continue
         if phase != "BETTING":
-            continue  # A full nine-step loss needs a deliberate reset.
+            continue  # A fully exhausted row needs a deliberate reset.
         if mode == "LIVE":
             attempt = attempts.get(game_id)
             if not attempt:
@@ -100,7 +106,7 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
         else:
             losses += 1
             step += 1
-            if step > MAX_STEPS:
+            if step > max_steps:
                 phase = "EXHAUSTED"
     return {"before": prior, "current": state(), "mode": mode,
             "wager_history": wager_history}
