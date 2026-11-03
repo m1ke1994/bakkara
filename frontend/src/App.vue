@@ -107,7 +107,7 @@ const strategyShortLabel = computed(() => activeStrategy.value === 'vote_3_10_24
 const entryThresholdStrategy = computed(() => strategyChoice.value === 'second_player_card')
 const entryLossesValid = computed(() =>
   !entryThresholdStrategy.value || (Number.isInteger(entryLossesChoice.value)
-    && entryLossesChoice.value >= 1 && entryLossesChoice.value <= 30))
+    && entryLossesChoice.value >= 0 && entryLossesChoice.value <= 30))
 const strategyDirty = computed(() =>
   strategyChoice.value !== (strategyInfo.value.selected || 'n18')
   || (entryThresholdStrategy.value
@@ -430,11 +430,11 @@ onBeforeUnmount(() => {
         <label for="strategy-entry-losses"><strong>LIVE-вход после подряд проигранных прогнозов</strong></label>
         <div class="entry-gate-setting-row">
           <input id="strategy-entry-losses" v-model.number="entryLossesChoice" type="number"
-            inputmode="numeric" min="1" max="30" step="1" :disabled="busy || observing"
+            inputmode="numeric" min="0" max="30" step="1" :disabled="busy || observing"
             @input="strategyTouched = true; strategyNotice = ''" />
-          <span class="diagnostic">От 1 до 30 подтверждённых виртуальных LOSE. Например, после 3 LOSE первый LIVE-шаг — в следующей раздаче (N+1).</span>
+          <span class="diagnostic">0 — вход без ожидания виртуальных LOSE; 1–30 — ждать указанное количество подряд подтверждённых виртуальных LOSE.</span>
         </div>
-        <p v-if="!entryLossesValid" class="error">Введите целое число от 1 до 30.</p>
+        <p v-if="!entryLossesValid" class="error">Введите целое число от 0 до 30.</p>
         <p class="diagnostic">Поражение считается только по прогнозу «Вторая карта · масть N−1» и подтверждённым картам Игрока, а не по любому исходу из истории. После принятого и подтверждённого LIVE WIN — повторное ожидание. Сохраните число и запустите сканирование.</p>
       </div>
       <div class="controls strategy-save-controls">
@@ -460,8 +460,8 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="activeStrategy === 'second_player_card'" class="diagnostic" data-testid="second-card-entry-gate">
         <p><strong>Вторая карта · масть N−1:</strong> {{ entryGatePhase }} · порог {{ activeEntryThreshold }} LOSE · набрано {{ entryGate?.virtual_losses ?? 0 }}/{{ entryGate?.required_losses ?? activeEntryThreshold }} · следующий денежный шаг {{ entryGate?.step ?? 1 }}/{{ entryGate?.max_steps ?? '—' }}.</p>
-        <p>Первый денежный шаг только на следующей раздаче после достижения порога. При принятом LOSE — следующий шаг из сохранённого калькулятора; при подтверждённом WIN — сброс на ожидание. Неподтверждённые исходы не засчитываются, пропуск раздачи прерывает непрерывную серию ожидания. После исчерпания ряда ставки останавливаются.</p>
-        <p v-if="!activeEntryThreshold">Порог ещё не включён: перед LIVE установите число и сохраните стратегию.</p>
+        <p>При пороге 0 первый шаг доступен сразу после подтверждённого прогноза N−1; иначе — в следующей раздаче после достижения порога. При принятом LOSE — следующий шаг из сохранённого калькулятора; при подтверждённом WIN — сброс на ожидание. Неподтверждённые исходы не засчитываются, пропуск раздачи прерывает непрерывную серию ожидания. После исчерпания ряда ставки останавливаются.</p>
+        <p v-if="activeEntryThreshold === 0">Порог 0: ожидание виртуальных LOSE отключено. Проверки прогноза и состояния ранее принятой ставки сохраняются.</p>
         <p>Историческая точность не гарантирует прибыль. Сначала проверьте логику в DEMO.</p>
       </div>
       <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — экспериментальная стратегия. При неизвестном итоге Банкира масть показывается только предварительно; сигнал и ставка ждут подтверждения четырёх исходов. Пропуски не считаются LOSE и не обнуляют шаг. Название не гарантирует точность.</p>
