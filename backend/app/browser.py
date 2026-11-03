@@ -1597,10 +1597,33 @@ class BrowserService:
                     if (validRank(rank) && suit) cards.push({position: boxIndex + 1, rank, suit});
                     else pending += 1;
                   }
-                  const bankerSide = playerOnly ? null : wrappers.find(side => [...side.querySelectorAll('.baccarat-player__name')]
-                    .some(node => visible(node) && text(node).toLocaleLowerCase() === bankerName));
-                  const bankerBoxes = [...(bankerSide?.querySelectorAll('.baccarat-player__card-box') || [])].filter(visible);
-                  const banker_ranks = bankerBoxes.map(box => {
+                  // With a Player-only strategy, a two-card Player total 6-9
+                  // always stands. For totals 0-5, the Banker may have a
+                  // natural 8/9 and prevent the third Player card. Only then
+                  // inspect the FIRST TWO Banker ranks; never read its suits,
+                  // third card or final outcome on this fast path.
+                  const firstTwoPlayer = cards.length === 2 &&
+                    cards[0]?.position === 1 && cards[1]?.position === 2;
+                  const cardPoints = value => {
+                    const rank = String(value || '').toUpperCase();
+                    return rank === 'A' ? 1 : /^(10|J|Q|K)$/.test(rank) ? 0
+                      : /^[2-9]$/.test(rank) ? Number(rank) : null;
+                  };
+                  const playerPoints = firstTwoPlayer
+                    ? cards.slice(0, 2).map(card => cardPoints(card.rank)) : [];
+                  const playerTotal = playerPoints.length === 2
+                    && playerPoints.every(value => value !== null)
+                    ? (playerPoints[0] + playerPoints[1]) % 10 : null;
+                  const needBankerNatural = playerOnly && playerTotal !== null
+                    && playerTotal <= 5;
+                  const bankerSide = (!playerOnly || needBankerNatural)
+                    ? wrappers.find(side => [...side.querySelectorAll('.baccarat-player__name')]
+                        .some(node => visible(node) && text(node).toLocaleLowerCase() === bankerName))
+                    : null;
+                  const bankerBoxes = [...(bankerSide?.querySelectorAll('.baccarat-player__card-box') || [])]
+                    .filter(visible);
+                  const bankerRankBoxes = playerOnly ? bankerBoxes.slice(0, 2) : bankerBoxes;
+                  const banker_ranks = bankerRankBoxes.map(box => {
                     const nodes = [
                       ...box.querySelectorAll('.baccarat-card__rank, [data-rank], [class*="card__value"], [class*="card-rank"]'),
                       ...box.querySelectorAll('*'),
@@ -1613,7 +1636,7 @@ class BrowserService:
                   const banker_initial_ranks = banker_ranks.slice(0, 2);
                   const banker_cards = [];
                   let banker_pending_card_slots = 0;
-                  for (const [index, box] of bankerBoxes.entries()) {
+                  for (const [index, box] of (playerOnly ? [] : bankerBoxes).entries()) {
                     const rank = banker_ranks[index];
                     // Ignore hidden backs of cards during Banker card flips.
                     const metadata = [box, ...box.querySelectorAll('*')].filter(visible).map(node => [
@@ -2749,11 +2772,11 @@ class BrowserService:
                 # placeholder. Neither a result animation nor a timer is
                 # needed; re-read the live DOM before persisting the hand.
                 required_count = player_card_count(
-                    observed_cards,
-                    [] if second_card_only else diagnostics.get("banker_initial_ranks", []))
-                # With Player-only evidence, totals 6-9 are safely two cards.
-                # For 0-5, a terminal result with NO pending third slot is
-                # required; Banker naturals cannot be inferred from Player.
+                    observed_cards, diagnostics.get("banker_initial_ranks", []))
+                # Player total 6-9 stands immediately. For Player total 0-5,
+                # only the first two Banker ranks (natural 8/9) can tell us
+                # that no third Player card will be dealt. Otherwise wait
+                # for the third card or unequivocal terminal evidence.
                 player_only_terminal_two = bool(
                     second_card_only and finish_seen and pending == 0
                     and len(observed_cards) == 2)
@@ -2773,7 +2796,7 @@ class BrowserService:
                     confirmed_two = (
                         (player_card_count(
                             final_read.get("cards", []),
-                            [] if second_card_only else final_read.get("banker_initial_ranks", [])) == 2
+                            final_read.get("banker_initial_ranks", [])) == 2
                          or (player_only_terminal_two and final_pending == 0))
                         and 2 <= final_boxes <= 3
                         and final_pending == final_boxes - 2
