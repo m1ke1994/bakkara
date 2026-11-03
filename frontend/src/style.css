@@ -116,3 +116,12 @@ b { margin-right: 6px; font-size: .75rem; }
 .strategy-option small { color: #adbeda; font-size: .8rem; }
 .strategy-save-controls { align-items: center; }
 .strategy-notice { color: #7bebb0; font-weight: 700; }
+
+/* Configurable confirmed virtual-loss entry gate. */
+.entry-gate-setting { margin: 18px 0; padding: 16px 18px; border: 1px solid #315575; border-radius: 10px; background: #102236; }
+.entry-gate-setting label { display: block; margin-bottom: 10px; }
+.entry-gate-setting-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.entry-gate-setting-row input { width: 110px; max-width: 100%; min-height: 42px; border: 1px solid #4d7094; border-radius: 8px; background: #071725; color: #edf4ff; font-size: 1.08rem; font-weight: 700; padding: 8px 12px; }
+.entry-gate-setting-row input:focus-visible { outline: 2px solid #64d7ff; outline-offset: 2px; }
+.entry-gate-setting-row input:disabled { opacity: .55; }
+.entry-gate-setting-row .diagnostic { flex: 1 1 250px; margin: 0; }

@@ -25,7 +25,8 @@ def _time(value: Any) -> datetime | None:
 
 def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str, Any]],
                    *, mode: str = "DEMO", wait_losses: int = WAIT_LOSSES,
-                   max_steps: int = MAX_STEPS) -> dict[str, Any]:
+                   max_steps: int = MAX_STEPS,
+                   strict_consecutive: bool = False) -> dict[str, Any]:
     """Replay ONLY settled, non-filtered forecasts; return entry state per game.
 
     DEMO treats a forecast in an active series as a simulated wager.
@@ -44,6 +45,7 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
     wager_history: list[dict[str, Any]] = []
     prior: dict[str, dict[str, Any]] = {}
     previous_virtual_time = None
+    previous_virtual_round = None
 
     def state() -> dict[str, Any]:
         return {"phase": phase, "virtual_losses": virtual_losses, "step": step,
@@ -63,6 +65,13 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
         final_at = _time(forecast.get("target_finished_at")
                          or forecast.get("target_observed_at"))
         if phase == "WAITING":
+            physical = forecast.get("target_round_number")
+            # Second-card predictions arrive for successive numbered hands. A
+            # missed/unknown hand cannot silently bridge a "consecutive" streak.
+            if strict_consecutive and previous_virtual_round is not None:
+                if (not isinstance(physical, int) or
+                        physical != previous_virtual_round % 1440 + 1):
+                    virtual_losses = 0
             if previous_virtual_time and final_at:
                 delta = (final_at - previous_virtual_time).total_seconds()
                 if not 0 <= delta <= MAX_GAP_SECONDS:
@@ -71,6 +80,7 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
                 virtual_losses = 0
             virtual_losses = virtual_losses + 1 if result == "LOSE" else 0
             previous_virtual_time = final_at
+            previous_virtual_round = physical
             if virtual_losses >= wait_losses:
                 phase = "BETTING"
                 step = 1
@@ -103,6 +113,7 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
             virtual_losses = 0
             step = 1
             previous_virtual_time = final_at
+            previous_virtual_round = forecast.get("target_round_number")
         else:
             losses += 1
             step += 1

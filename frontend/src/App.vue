@@ -82,6 +82,7 @@ async function probeCanvasMarket() {
 const error = ref('')
 const cycle18 = computed(() => state.value.cycle18 || {})
 const strategyChoice = ref('n18')
+const entryLossesChoice = ref(3)
 const strategyTouched = ref(false)
 const strategyNotice = ref('')
 const strategyInfo = computed(() => state.value.strategy || {})
@@ -101,15 +102,31 @@ const strategyShortLabel = computed(() => activeStrategy.value === 'vote_3_10_24
   : activeStrategy.value === 'facecards_53' ? '53%'
   : activeStrategy.value === 'hot_suits_8_spread_6' ? 'частые масти'
   : activeStrategy.value === 'vote_3_10_24_31_40_step3_reverse' ? 'стратегия 5' : '5 циклов')
-const strategyDirty = computed(() => strategyChoice.value !== (strategyInfo.value.selected || 'n18'))
+const entryThresholdStrategy = computed(() =>
+  ['second_player_card', 'vote_3_10_24_31_40_after_3_losses'].includes(strategyChoice.value))
+const entryLossesValid = computed(() =>
+  !entryThresholdStrategy.value || (Number.isInteger(entryLossesChoice.value)
+    && entryLossesChoice.value >= 1 && entryLossesChoice.value <= 30))
+const strategyDirty = computed(() =>
+  strategyChoice.value !== (strategyInfo.value.selected || 'n18')
+  || (entryThresholdStrategy.value
+      && entryLossesChoice.value !== Number(strategyInfo.value.entry_losses ?? 0)))
+function chooseStrategy() {
+  strategyTouched.value = true
+  strategyNotice.value = ''
+  if (entryThresholdStrategy.value) {
+    entryLossesChoice.value = strategyChoice.value === strategyInfo.value.selected
+      ? Number(strategyInfo.value.entry_losses ?? 3) : 3
+  }
+}
 const strategyOptions = [
   { id: 'n18', label: 'Цикл N−18', detail: 'Один источник · 20 подтверждённых раздач для подготовки' },
   { id: 'vote_3_10_24_31_40', label: 'Голосование N−3/10/24/31/40', detail: 'Пять голосов · 40 подтверждённых раздач для подготовки' },
-  { id: 'second_player_card', label: 'Вторая карта · масть N−1', detail: 'Сразу после первой подтверждённой раздачи выбираем масть второй карты Игрока из завершённой N−1. Две карты: последняя; три: средняя. Новый прогноз в каждой игре; DEMO — виртуальный WIN/LOSE, LIVE — обычный сохранённый ряд ставок.' },
+  { id: 'second_player_card', label: 'Вторая карта · масть N−1', detail: 'Прогноз: масть второй карты Игрока предыдущей раздачи. Введите, сколько подряд подтверждённых виртуальных LOSE ждать до LIVE-входа. После WIN ожидание начинается заново.' },
   { id: 'vote_3_10_24_31_40_draw_diamond_12', label: 'Голосование + ничья ♦ / пропуск 12', detail: 'После подтверждённой ничьей с ♦ у Игрока не ставить в 12 следующих раздачах; новые ничьи внутри паузы не продлевают её' },
   { id: 'hot_suits_8_spread_6', label: 'Частые масти · 8 раздач / разница ≥6', detail: 'Без таблицы преобразования: 8 подряд финальных рук Игрока, сумма фактических мастей, разброс ≥6. Иначе пропуск, шаг догона сохраняется.' },
   { id: 'vote_3_10_24_31_40_step3_reverse', label: 'Стратегия 5 · обратный 3-й шаг', detail: 'После двух подтверждённых LOSE на третьем шаге: таблица[прогноз шага 3 + прогноз шага 2]. С четвёртого шага — обычное голосование N−3/10/24/31/40. Подготовка 40 рук.' },
-  { id: 'vote_3_10_24_31_40_after_3_losses', label: 'Стратегия №8 · вход после 3 LOSE', detail: 'Голосование N−3/10/24/31/40. Ожидаем 3 подтверждённых виртуальных LOSE, затем максимум 9 денежных шагов. После WIN ожидание начинается снова. После 9 LOSE — остановка.' },
+  { id: 'vote_3_10_24_31_40_after_3_losses', label: 'Стратегия №8 · вход после N LOSE', detail: 'Голосование N−3/10/24/31/40. Ожидаем заданное число виртуальных LOSE, затем максимум 9 денежных шагов. После WIN — новое ожидание.' },
   { id: 'facecards_53', label: '53%', detail: 'Одна A/K/Q/J из предыдущей руки Игрока; зеркало выходной масти для средней из трёх; пропуск 4 после ничьей; прогрев 40.' },
 ]
 const sourceDescription = forecast => (forecast?.source_round_numbers || [forecast?.source_round_number])
@@ -137,7 +154,7 @@ const forecastUnavailableTitle = forecast => {
   return 'Прогноз пока недоступен'
 }
 const forecastUnavailableDescription = forecast => {
-  if (forecast?.entry_paused) return forecast.reason || 'Ожидаем три виртуальных LOSE'
+  if (forecast?.entry_paused) return forecast.reason || 'Ожидаем подтверждённые виртуальные LOSE'
   if (forecast?.filter_paused) return forecast.reason || 'Действует пауза фильтра'
   if (forecast?.missing_sources?.length) return missingSourcesDescription(forecast)
   // A fully verified 8-hand window with spread < 6 is a SKIP, not missing data.
@@ -146,6 +163,8 @@ const forecastUnavailableDescription = forecast => {
 
 const cycleStats = computed(() => cycle18.value.statistics || {})
 const eightGate = computed(() => cycle18.value.strategy_eight || null)
+const entryGate = computed(() => cycle18.value.entry_gate || null)
+const entryGatePhase = computed(() => ({ WAITING: 'Ожидаем виртуальные LOSE', BETTING: 'LIVE-вход разрешён', EXHAUSTED: 'Ряд исчерпан: ставки остановлены', BLOCKED: 'Расхождение результатов: ставки заблокированы' }[entryGate.value?.phase] || 'Настройка ожидает запуска'))
 const eightPhaseLabel = computed(() => ({ WAITING: 'Ожидаем виртуальные LOSE', BETTING: 'Вход разрешён', EXHAUSTED: 'Лимит 9 шагов исчерпан', BLOCKED: 'Несовпадение LIVE-истории: блокировка' }[eightGate.value?.phase] || 'Ожидание'))
 const currentForecast = computed(() => cycle18.value.ready
   ? cycle18.value.live_preview?.find(item => item.phase === 'CURRENT') : null)
@@ -306,7 +325,10 @@ function applySnapshot(next) {
   if (!next.strategy && state.value.strategy) next.strategy = state.value.strategy
   if (!next.live && state.value.live) next.live = state.value.live
   state.value = next
-  if (!strategyTouched.value && next.strategy?.selected) strategyChoice.value = next.strategy.selected
+  if (!strategyTouched.value && next.strategy?.selected) {
+    strategyChoice.value = next.strategy.selected
+    entryLossesChoice.value = Number(next.strategy.entry_losses ?? 3)
+  }
   return true
 }
 async function command(path, method = 'POST') {
@@ -323,19 +345,23 @@ async function command(path, method = 'POST') {
   }
 }
 async function saveStrategy() {
-  if (busy.value || observing.value) return
+  if (busy.value || observing.value || !entryLossesValid.value) return
   busy.value = true
   strategyNotice.value = ''
   try {
     const response = await fetch(`${api}/api/strategy`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ strategy: strategyChoice.value }),
+      body: JSON.stringify({
+        strategy: strategyChoice.value,
+        entry_losses: entryThresholdStrategy.value ? entryLossesChoice.value : 0,
+      }),
     })
     const payload = await response.json()
     if (!response.ok) throw new Error(payload.detail || 'Сервер отклонил выбор фильтра')
     state.value = { ...state.value, strategy: payload }
     strategyChoice.value = payload.selected
+    entryLossesChoice.value = Number(payload.entry_losses ?? 0)
     strategyTouched.value = false
     strategyNotice.value = 'Фильтр сохранён на сервере. Следующий запуск сканирования применит его.'
     error.value = ''
@@ -394,17 +420,28 @@ onBeforeUnmount(() => {
       <div class="section-title"><div><p class="eyebrow">СТРАТЕГИЯ / ФИЛЬТР</p><h2>Выберите алгоритм прогнозирования</h2></div><span class="standalone-label">На сервере: {{ strategyOptions.find(item => item.id === strategyInfo.selected)?.label || '—' }}</span></div>
       <div class="strategy-options" role="radiogroup" aria-label="Фильтр прогноза">
         <label v-for="option in strategyOptions" :key="option.id" class="strategy-option" :class="{ 'strategy-option-selected': strategyChoice === option.id }">
-          <input v-model="strategyChoice" type="radio" name="forecast-strategy" :value="option.id" :disabled="busy || observing" @change="strategyTouched = true; strategyNotice = ''" />
+          <input v-model="strategyChoice" type="radio" name="forecast-strategy" :value="option.id" :disabled="busy || observing" @change="chooseStrategy" />
           <span><strong>{{ option.label }}</strong><small>{{ option.detail }}</small></span>
         </label>
       </div>
+      <div v-if="entryThresholdStrategy" class="entry-gate-setting">
+        <label for="strategy-entry-losses"><strong>LIVE-вход после подряд проигранных прогнозов</strong></label>
+        <div class="entry-gate-setting-row">
+          <input id="strategy-entry-losses" v-model.number="entryLossesChoice" type="number"
+            inputmode="numeric" min="1" max="30" step="1" :disabled="busy || observing"
+            @input="strategyTouched = true; strategyNotice = ''" />
+          <span class="diagnostic">От 1 до 30 подтверждённых виртуальных LOSE. Например, 3 → первая ставка на 4-й раздаче.</span>
+        </div>
+        <p v-if="!entryLossesValid" class="error">Введите целое число от 1 до 30.</p>
+        <p class="diagnostic">Поражение считается по выбранной стратегии и финальным картам Игрока, а не по любому исходу из истории. После принятого LIVE WIN — повторное ожидание. Для начала работы сохраните число и запустите сканирование.</p>
+      </div>
       <div class="controls strategy-save-controls">
-        <button :disabled="busy || observing || !strategyDirty" @click="saveStrategy">Сохранить стратегию</button>
-        <span class="diagnostic">{{ observing ? 'Сканирование активно: для смены фильтра сначала остановите его.' : (strategyDirty ? 'Выбор изменён — нажмите «Сохранить стратегию».' : 'Настройка хранится в базе данных бэкенда.') }}</span>
+        <button :disabled="busy || observing || !strategyDirty || !entryLossesValid" @click="saveStrategy">Сохранить стратегию</button>
+        <span class="diagnostic">{{ observing ? 'Сканирование активно: для смены фильтра сначала остановите его.' : (strategyDirty ? 'Выбор или порог изменён — нажмите «Сохранить стратегию».' : 'Настройка хранится в базе данных бэкенда.') }}</span>
       </div>
       <p v-if="strategyNotice" class="strategy-notice">{{ strategyNotice }}</p>
       <div v-if="activeStrategy === 'vote_3_10_24_31_40_after_3_losses'" class="diagnostic" data-testid="strategy-eight-status">
-        <p><strong>Стратегия №8:</strong> {{ eightPhaseLabel }} · виртуальных LOSE: {{ eightGate?.virtual_losses ?? 0 }}/3 · следующий денежный шаг: {{ eightGate?.step ?? 1 }}/9.</p>
+        <p><strong>Стратегия №8:</strong> {{ eightPhaseLabel }} · виртуальных LOSE: {{ eightGate?.virtual_losses ?? 0 }}/{{ eightGate?.required_losses ?? strategyInfo.entry_losses ?? 3 }} · следующий денежный шаг: {{ eightGate?.step ?? 1 }}/9.</p>
         <p>Режим {{ live.mode }} · учтённых денежных шагов: {{ eightGate?.wagers ?? 0 }} · WIN {{ eightGate?.wins ?? 0 }} · LOSE {{ eightGate?.losses ?? 0 }}. В DEMO шаги моделируются; в LIVE учитываются только принятые и подтверждённые ставки.</p>
         <p>Перед LIVE сохраните в калькуляторе ровно 9 сумм. После девятого LOSE новые ставки блокируются до ручной проверки.</p>
         <p v-if="live.mode === 'DEMO' && eightGate?.demo_plan_ready">ДЕМО, пересчёт по текущему сохранённому ряду: <strong>{{ eightGate.demo_profit }} ₽</strong>.</p>
@@ -419,7 +456,12 @@ onBeforeUnmount(() => {
           </tr></tbody></table>
         </details>
       </div>
-      <p v-if="activeStrategy === 'second_player_card'" class="diagnostic">Вторая карта: прогноз на N — масть карты №2 из подтверждённой руки Игрока N−1. При двух картах это последняя, при трёх — средняя. Каждая новая раздача — новый прогноз; в DEMO ставки виртуальные, в LIVE используется сохранённый калькулятор и подтверждение купона. Историческая точность не гарантирует прибыль.</p>
+      <div v-if="activeStrategy === 'second_player_card'" class="diagnostic" data-testid="second-card-entry-gate">
+        <p><strong>Вторая карта · масть N−1:</strong> {{ entryGatePhase }} · порог {{ cycle18.value.entry_losses ?? strategyInfo.entry_losses ?? 0 }} LOSE · набрано {{ entryGate?.virtual_losses ?? 0 }}/{{ entryGate?.required_losses ?? strategyInfo.entry_losses ?? 0 }} · следующий денежный шаг {{ entryGate?.step ?? 1 }}/{{ entryGate?.max_steps ?? '—' }}.</p>
+        <p>Первый денежный шаг только на следующей раздаче после достижения порога. При принятом LOSE — следующий шаг из сохранённого калькулятора; при подтверждённом WIN — сброс на ожидание. Неподтверждённые исходы не засчитываются, пропуск раздачи прерывает непрерывную серию ожидания. После исчерпания ряда ставки останавливаются.</p>
+        <p v-if="!Number(cycle18.value.entry_losses ?? strategyInfo.entry_losses ?? 0)">Порог ещё не включён: перед LIVE установите число и сохраните стратегию.</p>
+        <p>Историческая точность не гарантирует прибыль. Сначала проверьте логику в DEMO.</p>
+      </div>
       <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — экспериментальная стратегия. При неизвестном итоге Банкира масть показывается только предварительно; сигнал и ставка ждут подтверждения четырёх исходов. Пропуски не считаются LOSE и не обнуляют шаг. Название не гарантирует точность.</p>
       <p v-if="activeStrategy === 'vote_3_10_24_31_40_step3_reverse'" class="diagnostic">Стратегия 5: после двух подтверждённых LOSE на 3-м шаге один раз преобразуем масти (текущий базовый прогноз + предыдущий базовый прогноз). Без подтверждений замена запрещена.</p>
       <p class="diagnostic">После сохранения запустите браузер и нажмите «Начать сканирование». Во время сканирования фильтр фиксирован. Виртуальное голосование продолжает работать в паузе. В LIVE пропуск блокирует ставки по стратегии. Тест с первой раздачи не является прогнозом стратегии.</p>

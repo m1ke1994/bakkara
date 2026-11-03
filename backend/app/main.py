@@ -4,7 +4,7 @@ import logging
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 
 from .browser import browser_service
@@ -22,7 +22,7 @@ live_bet_store = browser_service.live_bets
 
 class StrategySelection(BaseModel):
     strategy: str
-    entry_losses: int | None = None
+    entry_losses: int | None = Field(default=None, ge=0, le=30, strict=True)
 
 
 class ModeSelection(BaseModel):
