@@ -191,7 +191,7 @@ def test_three_card_final_goes_to_next_page_without_waiting_for_banker(tmp_path)
                 "status_text": "", "cause": "fixture",
             }
         service._inspect_game_dom = inspect
-        service._live_before_cards = lambda _game: no_live()
+        service._live_before_cards = lambda _game: asyncio.sleep(0)
         game = Game("three", "https://example.test/baccarat/three",
                     "00:12", "650", "Не удалось определить", 0)
         processed = set()
