@@ -93,6 +93,20 @@ class LiveBets:
             db.execute("UPDATE live_control SET warmup_test=?, test_suit=? WHERE id=1",
                        (int(enabled), suit))
 
+    def clear_all(self) -> None:
+        """Explicitly discard local LIVE attempt history and reset the staking cycle.
+
+        This does not cancel bookmaker wagers. Require a stopped observer and
+        switch to DEMO so restarting observation cannot immediately spend money.
+        """
+        with sqlite3.connect(self.path, timeout=5) as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM live_attempts")
+            db.execute(
+                "UPDATE live_control SET mode='DEMO', step=1, "
+                "warmup_test=0, single_test_run_id=NULL WHERE id=1"
+            )
+
     def pending_accepted(self) -> list[dict]:
         """Find every accepted, unresolved wager (including previous sessions).
 
