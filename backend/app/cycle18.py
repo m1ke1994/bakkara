@@ -51,9 +51,9 @@ STRATEGY_OPTIONS = (
     {"id": STRATEGY_FIVE, "label": "Стратегия 5 · обратный 3-й шаг",
      "description": "Голосование N−3/10/24/31/40; после двух подтверждённых LOSE "
                     "на 3-м шаге преобразовать прогноз 3-го + прогноз 2-го; затем обычный алгоритм"},
-    {"id": STRATEGY_EIGHT, "label": "Стратегия №8 · вход после N LOSE",
-     "description": "Голосование N−3/10/24/31/40; количество виртуальных LOSE задаётся при сохранении; "
-                    "максимум 9 денежных шагов. После WIN снова ждать N LOSE."},
+    {"id": STRATEGY_EIGHT, "label": "Стратегия №8 · вход после 3 LOSE",
+     "description": "Голосование N−3/10/24/31/40; 3 виртуальных LOSE до входа; "
+                    "максимум 9 денежных шагов. После WIN снова ждать 3 LOSE."},
     {"id": STRATEGY_53, "label": "53%",
      "description": "16 соответствий A/K/Q/J; зеркало для средней из трёх; пропуск 4 игр после X; прогрев 40"},
     {"id": STRATEGY_SECOND_CARD, "label": "Вторая карта · масть N−1",
@@ -645,6 +645,8 @@ class Cycle18Engine:
         if entry_losses is not None and (isinstance(entry_losses, bool)
                 or not isinstance(entry_losses, int) or not 0 <= entry_losses <= 30):
             raise ValueError("Ожидание проигрышей должно быть целым числом от 0 до 30")
+        if strategy not in (STRATEGY_SECOND_CARD, STRATEGY_EIGHT) and entry_losses not in (None, 0):
+            raise ValueError("Настройка ожидания LOSE поддерживается только стратегией «Вторая карта · масть N−1»")
         with sqlite3.connect(self.path, timeout=5) as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT 1 FROM cycle18_sessions WHERE stopped_at IS NULL LIMIT 1").fetchone():
@@ -926,7 +928,7 @@ class Cycle18Engine:
         eight_progress = None
         eight_gate = None
         entry_gate = None
-        if entry_losses > 0:
+        if entry_losses > 0 and strategy in (STRATEGY_SECOND_CARD, STRATEGY_EIGHT):
             # Reconstruct from immutable, verified forecasts and persisted attempts.
             # Do not use the general martingale step: it includes virtual LOSE.
             with sqlite3.connect(self.path) as gate_db:
