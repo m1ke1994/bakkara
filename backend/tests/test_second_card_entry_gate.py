@@ -174,3 +174,20 @@ def test_live_uses_previous_second_card_after_wait_then_saved_stake_row(tmp_path
     assert seventh["entry_gate"]["step"] == 1
     assert not seventh["live_preview"][0]["available"]
     assert ledger.snapshot()["step"] == 1
+
+
+def test_zero_wait_allows_first_prediction_and_restarts_immediately_after_win():
+    rows = history(["LOSE", "WIN", "LOSE"])
+    attempts = {
+        "game-1": accepted(1, "LOSE", 1),
+        "game-2": accepted(2, "WIN", 2),
+    }
+    result = evaluate_eight(rows, attempts, mode="LIVE", wait_losses=0,
+                            max_steps=8, strict_consecutive=True)
+    assert result["before"]["game-1"]["bet_allowed"]
+    assert result["before"]["game-1"]["step"] == 1
+    assert result["before"]["game-2"]["step"] == 2
+    assert result["before"]["game-3"]["bet_allowed"]
+    assert result["before"]["game-3"]["step"] == 1
+    assert result["current"]["phase"] == "BETTING"
+    assert result["current"]["required_losses"] == 0
