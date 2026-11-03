@@ -391,27 +391,36 @@ GAME_LIST_BLOCK_SNAPSHOT_SCRIPT = r"""() => {
 
 def live_test_prestart_evidence(game: Game, diagnostics: dict[str, Any],
                                 actual_url: str) -> tuple[bool, str]:
-    """Read-only proof for a manual-suit first-round test on UNKNOWN list rows.
+    """Verify UNKNOWN tournament-list status from the actual Baccarat page.
 
-    The Baccarat list currently omits explicit upcoming status on some skins.
-    This exception is test-only: it never changes game classification or
-    creates strategy forecasts.
+    The same conservative pre-deal evidence is required for a manual test
+    or the selected N-1 second-card strategy. UNKNOWN alone never authorizes
+    a coupon, changes the game's classification or creates a forecast.
     """
     expected_path = urlparse(game.url).path.rstrip("/")
     actual_path = urlparse(actual_url).path.rstrip("/")
-    if not expected_path or expected_path != actual_path:
+    expected = urlparse(game.url)
+    actual = urlparse(actual_url)
+    if (not expected_path or expected_path != actual_path
+            or expected.scheme != actual.scheme or expected.netloc != actual.netloc):
         return False, "Открытая страница не соответствует выбранному URL"
     status = classify_game(game)
     if status in ("STARTED", "FINISHED"):
         return False, f"Игра уже {status}; тестовая ставка запрещена"
     if status != "UNKNOWN":
         return False, f"Неподходящее состояние списка: {status}"
-    if str(game.player_score).strip() != "0" or str(game.banker_score).strip() != "0":
-        return False, "В списке не подтверждён начальный счёт 0:0"
+    list_zero = (str(game.player_score).strip() == "0"
+                 and str(game.banker_score).strip() == "0")
+    # On some skins the tournament row omits the score together with the
+    # state. Reverify both zeroes on the actual, matching game page instead.
+    page_zero = (str(diagnostics.get("player_score_text") or "").strip() == "0"
+                 and str(diagnostics.get("banker_score_text") or "").strip() == "0")
+    if not list_zero and not page_zero:
+        return False, "Нет подтверждённого счёта 0:0 ни в списке, ни на странице"
     if diagnostics.get("finished") or diagnostics.get("expired_screen"):
         return False, "Игра уже завершена или недоступна"
-    if diagnostics.get("cards"):
-        return False, "Уже открыты реальные карты Игрока"
+    if diagnostics.get("cards") or diagnostics.get("banker_cards"):
+        return False, "Уже открыты реальные карты; окно ставки закрыто"
     counts = diagnostics.get("counts") or {}
     if int(counts.get("player_fields") or 0) < 1 or int(counts.get("player_cards_containers") or 0) < 1:
         return False, "Игровой компонент ещё не загрузился"
@@ -554,13 +563,20 @@ class BrowserService:
         eight_session = None
         state = classify_game(game)
         if state != "UPCOMING":
-            if state != "UNKNOWN" or not first_round_test:
+            second_card_session = (
+                not first_round_test and selected_strategy == STRATEGY_SECOND_CARD
+                and strategy_config.get("active") == STRATEGY_SECOND_CARD
+            )
+            verify_unknown = state == "UNKNOWN" and (first_round_test or second_card_session)
+            if not verify_unknown:
                 self.event("WARNING", f"LIVE №{game.round_number}: вход в купон отменён: "
-                           f"статус списка {state}; тест={first_round_test}.")
+                           f"статус списка {state}; тест={first_round_test}; "
+                           f"стратегия={selected_strategy}.")
                 return
-            # The live tournament list can say UNKNOWN even when the game is
-            # visibly in its pre-deal countdown. Check the actual page before
-            # granting this narrow test-only exception.
+            # The list can be UNKNOWN while the exact game page is still
+            # pre-deal. The *actual* DOM must prove the window is open.
+            # Forecast, loss threshold and amount are checked independently
+            # below; this exception alone never sends a wager.
             last_reason = "Игровой компонент пока недоступен"
             allowed = False
             for _ in range(12):
@@ -576,8 +592,10 @@ class BrowserService:
                         settings.player_name_text, settings.banker_name_text)
                 allowed, last_reason = live_test_prestart_evidence(game, diagnostics, active_url)
                 if allowed:
-                    self.event("INFO", f"LIVE №{game.round_number}: статус списка UNKNOWN, "
-                               f"но тестовый вход разрешён по DOM: {last_reason}.")
+                    self.event("INFO", f"LIVE_PRESTART_VERIFIED Раздача №{game.round_number}, "
+                               f"ID {game.game_id}: статус списка UNKNOWN, "
+                               f"{'тестовый' if first_round_test else 'стратегия N−1'} "
+                               f"вход разрешён по актуальному DOM: {last_reason}.")
                     break
                 if ("Уже открыты" in last_reason or "завершена" in last_reason
                         or "0:0" in last_reason or "не соответствует" in last_reason):
@@ -586,8 +604,9 @@ class BrowserService:
             else:
                 allowed = False
             if not allowed:
-                self.event("WARNING", f"LIVE №{game.round_number}: до купона не дошли. "
-                           f"Статус списка UNKNOWN. Причина: {last_reason}.")
+                self.event("WARNING", f"LIVE_PRESTART_UNVERIFIED Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: купон не открываем. "
+                           f"Статус списка UNKNOWN; {last_reason}.")
                 return
         if first_round_test:
             # Manual-suit execution check: intentionally does NOT ask for a
