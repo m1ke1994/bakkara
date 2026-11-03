@@ -386,6 +386,43 @@ def live_test_prestart_evidence(game: Game, diagnostics: dict[str, Any],
     return True, f"0:0, пустые карты, часы {timer_text}, URL и игровой компонент совпадают"
 
 
+def cached_successor_prestart_evidence(
+    game: Game, diagnostics: dict[str, Any], actual_url: str,
+) -> tuple[bool, str]:
+    """Verify an expired LIST countdown on the actual NEXT game's DOM.
+
+    A stale cached timer is valid for locating N+1, never proof of its
+    betting window. Do not accept an already started/finished game, visible
+    Player cards, missing components, or an unverified on-page countdown.
+    """
+    if classify_game(game) != "UPCOMING":
+        return False, "Нет подтверждённого UPCOMING-состояния в списке"
+    if not game.is_countdown_to_start:
+        return False, "Нет подтверждения, что таймер списка отсчитывал время до начала"
+    if str(game.player_score).strip() != "0" or str(game.banker_score).strip() != "0":
+        return False, "Последний счёт списка не 0:0"
+    # Same identity and fresh live-page evidence required even for a
+    # correctly numbered, prefetched URL. The old timer is NOT reused.
+    if urlparse(actual_url).netloc != urlparse(game.url).netloc:
+        return False, "Домен страницы изменился"
+    if urlparse(actual_url).path.rstrip("/") != urlparse(game.url).path.rstrip("/"):
+        return False, "Открыта другая раздача"
+    if diagnostics.get("finished") or diagnostics.get("expired_screen"):
+        return False, "Раздача завершилась или недоступна"
+    if diagnostics.get("cards") or diagnostics.get("banker_cards"):
+        return False, "Карты уже открыты, LIVE-вход слишком поздний"
+    counts = diagnostics.get("counts") or {}
+    if (int(counts.get("player_fields") or 0) < 1
+            or int(counts.get("player_cards_containers") or 0) < 1
+            or int(counts.get("player_card_boxes") or 0) < 2):
+        return False, "Игровой компонент ещё не готов"
+    clock = str(diagnostics.get("round_timer_text") or "")
+    seconds = parse_round_timer(clock)
+    if seconds is None or not 3 <= seconds <= 60:
+        return False, f"Нет подтверждённого окна ставки на странице: {clock or 'без таймера'}"
+    return True, f"Проверена актуальная страница: 0:0, пустые карты, {clock}"
+
+
 async def keep_single_browser_page(context: BrowserContext, preferred_url: str) -> Page:
     """Reuse one persisted tab, closing surplus tabs restored by Chromium.
 
@@ -603,6 +640,32 @@ class BrowserService:
             amount = Decimal("10")
             self.event("INFO", f"ТЕСТ LIVE №{game.round_number}, ID {game.game_id}: "
                        "разовая сумма 10 RUB; сохранённый шаг стратегии не меняем.")
+        # The prefetched N+1 URL is safe for immediate OBSERVATION even when
+        # its cached list countdown expired. It is NOT enough to submit money:
+        # reread the actual page and confirm a fresh pre-deal window first.
+        if getattr(self, "_stale_cached_game_id", None) == game.game_id:
+            allowed, why = False, "Игровой компонент пока загружается"
+            for _ in range(6):
+                async with self.page_lock:
+                    live_url = self.page.url
+                    live_diagnostics = await self._inspect_game_dom(
+                        settings.player_name_text, settings.banker_name_text)
+                allowed, why = cached_successor_prestart_evidence(
+                    game, live_diagnostics, live_url)
+                if allowed:
+                    break
+                if (live_diagnostics.get("finished") or live_diagnostics.get("expired_screen")
+                        or live_diagnostics.get("cards") or live_diagnostics.get("banker_cards")
+                        or "другая раздача" in why):
+                    break
+                await asyncio.sleep(0.1)
+            if not allowed:
+                self.event("WARNING", f"LIVE №{game.round_number}: быстрый переход выполнен, "
+                           f"но ставка запрещена: {why}. Продолжаем читать карты.")
+                return
+            self.event("INFO", f"LIVE №{game.round_number}: {why}; "
+                       "сохранённый таймер списка не использовался для разрешения ставки.")
+
         if not self.live_bets.reserve(game.game_id, game.round_number, suit, amount,
                                       signal_source=signal_source,
                                       expected_step=step if eight_gate is not None else None,
@@ -648,10 +711,17 @@ class BrowserService:
                 self.event("WARNING", f"LIVE раздача №{game.round_number}, ID {game.game_id}: "
                            "новые отправки заблокированы до сверки истории ставок БК.")
 
-    async def _live_after_cards(self, game: Game) -> None:
+    async def _live_after_cards(
+        self, game: Game, observation: dict[str, Any] | None = None,
+    ) -> None:
         if getattr(self, "cycle_engine", None) is None:
             return
         attempt = await asyncio.to_thread(self.live_bets.get_attempt, game.game_id)
+        if attempt is None:
+            # The ordinary N-1 waiting phase has no accepted wager to settle.
+            # Do NOT replay the entire forecast history here: the next game's
+            # pre-bet refresh will count the newly confirmed virtual LOSE.
+            return
         if attempt and attempt["signal_source"] == "MANUAL_TEST":
             # No invented forecast: check only confirmed final cards of THIS game.
             observed = await asyncio.to_thread(self.store.get, game.game_id)
@@ -667,7 +737,10 @@ class BrowserService:
                 self.event("WARNING", f"ТЕСТ LIVE №{game.round_number}: "
                            "финальный набор карт не подтверждён; шаг не меняем.")
             return
-        cycle = await asyncio.to_thread(self.cycle_engine.refresh, self.current_observation)
+        cycle = await asyncio.to_thread(
+            self.cycle_engine.refresh,
+            observation if observation is not None else self.current_observation,
+        )
         result = next((p["result"] for p in cycle["recent"]
                        if attempt and attempt["status"] == "ACCEPTED"
                        and p["target_game_id"] == game.game_id
@@ -1873,27 +1946,35 @@ class BrowserService:
                 getattr(self, "_last_selected_round_number", None),
                 set(processed_ids) | deferred,
             )
-            if (next_game is not None and hasattr(self, "live_bets")
-                    and self.live_bets.snapshot()["mode"] == "LIVE"):
-                remaining = list_timer_seconds(next_game.time)
-                cached_at = getattr(self, "_prefetched_at", None)
-                if (remaining is not None and cached_at is not None
-                        and loop.time() - cached_at >= remaining):
-                    self.event("INFO", f"Раздача №{next_game.round_number}, ID {next_game.game_id}: "
-                               "таймер сохранённого списка истёк; перечитываем открытые окна ставок.")
-                    next_game = None
             if next_game is not None:
-                self._game_timer_observed_at = getattr(self, "_prefetched_at", None)
+                cached_at = getattr(self, "_prefetched_at", None)
+                remaining = list_timer_seconds(next_game.time)
+                stale_window = bool(
+                    hasattr(self, "live_bets")
+                    and self.live_bets.snapshot()["mode"] == "LIVE"
+                    and (cached_at is None or remaining is None
+                         or loop.time() - cached_at >= remaining)
+                )
+                self._stale_cached_game_id = next_game.game_id if stale_window else None
+                self._game_timer_observed_at = cached_at
                 self.event(
                     "INFO", f"Быстрый переход к раздаче №{next_game.round_number} "
                     f"по ранее подтверждённому URL (ID {next_game.game_id}); "
                     "без повторной загрузки списка."
                 )
-                await self._begin_selected_game(next_game, processed_ids, retry_after,
-                                                selected_from_cache=True)
+                if stale_window:
+                    self.event("INFO", f"Раздача №{next_game.round_number}: таймер списка "
+                               "устарел; URL используем только для перехода, "
+                               "актуальность окна ставки проверим на странице.")
+                try:
+                    await self._begin_selected_game(next_game, processed_ids, retry_after,
+                                                    selected_from_cache=True)
+                finally:
+                    self._stale_cached_game_id = None
                 return
         # A queue can become stale while the chosen row starts or finishes.
         # Always rebuild from the live list on every selection pass.
+        self._stale_cached_game_id = None
         self._queued_games = []
         all_games: list[Game] = []
         # Ignore old next-game links: only the numbered N-18 engine
@@ -2718,10 +2799,22 @@ class BrowserService:
 
                 if hand_final:
                     if saved:
-                        outcome = await self._confirm_outcome_from_snapshot(
-                            game, cards, outcome_snapshot, page=self.page)
-                        if not outcome:
+                        # Start settling the previous LIVE attempt as soon as
+                        # the final Player hand is persisted. Overlap this with
+                        # Banker outcome recovery and the next-page navigation.
+                        self._pending_live_settlement = asyncio.create_task(
+                            self._live_after_cards(game, dict(self.current_observation or {})))
+                        if confirmed_three:
+                            # The three confirmed Player cards determine the
+                            # next N-1 suit immediately; Banker completion is
+                            # independent. Keep the old DOM in its outcome
+                            # watcher while the primary tab opens known N+1.
                             await self._handoff_outcome_page(game, cards)
+                        else:
+                            outcome = await self._confirm_outcome_from_snapshot(
+                                game, cards, outcome_snapshot, page=self.page)
+                            if not outcome:
+                                await self._handoff_outcome_page(game, cards)
                         processed_ids.add(game.game_id)
                         retry_after.pop(game.game_id, None)
                         self._set_lifecycle_state(game.game_id, "FINALIZED")
@@ -2738,8 +2831,6 @@ class BrowserService:
                         self.observation_status = "SAVED"
                         # Let the already known next URL open while the
                         # result and bet ledger settle in the background.
-                        self._pending_live_settlement = asyncio.create_task(
-                            self._live_after_cards(game))
                         self.observation_diagnostic = (
                             f"Окончательные карты раздачи № {game.round_number or game.game_id} сохранены; переходим к следующей игре."
                             if hand_final else f"Игра завершена, но итог карт не подтверждён; запись сохранена без прогноза."
