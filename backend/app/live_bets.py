@@ -93,6 +93,30 @@ class LiveBets:
             db.execute("UPDATE live_control SET warmup_test=?, test_suit=? WHERE id=1",
                        (int(enabled), suit))
 
+    def pending_accepted(self) -> list[dict]:
+        """Find every accepted, unresolved wager (including previous sessions).
+
+        A saved acceptance remains a financial liability until independently
+        settled. Never silently discard it to permit another wager.
+        """
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM live_attempts WHERE status='ACCEPTED' "
+                "AND result IS NULL ORDER BY created_at,rowid"
+            ).fetchall()]
+
+    def pending_blocker(self) -> dict | None:
+        """Explain which exact unsettled attempt is blocking new submissions."""
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                "SELECT * FROM live_attempts WHERE status IN "
+                "('PREPARING','SUBMITTING','UNKNOWN','ACCEPTED') "
+                "AND result IS NULL ORDER BY created_at,rowid LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
     def get_attempt(self, game_id: str):
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
