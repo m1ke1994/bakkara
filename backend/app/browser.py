@@ -534,6 +534,48 @@ class BrowserService:
             return False
         return engine.get_strategy().get("active") == STRATEGY_SECOND_CARD
 
+    async def _reconcile_second_card_accepted(self) -> None:
+        """Settle old accepted N-1 attempts from verified saved Player hands.
+
+        The previous finalization path settles only the round currently open
+        in the scanner. After restarts or interrupted observations, an old
+        ACCEPTED with no result can otherwise block every later LIVE round.
+        This method cannot create a wager and never presumes an unknown LOSE.
+        """
+        ledger = getattr(self, "live_bets", None)
+        store = getattr(self, "store", None)
+        if ledger is None or store is None:
+            return
+        accepted = await asyncio.to_thread(ledger.pending_accepted)
+        if not accepted:
+            self._last_live_blocker_notice = None
+            return
+
+        for attempt in accepted:
+            if attempt.get("strategy") != STRATEGY_SECOND_CARD:
+                continue
+            game_id = attempt["game_id"]
+            observed = await asyncio.to_thread(store.get, game_id)
+            result = await asyncio.to_thread(
+                verified_second_card_settlement, store.path, attempt, observed)
+            if result in ("WIN", "LOSE"):
+                plan = await asyncio.to_thread(self.live_plan_store.load)
+                if await asyncio.to_thread(ledger.settle, game_id, result, len(plan.row)):
+                    self.event("INFO", f"LIVE_BACKLOG_SETTLED Раздача №{attempt['round_number']}, "
+                               f"ID {game_id}: ранее принятая ставка {result}; "
+                               "результат сверен по сохранённым окончательным картам Игрока; "
+                               "LIVE-блокировка пересчитана.")
+                    self._last_live_blocker_notice = None
+                continue
+            notice = (game_id, attempt.get("status"), attempt.get("strategy_session_id"))
+            if getattr(self, "_last_live_blocker_notice", None) != notice:
+                self._last_live_blocker_notice = notice
+                self.event("WARNING", f"LIVE_BACKLOG_UNVERIFIED Раздача №{attempt['round_number']}, "
+                           f"ID {game_id}: ставка принята ранее, но финальный результат "
+                           "не удаётся подтвердить по сохранённым картам и исходному "
+                           "прогнозу. Деньги повторно не отправляем. "
+                           "Нужна сверка истории ставок и данных раздачи.")
+
     async def _live_before_cards(self, game: Game) -> None:
         settlement = getattr(self, "_pending_live_settlement", None)
         if settlement is not None:
@@ -542,6 +584,9 @@ class BrowserService:
         if not hasattr(self, "live_bets") or getattr(self, "cycle_engine", None) is None:
             return
         config = self.live_bets.snapshot()
+        if config["mode"] == "LIVE" and getattr(self, "store", None) is not None:
+            await self._reconcile_second_card_accepted()
+            config = self.live_bets.snapshot()
         if config["mode"] != "LIVE":
             if config.get("warmup_test"):
                 self.event("WARNING", "Тест первой раздачи включён, но режим ДЕМО. "
@@ -739,9 +784,17 @@ class BrowserService:
                                       strategy=cycle["strategy"] if eight_gate is not None else None,
                                       strategy_session_id=eight_session):
             current = self.live_bets.snapshot()
-            self.event("WARNING", f"LIVE №{game.round_number}: новая попытка не создана. "
-                       f"Существующая={current.get('attempt') and current['attempt'].get('status')}, "
-                       f"блокировка={current.get('blocked')}.")
+            blocking = await asyncio.to_thread(self.live_bets.pending_blocker)
+            if blocking:
+                self.event("WARNING", f"LIVE_BLOCKED_BY_ATTEMPT Раздача №{game.round_number}: "
+                           f"не урегулирована ставка раздачи №{blocking['round_number']}, "
+                           f"ID {blocking['game_id']}, статус {blocking['status']}, "
+                           f"шаг {blocking['step']}, результат {blocking['result'] or 'UNKNOWN'}. "
+                           "Автоматически не удаляем ACCEPTED и не повторяем отправку.")
+            else:
+                self.event("WARNING", f"LIVE №{game.round_number}: попытка не создана; "
+                           f"блокировка={current.get('blocked')}, "
+                           f"последняя={current.get('attempt') and current['attempt'].get('status')}.")
             return
         self.event("INFO", f"LIVE раздача №{game.round_number}: начинаем поиск рынка, Canvas и суммы {amount} RUB.")
         try:
