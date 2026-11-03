@@ -928,7 +928,7 @@ class Cycle18Engine:
         eight_progress = None
         eight_gate = None
         entry_gate = None
-        if entry_losses > 0 and strategy in (STRATEGY_SECOND_CARD, STRATEGY_EIGHT):
+        if strategy in (STRATEGY_SECOND_CARD, STRATEGY_EIGHT):
             # Reconstruct from immutable, verified forecasts and persisted attempts.
             # Do not use the general martingale step: it includes virtual LOSE.
             with sqlite3.connect(self.path) as gate_db:
