@@ -86,8 +86,10 @@ const entryLossesChoice = ref(3)
 const strategyTouched = ref(false)
 const strategyNotice = ref('')
 const strategyInfo = computed(() => state.value.strategy || {})
-const activeStrategy = computed(() => cycle18.value.session_id
+const activeStrategy = computed(() => cycle18.value.session_active
   ? cycle18.value.strategy : (strategyInfo.value.selected || 'n18'))
+const activeEntryThreshold = computed(() => Number(cycle18.value.session_active
+  ? cycle18.value.entry_losses ?? 0 : strategyInfo.value.entry_losses ?? 0))
 const strategyLabel = computed(() => activeStrategy.value === 'vote_3_10_24_31_40_after_3_losses'
   ? 'Стратегия №8 · вход после 3 LOSE' : activeStrategy.value === 'second_player_card'
   ? 'Вторая карта · масть N−1' : activeStrategy.value === 'n18'
@@ -162,7 +164,7 @@ const forecastUnavailableDescription = forecast => {
 
 const cycleStats = computed(() => cycle18.value.statistics || {})
 const eightGate = computed(() => cycle18.value.strategy_eight || null)
-const entryGate = computed(() => cycle18.value.entry_gate || null)
+const entryGate = computed(() => cycle18.value.session_active ? cycle18.value.entry_gate || null : null)
 const entryGatePhase = computed(() => ({ WAITING: 'Ожидаем виртуальные LOSE', BETTING: 'LIVE-вход разрешён', EXHAUSTED: 'Ряд исчерпан: ставки остановлены', BLOCKED: 'Расхождение результатов: ставки заблокированы' }[entryGate.value?.phase] || 'Настройка ожидает запуска'))
 const eightPhaseLabel = computed(() => ({ WAITING: 'Ожидаем виртуальные LOSE', BETTING: 'Вход разрешён', EXHAUSTED: 'Лимит 9 шагов исчерпан', BLOCKED: 'Несовпадение LIVE-истории: блокировка' }[eightGate.value?.phase] || 'Ожидание'))
 const currentForecast = computed(() => cycle18.value.ready
@@ -457,9 +459,9 @@ onBeforeUnmount(() => {
         </details>
       </div>
       <div v-if="activeStrategy === 'second_player_card'" class="diagnostic" data-testid="second-card-entry-gate">
-        <p><strong>Вторая карта · масть N−1:</strong> {{ entryGatePhase }} · порог {{ cycle18.value.entry_losses ?? strategyInfo.entry_losses ?? 0 }} LOSE · набрано {{ entryGate?.virtual_losses ?? 0 }}/{{ entryGate?.required_losses ?? strategyInfo.entry_losses ?? 0 }} · следующий денежный шаг {{ entryGate?.step ?? 1 }}/{{ entryGate?.max_steps ?? '—' }}.</p>
+        <p><strong>Вторая карта · масть N−1:</strong> {{ entryGatePhase }} · порог {{ activeEntryThreshold }} LOSE · набрано {{ entryGate?.virtual_losses ?? 0 }}/{{ entryGate?.required_losses ?? activeEntryThreshold }} · следующий денежный шаг {{ entryGate?.step ?? 1 }}/{{ entryGate?.max_steps ?? '—' }}.</p>
         <p>Первый денежный шаг только на следующей раздаче после достижения порога. При принятом LOSE — следующий шаг из сохранённого калькулятора; при подтверждённом WIN — сброс на ожидание. Неподтверждённые исходы не засчитываются, пропуск раздачи прерывает непрерывную серию ожидания. После исчерпания ряда ставки останавливаются.</p>
-        <p v-if="!Number(cycle18.value.entry_losses ?? strategyInfo.entry_losses ?? 0)">Порог ещё не включён: перед LIVE установите число и сохраните стратегию.</p>
+        <p v-if="!activeEntryThreshold">Порог ещё не включён: перед LIVE установите число и сохраните стратегию.</p>
         <p>Историческая точность не гарантирует прибыль. Сначала проверьте логику в DEMO.</p>
       </div>
       <p v-if="activeStrategy === 'facecards_53'" class="diagnostic">53% — экспериментальная стратегия. При неизвестном итоге Банкира масть показывается только предварительно; сигнал и ставка ждут подтверждения четырёх исходов. Пропуски не считаются LOSE и не обнуляют шаг. Название не гарантирует точность.</p>
