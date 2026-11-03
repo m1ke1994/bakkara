@@ -34,11 +34,11 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
     """
     if mode not in ("DEMO", "LIVE"):
         raise ValueError("Unknown strategy gate mode")
-    if isinstance(wait_losses, bool) or not isinstance(wait_losses, int) or not 1 <= wait_losses <= 30:
-        raise ValueError("Wait losses must be from 1 to 30")
+    if isinstance(wait_losses, bool) or not isinstance(wait_losses, int) or not 0 <= wait_losses <= 30:
+        raise ValueError("Wait losses must be from 0 to 30")
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 20:
         raise ValueError("Max steps must be from 1 to 20")
-    phase = "WAITING"
+    phase = "BETTING" if wait_losses == 0 else "WAITING"
     virtual_losses = 0
     step = 1
     wagers = wins = losses = entries = 0
@@ -109,7 +109,7 @@ def evaluate_eight(forecasts: list[dict[str, Any]], attempts: dict[str, dict[str
                               "step": step, "result": result})
         if result == "WIN":
             wins += 1
-            phase = "WAITING"
+            phase = "BETTING" if wait_losses == 0 else "WAITING"
             virtual_losses = 0
             step = 1
             previous_virtual_time = final_at
