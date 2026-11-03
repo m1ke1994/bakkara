@@ -397,8 +397,8 @@ def cached_successor_prestart_evidence(
     """
     if classify_game(game) != "UPCOMING":
         return False, "Нет подтверждённого UPCOMING-состояния в списке"
-    if not game.is_countdown_to_start:
-        return False, "Нет подтверждения, что таймер списка отсчитывал время до начала"
+    if not (game.is_countdown_to_start or game.upcoming_by_sequence):
+        return False, "Нет подтверждения будущей раздачи из списка или последовательности"
     if str(game.player_score).strip() != "0" or str(game.banker_score).strip() != "0":
         return False, "Последний счёт списка не 0:0"
     # Same identity and fresh live-page evidence required even for a
