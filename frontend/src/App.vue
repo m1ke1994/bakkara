@@ -102,8 +102,7 @@ const strategyShortLabel = computed(() => activeStrategy.value === 'vote_3_10_24
   : activeStrategy.value === 'facecards_53' ? '53%'
   : activeStrategy.value === 'hot_suits_8_spread_6' ? 'частые масти'
   : activeStrategy.value === 'vote_3_10_24_31_40_step3_reverse' ? 'стратегия 5' : '5 циклов')
-const entryThresholdStrategy = computed(() =>
-  ['second_player_card', 'vote_3_10_24_31_40_after_3_losses'].includes(strategyChoice.value))
+const entryThresholdStrategy = computed(() => strategyChoice.value === 'second_player_card')
 const entryLossesValid = computed(() =>
   !entryThresholdStrategy.value || (Number.isInteger(entryLossesChoice.value)
     && entryLossesChoice.value >= 1 && entryLossesChoice.value <= 30))
@@ -126,7 +125,7 @@ const strategyOptions = [
   { id: 'vote_3_10_24_31_40_draw_diamond_12', label: 'Голосование + ничья ♦ / пропуск 12', detail: 'После подтверждённой ничьей с ♦ у Игрока не ставить в 12 следующих раздачах; новые ничьи внутри паузы не продлевают её' },
   { id: 'hot_suits_8_spread_6', label: 'Частые масти · 8 раздач / разница ≥6', detail: 'Без таблицы преобразования: 8 подряд финальных рук Игрока, сумма фактических мастей, разброс ≥6. Иначе пропуск, шаг догона сохраняется.' },
   { id: 'vote_3_10_24_31_40_step3_reverse', label: 'Стратегия 5 · обратный 3-й шаг', detail: 'После двух подтверждённых LOSE на третьем шаге: таблица[прогноз шага 3 + прогноз шага 2]. С четвёртого шага — обычное голосование N−3/10/24/31/40. Подготовка 40 рук.' },
-  { id: 'vote_3_10_24_31_40_after_3_losses', label: 'Стратегия №8 · вход после N LOSE', detail: 'Голосование N−3/10/24/31/40. Ожидаем заданное число виртуальных LOSE, затем максимум 9 денежных шагов. После WIN — новое ожидание.' },
+  { id: 'vote_3_10_24_31_40_after_3_losses', label: 'Стратегия №8 · вход после 3 LOSE', detail: 'Голосование N−3/10/24/31/40. Ожидаем 3 подтверждённых виртуальных LOSE, затем максимум 9 денежных шагов. После WIN ожидание начинается снова. После 9 LOSE — остановка.' },
   { id: 'facecards_53', label: '53%', detail: 'Одна A/K/Q/J из предыдущей руки Игрока; зеркало выходной масти для средней из трёх; пропуск 4 после ничьей; прогрев 40.' },
 ]
 const sourceDescription = forecast => (forecast?.source_round_numbers || [forecast?.source_round_number])
@@ -354,7 +353,8 @@ async function saveStrategy() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         strategy: strategyChoice.value,
-        entry_losses: entryThresholdStrategy.value ? entryLossesChoice.value : 0,
+        entry_losses: entryThresholdStrategy.value ? entryLossesChoice.value
+          : strategyChoice.value === 'vote_3_10_24_31_40_after_3_losses' ? 3 : 0,
       }),
     })
     const payload = await response.json()
@@ -430,10 +430,10 @@ onBeforeUnmount(() => {
           <input id="strategy-entry-losses" v-model.number="entryLossesChoice" type="number"
             inputmode="numeric" min="1" max="30" step="1" :disabled="busy || observing"
             @input="strategyTouched = true; strategyNotice = ''" />
-          <span class="diagnostic">От 1 до 30 подтверждённых виртуальных LOSE. Например, 3 → первая ставка на 4-й раздаче.</span>
+          <span class="diagnostic">От 1 до 30 подтверждённых виртуальных LOSE. Например, после 3 LOSE первый LIVE-шаг — в следующей раздаче (N+1).</span>
         </div>
         <p v-if="!entryLossesValid" class="error">Введите целое число от 1 до 30.</p>
-        <p class="diagnostic">Поражение считается по выбранной стратегии и финальным картам Игрока, а не по любому исходу из истории. После принятого LIVE WIN — повторное ожидание. Для начала работы сохраните число и запустите сканирование.</p>
+        <p class="diagnostic">Поражение считается только по прогнозу «Вторая карта · масть N−1» и подтверждённым картам Игрока, а не по любому исходу из истории. После принятого и подтверждённого LIVE WIN — повторное ожидание. Сохраните число и запустите сканирование.</p>
       </div>
       <div class="controls strategy-save-controls">
         <button :disabled="busy || observing || !strategyDirty || !entryLossesValid" @click="saveStrategy">Сохранить стратегию</button>
