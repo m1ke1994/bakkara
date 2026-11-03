@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import re
 import uuid
 from collections import deque
@@ -16,6 +17,7 @@ from .cycle18 import moment
 from .config import settings
 from .live_bets import LiveBets, settle_test_hand
 from .strategy_eight import STRATEGY_EIGHT
+from .cycle18 import STRATEGY_SECOND_CARD
 from .live_executor import PlacementError
 from .live_coupon_test import place_regular_coupon
 from .live_market_probe import INIT_SCRIPT
@@ -32,6 +34,7 @@ from .observation import (
     is_finished_status,
     is_same_upcoming_game,
     classify_player_scan,
+    evaluate_prediction,
     merge_card_snapshots,
     parse_game_list_html,
 )
@@ -52,6 +55,44 @@ def forecast_precedes_attempt(forecast_created: str, attempt_created: str) -> bo
     end = (attempt_at + timedelta(seconds=1) if "T" not in attempt_created
            else attempt_at)
     return forecast_at <= end
+
+
+def verified_second_card_settlement(db_path, attempt: dict, observed: dict | None) -> str | None:
+    """Validate an ACCEPTED N-1 LIVE wager against saved Player cards only.
+
+    Avoid the full-history forecast refresh on the narrow handoff path.
+    Never derive a bet result from Banker cards, guessed cards or a
+    post-result forecast. An unknown status remains unresolved.
+    """
+    if (not observed or attempt.get("status") != "ACCEPTED"
+            or attempt.get("signal_source") != "STRATEGY"
+            or attempt.get("strategy") != STRATEGY_SECOND_CARD
+            or not attempt.get("strategy_session_id")
+            or attempt.get("single_test_run_id")
+            or observed.get("game_id") != attempt.get("game_id")
+            or str(observed.get("round_number")) != str(attempt.get("round_number"))):
+        return None
+    with sqlite3.connect(db_path, timeout=3) as db:
+        db.row_factory = sqlite3.Row
+        forecasts = db.execute("""SELECT predicted_suit, created_at, mode, target_round_number
+            FROM cycle18_forecasts
+            WHERE session_id=? AND target_game_id=?""",
+            (attempt["strategy_session_id"], attempt["game_id"])).fetchall()
+    if len(forecasts) != 1:
+        return None
+    forecast = forecasts[0]
+    if (forecast["mode"] != "LIVE"
+            or str(forecast["target_round_number"]) != str(attempt["round_number"])
+            or forecast["predicted_suit"] != attempt["suit"]
+            or not forecast_precedes_attempt(forecast["created_at"], attempt["created_at"])):
+        return None
+    result = evaluate_prediction(
+        forecast["predicted_suit"], observed.get("cards") or [],
+        finished_confirmed=bool(observed.get("finished_confirmed")),
+        player_hand_final=bool(observed.get("player_hand_final")),
+        final_snapshot_reverified=bool(observed.get("final_snapshot_reverified")),
+    )
+    return result if result in ("WIN", "LOSE") else None
 
 
 def prefetched_round_urls(games: list[Game]) -> dict[int, Game]:
@@ -477,6 +518,13 @@ class BrowserService:
         self.live_bets = LiveBets(settings.observation_db)
         self.cycle_engine = None  # Assigned by the API after construction.
 
+    def _second_card_observation_active(self) -> bool:
+        """Only the active N-1 session gets the Player-only fast path."""
+        engine = getattr(self, "cycle_engine", None)
+        if engine is None or not callable(getattr(engine, "get_strategy", None)):
+            return False
+        return engine.get_strategy().get("active") == STRATEGY_SECOND_CARD
+
     async def _live_before_cards(self, game: Game) -> None:
         settlement = getattr(self, "_pending_live_settlement", None)
         if settlement is not None:
@@ -736,6 +784,21 @@ class BrowserService:
             else:
                 self.event("WARNING", f"ТЕСТ LIVE №{game.round_number}: "
                            "финальный набор карт не подтверждён; шаг не меняем.")
+            return
+        if attempt.get("strategy") == STRATEGY_SECOND_CARD:
+            observed = await asyncio.to_thread(self.store.get, game.game_id)
+            result = await asyncio.to_thread(
+                verified_second_card_settlement, self.store.path, attempt, observed)
+            if result in ("WIN", "LOSE"):
+                plan = await asyncio.to_thread(self.live_plan_store.load)
+                if self.live_bets.settle(game.game_id, result, len(plan.row)):
+                    self.event("INFO", f"LIVE_RESULT_CONFIRMED Раздача №{game.round_number}, "
+                               f"ID {game.game_id}: {result}; следующий шаг пересчитан только "
+                               "по финальным картам Игрока, без Банкира.")
+            else:
+                self.event("WARNING", f"LIVE_RESULT_UNCONFIRMED Раздача №{game.round_number}, "
+                           f"ID {game.game_id}: итог по картам Игрока не подтверждён; "
+                           "новая денежная отправка запрещена до проверки.")
             return
         cycle = await asyncio.to_thread(
             self.cycle_engine.refresh,
@@ -1459,14 +1522,17 @@ class BrowserService:
             if not game.round_number:
                 log.warning("Номер не прочитан в этой строке; ограниченный HTML-фрагмент: %s", game.round_row_fragment)
 
-    async def _inspect_game_dom(self, player_name: str, banker_name: str, *, page: Page | None = None) -> dict[str, Any]:
+    async def _inspect_game_dom(
+        self, player_name: str, banker_name: str, *,
+        page: Page | None = None, player_only: bool = False,
+    ) -> dict[str, Any]:
         """Inspect the Baccarat widget in the main document and every iframe."""
         page = page or self.page
         assert page is not None
         frames: list[dict[str, Any]] = []
         for frame in list(page.frames):
             try:
-                result = await frame.evaluate(r"""({playerName, bankerName, finishSelector, finishText}) => {
+                result = await frame.evaluate(r"""({playerName, bankerName, finishSelector, finishText, playerOnly}) => {
                   const visible = node => {
                     if (!node || !(node.offsetWidth || node.offsetHeight || node.getClientRects().length)) return false;
                     for (let parent = node; parent && parent.nodeType === 1; parent = parent.parentElement) {
@@ -1531,7 +1597,7 @@ class BrowserService:
                     if (validRank(rank) && suit) cards.push({position: boxIndex + 1, rank, suit});
                     else pending += 1;
                   }
-                  const bankerSide = wrappers.find(side => [...side.querySelectorAll('.baccarat-player__name')]
+                  const bankerSide = playerOnly ? null : wrappers.find(side => [...side.querySelectorAll('.baccarat-player__name')]
                     .some(node => visible(node) && text(node).toLocaleLowerCase() === bankerName));
                   const bankerBoxes = [...(bankerSide?.querySelectorAll('.baccarat-player__card-box') || [])].filter(visible);
                   const banker_ranks = bankerBoxes.map(box => {
@@ -1644,6 +1710,7 @@ class BrowserService:
                   };
                 }""", {"playerName": player_name.strip().casefold(),
                        "bankerName": banker_name.strip().casefold(),
+                       "playerOnly": player_only,
                        "finishSelector": settings.round_finished_selector,
                        "finishText": "Игра завершена"})
                 frames.append(result)
@@ -2514,6 +2581,10 @@ class BrowserService:
                                   max(getattr(settings, "player_hand_timeout_seconds", 90), 1))
         next_diagnostic_at = started_at + diagnostic_interval
         poll_seconds = min(max(getattr(settings, "card_poll_seconds", 0.15), 0.1), 0.25)
+        second_card_only = self._second_card_observation_active()
+        if second_card_only:
+            self.event("INFO", "SECOND_CARD_FAST_PATH: считаем только карты Игрока; "
+                       "считывание Банкира, ожидание его результата и отдельная вкладка отключены.")
         cards = previous_cards
         last_diagnostics: dict[str, Any] | None = None
         last_saved_signature: tuple[Any, ...] | None = None
@@ -2568,13 +2639,17 @@ class BrowserService:
                     self._active_chain_source_id = None
                     return
                 async with self.page_lock:
-                    diagnostics = await self._inspect_game_dom(settings.player_name_text, settings.banker_name_text)
+                    diagnostics = await self._inspect_game_dom(
+                        settings.player_name_text, settings.banker_name_text,
+                        **({"player_only": True} if second_card_only else {}))
                     in_page_finished = bool(diagnostics.get("finished"))
                     if in_page_finished:
                         finish_text = diagnostics.get("finish_flag_text") or "Игра завершена"
                         result_visible = bool(diagnostics.get("baccarat_result_visible"))
                         first_read_cards = diagnostics.get("cards", [])
-                        reread = await self._inspect_game_dom(settings.player_name_text, settings.banker_name_text)
+                        reread = await self._inspect_game_dom(
+                            settings.player_name_text, settings.banker_name_text,
+                            **({"player_only": True} if second_card_only else {}))
                         reread["finish_flag_seen_on_final_read"] = bool(reread.get("finished"))
                         reread["finished"] = True
                         reread["finish_flag_text"] = reread.get("finish_flag_text") or finish_text
@@ -2674,21 +2749,32 @@ class BrowserService:
                 # placeholder. Neither a result animation nor a timer is
                 # needed; re-read the live DOM before persisting the hand.
                 required_count = player_card_count(
-                    observed_cards, diagnostics.get("banker_initial_ranks", []))
+                    observed_cards,
+                    [] if second_card_only else diagnostics.get("banker_initial_ranks", []))
+                # With Player-only evidence, totals 6-9 are safely two cards.
+                # For 0-5, a terminal result with NO pending third slot is
+                # required; Banker naturals cannot be inferred from Player.
+                player_only_terminal_two = bool(
+                    second_card_only and finish_seen and pending == 0
+                    and len(observed_cards) == 2)
                 rule_two = bool(
-                    required_count == 2 and len(cards) == 2
+                    (required_count == 2 or player_only_terminal_two) and len(cards) == 2
                     and len(observed_cards) == 2
                     and [item.get("position") for item in observed_cards] == [1, 2]
                     and 2 <= box_count <= 3 and pending == box_count - 2
                 )
                 if rule_two:
                     async with self.page_lock:
-                        final_read = await self._inspect_game_dom(settings.player_name_text, settings.banker_name_text)
+                        final_read = await self._inspect_game_dom(
+                            settings.player_name_text, settings.banker_name_text,
+                            **({"player_only": True} if second_card_only else {}))
                     final_boxes = int(final_read.get("counts", {}).get("player_card_boxes", 0))
                     final_pending = int(final_read.get("pending_card_slots", 0))
                     confirmed_two = (
-                        player_card_count(final_read.get("cards", []),
-                                          final_read.get("banker_initial_ranks", [])) == 2
+                        (player_card_count(
+                            final_read.get("cards", []),
+                            [] if second_card_only else final_read.get("banker_initial_ranks", [])) == 2
+                         or (player_only_terminal_two and final_pending == 0))
                         and 2 <= final_boxes <= 3
                         and final_pending == final_boxes - 2
                         and final_read.get("cards", []) == observed_cards
@@ -2804,11 +2890,15 @@ class BrowserService:
                         # Banker outcome recovery and the next-page navigation.
                         self._pending_live_settlement = asyncio.create_task(
                             self._live_after_cards(game, dict(self.current_observation or {})))
-                        if confirmed_three:
-                            # The three confirmed Player cards determine the
-                            # next N-1 suit immediately; Banker completion is
-                            # independent. Keep the old DOM in its outcome
-                            # watcher while the primary tab opens known N+1.
+                        if second_card_only:
+                            # For N-1 the final Player hand alone determines
+                            # both the current WIN/LOSE and the next signal.
+                            # Reuse the SAME page directly for N+1: creating
+                            # an outcome-watcher tab delays the bet window.
+                            self.event("INFO", f"SECOND_CARD_FAST_HANDOFF Раздача №{game.round_number}: "
+                                       f"{len(cards)} карты Игрока подтверждены; "
+                                       "без Банкира и без открытия дополнительной вкладки.")
+                        elif confirmed_three:
                             await self._handoff_outcome_page(game, cards)
                         else:
                             outcome = await self._confirm_outcome_from_snapshot(
