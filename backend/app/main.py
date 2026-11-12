@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import os
 import time
 
 import uvicorn
@@ -47,10 +48,48 @@ class FirstRoundTestSelection(BaseModel):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
+def browser_resource_usage() -> tuple[int, int | None]:
+    """Count Chromium processes and read this container's cgroup memory usage.
+
+    /proc and cgroup paths are inside the bakkara-api container, not the host.
+    A missing cgroup counter is not treated as zero usage.
+    """
+    chromium = 0
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{entry.name}/comm", encoding="utf-8") as process:
+                        name = process.read().strip().lower()
+                    if "chrome" in name or "chromium" in name:
+                        chromium += 1
+                except (OSError, UnicodeError):
+                    continue
+    except OSError:
+        pass
+
+    for path in ("/sys/fs/cgroup/memory.current",
+                 "/sys/fs/cgroup/memory/memory.usage_in_bytes"):
+        try:
+            with open(path, encoding="ascii") as counter:
+                return chromium, int(counter.read().strip())
+        except (OSError, ValueError):
+            continue
+    return chromium, None
+
+
 async def browser_recycle_watchdog() -> None:
-    """Recreate the Playwright browser after three hours of browser uptime."""
+    """Recycle a growing Chromium before it can exhaust the host's RAM.
+
+    Also retain the scheduled three-hour recycle. A fresh context resets
+    the timer; resource thresholds are checked during continuous observation.
+    """
+    log = logging.getLogger(__name__)
     context_id = None
     launched_at = None
+    last_warning_at = 0.0
     while True:
         await asyncio.sleep(10)
         context = browser_service.context
@@ -60,35 +99,64 @@ async def browser_recycle_watchdog() -> None:
         if id(context) != context_id:
             context_id, launched_at = id(context), time.monotonic()
             continue
-        if launched_at is None or time.monotonic() - launched_at < 3 * 60 * 60:
+        if launched_at is None:
+            continue
+
+        age = time.monotonic() - launched_at
+        scheduled = age >= 3 * 60 * 60
+        # On a machine with 15 GiB RAM, the previously observed leak reached
+        # 5.5 GiB / 50 renderers after ~90 minutes. Recycle substantially earlier.
+        periodic = age >= max(300, int(os.getenv("BAKKARA_BROWSER_RECYCLE_SECONDS", "1800")))
+        chromium_count, memory_bytes = await asyncio.to_thread(browser_resource_usage)
+        count_limit = max(1, int(os.getenv("BAKKARA_CHROMIUM_PROCESS_LIMIT", "25")))
+        memory_limit = max(1, int(os.getenv("BAKKARA_BROWSER_MEMORY_LIMIT_MIB", "3072"))) * 1024 * 1024
+        exhausted = (chromium_count >= count_limit or
+                     (memory_bytes is not None and memory_bytes >= memory_limit))
+        if not (scheduled or periodic or exhausted):
+            continue
+
+        # Never interrupt reconciliation of a bet which may already be accepted.
+        settlement = getattr(browser_service, "_pending_live_settlement", None)
+        if settlement is not None and not settlement.done():
+            if time.monotonic() - last_warning_at >= 60:
+                log.warning("Chromium recycle postponed: LIVE bet settlement pending")
+                last_warning_at = time.monotonic()
             continue
 
         observing = bool(browser_service.observation_task
                          and not browser_service.observation_task.done())
-        context_id, launched_at = None, None
-        logging.getLogger(__name__).warning("Scheduled three-hour Chromium recycle")
+        # Do not reset the context marker before the recycle succeeds:
+        # failures must be retried rather than ignored for another three hours.
+        reason = ("scheduled" if scheduled else "age" if periodic else "resource limit")
+        log.warning("Chromium recycle (%s): age=%.0fs processes=%d memory_mib=%s",
+                    reason, age, chromium_count,
+                    round(memory_bytes / 1048576) if memory_bytes is not None else "unknown")
         try:
             await asyncio.wait_for(browser_service.stop(), timeout=60)
             await asyncio.to_thread(cycle18_engine.stop_session)
             await asyncio.wait_for(browser_service.start(), timeout=90)
             if browser_service.context is None:
                 raise RuntimeError("Chromium did not start")
+            # New context may reuse an object id; always register the fresh
+            # context immediately, preventing a second recycle on next tick.
+            context_id, launched_at = id(browser_service.context), time.monotonic()
             if observing:
                 for _ in range(60):
                     if browser_service.authorization in ("AUTHORIZED", "TEMPORARILY_UNCONFIRMED", "PUBLIC_VIEW"):
                         break
                     await asyncio.sleep(2)
                 else:
-                    logging.getLogger(__name__).warning("Browser restarted but authorization missing")
+                    log.warning("Browser restarted but authorization missing")
                     continue
                 await asyncio.to_thread(cycle18_engine.start_session, resume=True)
                 await browser_service.start_observation()
-            logging.getLogger(__name__).info("Scheduled Chromium recycle completed")
+            log.info("Chromium recycle completed")
         except asyncio.CancelledError:
             raise
         except Exception:
-            logging.getLogger(__name__).exception(
-                "Chromium recycle failed; an external supervisor may be required")
+            # Retry on next tick; an external supervisor may still be needed
+            # for an uninterruptible Playwright shutdown.
+            log.exception("Chromium recycle failed; an external supervisor may be required")
 
 
 @asynccontextmanager
