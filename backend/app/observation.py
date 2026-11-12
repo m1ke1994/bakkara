@@ -665,6 +665,20 @@ class ObservationStore:
                 db.execute("INSERT INTO observation_migrations VALUES('draw_rule_v1')")
             self._backfill_legacy_calculations(db)
             db.execute("CREATE INDEX IF NOT EXISTS idx_observations_observed_at ON observations(observed_at)")
+            self._prune_observations(db)
+
+    def _prune_observations(self, db: sqlite3.Connection, keep: int = 100) -> None:
+        """Bound the physical hand cache without deleting LIVE attempts or settings."""
+        stale = [row[0] for row in db.execute(
+            "SELECT game_id FROM observations ORDER BY discovered_at DESC, rowid DESC "
+            "LIMIT -1 OFFSET ?", (keep,))]
+        for offset in range(0, len(stale), 400):
+            group = stale[offset:offset + 400]
+            placeholders = ",".join("?" for _ in group)
+            db.execute(f"DELETE FROM predictions WHERE source_game_id IN ({placeholders}) "
+                       f"OR target_game_id IN ({placeholders})", group + group)
+            db.execute(f"DELETE FROM observation_recovery WHERE game_id IN ({placeholders})", group)
+            db.execute(f"DELETE FROM observations WHERE game_id IN ({placeholders})", group)
 
     def clear_all(self) -> None:
         """Delete observation state without touching settings, auth, or other tables."""
@@ -1012,6 +1026,7 @@ class ObservationStore:
                 db.execute("""UPDATE observations SET baccarat_outcome=? WHERE game_id=?
                     AND baccarat_outcome NOT IN ('DRAW','PLAYER','BANKER')""",
                     (baccarat_outcome, game.game_id))
+            self._prune_observations(db)
             return True
 
     def confirm_baccarat_outcome(
@@ -1163,7 +1178,7 @@ class ObservationStore:
         return snapshots
 
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
-        limit = min(10_000, max(1, int(limit)))
+        limit = min(100, max(1, int(limit)))
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute("""SELECT game_id,url,round_number,discovered_at,finished_at,cards_json,
