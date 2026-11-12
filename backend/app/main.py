@@ -203,13 +203,13 @@ async def probe_market():
 
 
 @app.get("/api/history")
-async def history(limit: int = 10_000):
-    """Read up to 10,000 completed Player hands and their saved pre-hand forecasts.
+async def history(limit: int = 100):
+    """Read up to 100 completed Player hands and their saved pre-hand forecasts.
 
     Kept separate from the frequent /api/state polling so live scanning does
     not serialize thousands of history entries every half-second.
     """
-    safe_limit = min(10_000, max(1, limit))
+    safe_limit = min(100, max(1, limit))
     return await asyncio.to_thread(browser_service.store.history, safe_limit)
 
 

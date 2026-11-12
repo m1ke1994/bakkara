@@ -610,13 +610,13 @@ def test_preview_handles_1440_to_1_without_modifying_saved_forecasts():
     assert all(p["predicted_suit"] == "spades" for p in previews)
 
 
-def test_observation_history_returns_two_hundred_completed_rounds(tmp_path):
+def test_observation_history_keeps_one_hundred_completed_rounds(tmp_path):
     store = ObservationStore(tmp_path / "history-200.sqlite3")
     for number in range(1, 211):
         add_round(store, number)
     rows = store.history(limit=200)
-    assert len(rows) == 200
-    assert len({row["game_id"] for row in rows}) == 200
+    assert len(rows) == 100
+    assert len({row["game_id"] for row in rows}) == 100
     assert all(len(row["player_cards"]) == 2 for row in rows)
 
 

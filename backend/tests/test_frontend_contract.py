@@ -60,7 +60,7 @@ def test_history_cells_are_compact_and_clear_buttons_use_separate_delete_routes(
     body = app.split('<tbody>', 1)[1].split('</tbody>', 1)[0]
     assert 'item.reason' not in body
     assert 'item.prediction_reason' not in body
-    assert 'Очистить историю' in app and "command('/api/observations', 'DELETE')" in app
+    assert 'Очистить всю историю и ставки' in app and "command('/api/observations', 'DELETE')" in app
     assert 'window.confirm(' in app
     assert 'Очистить логи' in app and "command('/api/logs', 'DELETE')" in app
 
@@ -82,19 +82,19 @@ def test_dashboard_has_two_numbered_suit_forecasts_immediately_above_history():
     assert 'История виртуальных результатов' not in template
 
 
-def test_history_supports_search_and_up_to_ten_thousand_rows_without_live_poll_bloat():
+def test_history_supports_search_and_up_to_100_rows_without_live_poll_bloat():
     app = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'App.vue').read_text(encoding='utf-8')
     main = (Path(__file__).resolve().parents[1] / 'app' / 'main.py').read_text(encoding='utf-8')
     cycle = (Path(__file__).resolve().parents[1] / 'app' / 'cycle18.py').read_text(encoding='utf-8')
     assert 'api}/api/history?limit=${isFull ? HISTORY_LIMIT : HISTORY_PAGE_SIZE}' in app
-    assert 'HISTORY_LIMIT = 10_000' in app
-    assert 'HISTORY_PAGE_SIZE = 200' in app
+    assert 'HISTORY_LIMIT = 100' in app
+    assert 'HISTORY_PAGE_SIZE = 100' in app
     assert 'historySearch' in app
     assert 'v-for="item in visibleHistory"' in app
     assert 'history-full-scroll' in app
     assert 'downloadHistoryCsv' in app
-    assert 'async def history(limit: int = 10_000)' in main
-    assert 'safe_limit = min(10_000, max(1, limit))' in main
+    assert 'async def history(limit: int = 100)' in main
+    assert 'safe_limit = min(100, max(1, limit))' in main
     assert '[-300:][::-1]' in cycle  # The frequent LIVE state poll stays small.
 
 

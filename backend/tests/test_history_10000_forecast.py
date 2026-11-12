@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.cycle18 import Cycle18Engine, STRATEGY_EIGHT
 from app.live_bets import LiveBets
-from app.observation import ObservationStore
+from app.observation import Game, ObservationStore
 
 
 def make_archive(tmp_path, count=1250):
@@ -66,17 +66,39 @@ def make_archive(tmp_path, count=1250):
     return store
 
 
-def test_history_returns_over_1000_hands_without_sqlite_variable_error(tmp_path):
+def test_history_keeps_latest_100_hands_on_reopen(tmp_path):
     store = make_archive(tmp_path)
+    store = ObservationStore(store.path)
     history = store.history(limit=10_000)
-    assert len(history) == 1250
+    assert len(history) == 100
     assert history[0]["game_id"] == "round-1250"
-    assert history[-1]["game_id"] == "round-1"
-    assert len({row["game_id"] for row in history}) == 1250
+    assert history[-1]["game_id"] == "round-1151"
+    assert len({row["game_id"] for row in history}) == 100
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 100
+        assert db.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] == 0
+
+
+def test_new_completed_hand_replaces_oldest_without_dropping_partial(tmp_path):
+    store = make_archive(tmp_path, count=100)
+    with sqlite3.connect(store.path) as db:
+        db.execute("""INSERT INTO observations
+            (game_id,url,discovered_at,cards_json,completeness)
+            VALUES('partial','https://example.invalid/partial',?,'[]','PARTIAL')""",
+            (datetime(2026, 10, 31, tzinfo=timezone.utc).isoformat(),))
+    game = Game("newest", "https://example.invalid/newest", "", "101", "finished", 0)
+    cards = [{"position": 1, "rank": "A", "suit": "hearts"},
+             {"position": 2, "rank": "K", "suit": "spades"}]
+    store.upsert(game, cards, "CONFIRMED", finished_confirmed=True,
+                 final_snapshot_reverified=True, player_hand_final=True)
+    assert len(store.history(limit=10_000)) == 100
+    assert store.get("round-1") is None
+    assert store.get("newest") is not None
+    assert store.get("partial") is not None
 
 
 def test_history_uses_saved_pre_hand_predictions_and_separates_live_bet(tmp_path):
-    store = make_archive(tmp_path)
+    store = make_archive(tmp_path, count=5)
     history = {item["game_id"]: item for item in store.history(limit=10_000)}
 
     original = history["round-1"]

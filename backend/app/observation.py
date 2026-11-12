@@ -549,6 +549,8 @@ def evaluate_prediction(
 
 
 class ObservationStore:
+    HISTORY_LIMIT = 100
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -665,6 +667,25 @@ class ObservationStore:
                 db.execute("INSERT INTO observation_migrations VALUES('draw_rule_v1')")
             self._backfill_legacy_calculations(db)
             db.execute("CREATE INDEX IF NOT EXISTS idx_observations_observed_at ON observations(observed_at)")
+            self._trim_completed_history(db)
+
+    @classmethod
+    def _trim_completed_history(cls, db: sqlite3.Connection) -> None:
+        """Keep the newest completed hands; leave unfinished games recoverable."""
+        old_ids = [row[0] for row in db.execute("""
+            SELECT game_id FROM observations
+            WHERE cards_json<>'[]' AND (player_hand_final=1 OR finished_at IS NOT NULL)
+            ORDER BY COALESCE(NULLIF(observed_at,''),last_scanned_at,discovered_at) DESC,
+                     discovered_at DESC, game_id DESC
+            LIMIT -1 OFFSET ?
+        """, (cls.HISTORY_LIMIT,)).fetchall()]
+        for start in range(0, len(old_ids), 400):
+            group = old_ids[start:start + 400]
+            placeholders = ",".join("?" for _ in group)
+            db.execute(f"DELETE FROM predictions WHERE source_game_id IN ({placeholders}) "
+                       f"OR target_game_id IN ({placeholders})", group + group)
+            db.execute(f"DELETE FROM observation_recovery WHERE game_id IN ({placeholders})", group)
+            db.execute(f"DELETE FROM observations WHERE game_id IN ({placeholders})", group)
 
     def clear_all(self) -> None:
         """Delete observation state without touching settings, auth, or other tables."""
@@ -1012,6 +1033,8 @@ class ObservationStore:
                 db.execute("""UPDATE observations SET baccarat_outcome=? WHERE game_id=?
                     AND baccarat_outcome NOT IN ('DRAW','PLAYER','BANKER')""",
                     (baccarat_outcome, game.game_id))
+            if merged_cards and (stored_finished or stored_hand_final):
+                self._trim_completed_history(db)
             return True
 
     def confirm_baccarat_outcome(
@@ -1094,7 +1117,7 @@ class ObservationStore:
 
     @staticmethod
     def _batched_game_ids(game_ids: list[str], size: int = 400):
-        """Avoid SQLite variable limits when retrieving 10,000 history entries."""
+        """Avoid SQLite variable limits when retrieving history entries."""
         for start in range(0, len(game_ids), size):
             yield game_ids[start:start + size]
 
@@ -1163,7 +1186,7 @@ class ObservationStore:
         return snapshots
 
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
-        limit = min(10_000, max(1, int(limit)))
+        limit = min(self.HISTORY_LIMIT, max(1, int(limit)))
         with sqlite3.connect(self.path) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute("""SELECT game_id,url,round_number,discovered_at,finished_at,cards_json,

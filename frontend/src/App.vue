@@ -174,8 +174,8 @@ const nextForecast = computed(() => cycle18.value.ready
 // Read-only outcomes: the selected strategy and the backend provide all WIN/LOSE data.
 const verifiedPredictionRows = computed(() => (cycle18.value.recent || [])
   .filter(item => ['WIN', 'LOSE'].includes(item.result)))
-const HISTORY_LIMIT = 10_000
-const HISTORY_PAGE_SIZE = 200
+const HISTORY_LIMIT = 100
+const HISTORY_PAGE_SIZE = 100
 const historyRows = ref([])
 const historyLoaded = ref(false)
 const historyLoading = ref(false)
@@ -206,7 +206,7 @@ async function refreshHistory(full = false) {
   historyLoading.value = true
   try {
     // The initial request loads the complete archive. Regular updates read
-    // only the newest 200 entries, never 10,000 every 10 seconds.
+    // only the newest 100 entries every 10 seconds.
     const isFull = full || !historyLoaded.value
     const response = await fetch(`${api}/api/history?limit=${isFull ? HISTORY_LIMIT : HISTORY_PAGE_SIZE}`)
     if (!response.ok) return
@@ -255,7 +255,7 @@ function downloadHistoryCsv() {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
-  anchor.download = 'bakkara-history-10000.csv'
+  anchor.download = 'bakkara-history-100.csv'
   anchor.click()
   URL.revokeObjectURL(url)
 }
@@ -679,7 +679,7 @@ onBeforeUnmount(() => {
         <p v-if="!cycle18.ready" class="diagnostic">Прогнозы появятся после {{ cycle18.warmup_required ?? 20 }} подтверждённых игр в сохранённой сессии.</p>
     </section>
     <section class="events history-panel" id="history">
-      <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Загружено {{ fullHistory.length }} раздач (лимит 10 000) · отображается {{ visibleHistory.length }} из {{ filteredHistory.length }}. {{ historyLoading ? 'Обновление…' : '' }}</p></div><div class="history-actions"><button class="secondary" :disabled="historyLoading" @click="refreshHistory(true)">Обновить всю историю</button><button class="secondary" :disabled="!fullHistory.length" @click="downloadHistoryCsv">Скачать CSV (с прогнозом)</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить всю историю и ставки</button></div></div>
+      <div class="section-title history-heading"><div><h2>История раздач</h2><p class="diagnostic">Загружено {{ fullHistory.length }} раздач (лимит 100) · отображается {{ visibleHistory.length }} из {{ filteredHistory.length }}. {{ historyLoading ? 'Обновление…' : '' }}</p></div><div class="history-actions"><button class="secondary" :disabled="historyLoading" @click="refreshHistory(true)">Обновить всю историю</button><button class="secondary" :disabled="!fullHistory.length" @click="downloadHistoryCsv">Скачать CSV (с прогнозом)</button><button class="secondary" :disabled="busy" @click="clearHistory">Очистить всю историю и ставки</button></div></div>
       <label class="field history-search">Поиск по номеру, ID, картам и мастям
         <input v-model="historySearch" type="search" placeholder="Например: 600 или A♥" />
       </label>
