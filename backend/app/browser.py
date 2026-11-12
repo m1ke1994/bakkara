@@ -825,6 +825,15 @@ class BrowserService:
             watcher.cancel()
         if watchers:
             await asyncio.gather(*(watcher for _page, watcher in watchers), return_exceptions=True)
+            # A cancelled outcome watcher normally closes its page in finally.
+            # Close any surviving pages explicitly as a second line of defence,
+            # including when a watcher failed before reaching that finally.
+            for old_page, _watcher in watchers:
+                try:
+                    if not old_page.is_closed():
+                        await old_page.close()
+                except Exception as exc:
+                    self.event("WARNING", f"Не удалось закрыть вкладку завершённого наблюдателя: {type(exc).__name__}.")
         getattr(self, "_outcome_watchers", {}).clear()
         settlement, self._pending_live_settlement = getattr(self, "_pending_live_settlement", None), None
         if settlement is not None:
