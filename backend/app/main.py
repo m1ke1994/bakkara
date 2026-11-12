@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import logging
+import time
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -46,12 +47,59 @@ class FirstRoundTestSelection(BaseModel):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
+async def browser_recycle_watchdog() -> None:
+    """Recreate the Playwright browser after three hours of browser uptime."""
+    context_id = None
+    launched_at = None
+    while True:
+        await asyncio.sleep(10)
+        context = browser_service.context
+        if context is None:
+            context_id, launched_at = None, None
+            continue
+        if id(context) != context_id:
+            context_id, launched_at = id(context), time.monotonic()
+            continue
+        if launched_at is None or time.monotonic() - launched_at < 3 * 60 * 60:
+            continue
+
+        observing = bool(browser_service.observation_task
+                         and not browser_service.observation_task.done())
+        context_id, launched_at = None, None
+        logging.getLogger(__name__).warning("Scheduled three-hour Chromium recycle")
+        try:
+            await asyncio.wait_for(browser_service.stop(), timeout=60)
+            await asyncio.to_thread(cycle18_engine.stop_session)
+            await asyncio.wait_for(browser_service.start(), timeout=90)
+            if browser_service.context is None:
+                raise RuntimeError("Chromium did not start")
+            if observing:
+                for _ in range(60):
+                    if browser_service.authorization in ("AUTHORIZED", "TEMPORARILY_UNCONFIRMED", "PUBLIC_VIEW"):
+                        break
+                    await asyncio.sleep(2)
+                else:
+                    logging.getLogger(__name__).warning("Browser restarted but authorization missing")
+                    continue
+                await asyncio.to_thread(cycle18_engine.start_session, resume=True)
+                await browser_service.start_observation()
+            logging.getLogger(__name__).info("Scheduled Chromium recycle completed")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Chromium recycle failed; an external supervisor may be required")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     dashboard_auth.validate()
+    maintenance = asyncio.create_task(browser_recycle_watchdog())
     try:
         yield
     finally:
+        maintenance.cancel()
+        await asyncio.gather(maintenance, return_exceptions=True)
         await browser_service.stop()
         await asyncio.to_thread(cycle18_engine.stop_session)
 
@@ -260,13 +308,13 @@ async def probe_market():
 
 
 @app.get("/api/history")
-async def history(limit: int = 10_000):
-    """Read up to 10,000 completed Player hands and their saved pre-hand forecasts.
+async def history(limit: int = 100):
+    """Read up to 100 completed Player hands and their saved pre-hand forecasts.
 
     Kept separate from the frequent /api/state polling so live scanning does
     not serialize thousands of history entries every half-second.
     """
-    safe_limit = min(10_000, max(1, limit))
+    safe_limit = min(100, max(1, limit))
     return await asyncio.to_thread(browser_service.store.history, safe_limit)
 
 
